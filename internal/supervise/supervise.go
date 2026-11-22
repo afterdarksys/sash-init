@@ -56,6 +56,7 @@ type Supervisor struct {
 	mu            sync.Mutex
 	ln            *net.UnixListener
 	bound         string
+	lock          *os.File // flock on bound + ".lock", held while bound
 	serving       atomic.Bool
 	shuttingDown  atomic.Bool
 	RestartBurst  int

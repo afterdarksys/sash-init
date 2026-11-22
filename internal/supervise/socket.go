@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/afterdarksys/sahinit/internal/frame"
 	"github.com/afterdarksys/sahinit/internal/jsonobj"
 	"github.com/afterdarksys/sahinit/internal/unit"
+	"golang.org/x/sys/unix"
 )
 
 var reqKeys = map[string]struct{}{
@@ -28,49 +30,125 @@ type response struct {
 
 // Listen binds a local stream unix socket. The mode follows the allowlist:
 // 0600 when only the supervisor's own uid may connect, otherwise 0660 with
-// group SocketGID, which must then be set (socket_group). A leftover socket
-// is removed only when it is a socket, owned by our uid, and refuses a
-// connect; anything else at the path is left in place (socket_exists).
+// group SocketGID, which must then be set (socket_group). The parent
+// directory must be trusted like an executable's (socket_perm). An exclusive
+// lock on PATH.lock is taken first and held until Close; a second supervisor
+// is refused with socket_busy. A leftover socket is removed only when it is
+// a socket, owned by our uid, and refuses a connect; anything else at the
+// path is left in place (socket_exists).
 //
 // Threats: the mode is a first gate only; every request is still checked
-// against the allowlist by peer credentials. A live socket, another uid's
-// socket, or a non-socket is never removed, so a second supervisor cannot
-// take over a running one's path.
+// against the allowlist by peer credentials. The socket is bound, chmodded
+// and chowned inside a fresh 0700 directory and then hard-linked into place,
+// so its mode is set before anyone can reach it and no chmod ever follows a
+// link at PATH. A live socket, another uid's socket, or a non-socket is
+// never removed, and the lock stops two supervisors from both judging one
+// socket stale.
 func (sup *Supervisor) Listen(path string) error {
-	if path == "" {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return fail.E("failed")
 	}
 	mode, gid, err := sup.socketMode()
 	if err != nil {
 		return err
 	}
-	if fi, err := os.Lstat(path); err == nil {
-		if !staleSocket(path, fi) {
-			return fail.E("socket_exists")
-		}
-		if err := os.Remove(path); err != nil {
-			return fail.E("failed")
-		}
-	} else if !os.IsNotExist(err) {
-		return fail.E("failed")
-	}
-	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	dir, err := unit.TrustedDir(filepath.Dir(path))
 	if err != nil {
-		return fail.E("failed")
+		return fail.E("socket_perm")
 	}
-	if err := setSocketPerm(path, mode, gid); err != nil {
-		cerr := ln.Close()
-		rerr := os.Remove(path)
-		if cerr != nil || (rerr != nil && !os.IsNotExist(rerr)) {
-			return fail.E("failed")
-		}
-		return fail.E("failed")
+	path = filepath.Join(dir, filepath.Base(path))
+	lock, err := lockSocket(path + ".lock")
+	if err != nil {
+		return err
+	}
+	ln, err := bindSocket(path, mode, gid)
+	if err != nil {
+		unlockSocket(lock)
+		return err
 	}
 	sup.mu.Lock()
 	sup.ln = ln
 	sup.bound = path
+	sup.lock = lock
 	sup.mu.Unlock()
 	return nil
+}
+
+func bindSocket(path string, mode os.FileMode, gid int) (*net.UnixListener, error) {
+	if fi, err := os.Lstat(path); err == nil {
+		if !staleSocket(path, fi) {
+			return nil, fail.E("socket_exists")
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, fail.E("failed")
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fail.E("failed")
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(path), ".s")
+	if err != nil {
+		return nil, fail.E("failed")
+	}
+	defer os.RemoveAll(tmp)
+	private := tmp + "/s"
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: private, Net: "unix"})
+	if err != nil {
+		return nil, fail.E("failed")
+	}
+	ln.SetUnlinkOnClose(false)
+	if err := setSocketPerm(private, mode, gid); err != nil {
+		ln.Close()
+		return nil, fail.E("failed")
+	}
+	if err := os.Link(private, path); err != nil {
+		ln.Close()
+		if errors.Is(err, os.ErrExist) {
+			return nil, fail.E("socket_exists")
+		}
+		return nil, fail.E("failed")
+	}
+	return ln, nil
+}
+
+// lockSocket takes an exclusive lock on a private lock file beside the
+// socket. A lock file that is not ours is socket_exists; a held lock is
+// socket_busy. The open file must still be the one at the path after the
+// lock is taken, since Close unlinks it.
+func lockSocket(path string) (*os.File, error) {
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0o600)
+	if err != nil {
+		return nil, fail.E("socket_exists")
+	}
+	f := os.NewFile(uintptr(fd), path)
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Uid != uint32(os.Geteuid()) || st.Mode&0o077 != 0 || st.Nlink != 1 {
+		f.Close()
+		return nil, fail.E("socket_exists")
+	}
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fail.E("socket_busy")
+	}
+	var now unix.Stat_t
+	if err := unix.Lstat(path, &now); err != nil || now.Dev != st.Dev || now.Ino != st.Ino {
+		f.Close()
+		return nil, fail.E("socket_busy")
+	}
+	return f, nil
+}
+
+// unlockSocket removes the lock file while still holding the lock, then
+// releases it.
+func unlockSocket(f *os.File) error {
+	if f == nil {
+		return nil
+	}
+	rerr := os.Remove(f.Name())
+	cerr := f.Close()
+	if rerr != nil && !os.IsNotExist(rerr) {
+		return rerr
+	}
+	return cerr
 }
 
 // socketMode returns the socket mode and group (-1 for none).
@@ -118,8 +196,10 @@ func (sup *Supervisor) Close() error {
 	sup.mu.Lock()
 	ln := sup.ln
 	path := sup.bound
+	lock := sup.lock
 	sup.ln = nil
 	sup.bound = ""
+	sup.lock = nil
 	sup.mu.Unlock()
 	var first error
 	if ln != nil {
@@ -131,6 +211,9 @@ func (sup *Supervisor) Close() error {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) && first == nil {
 			first = err
 		}
+	}
+	if err := unlockSocket(lock); err != nil && first == nil {
+		first = err
 	}
 	if first != nil {
 		return fail.E("failed")

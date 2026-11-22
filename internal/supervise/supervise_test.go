@@ -843,7 +843,7 @@ func TestSocketMode(t *testing.T) {
 	if fi.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %o", fi.Mode().Perm())
 	}
-	if err := sup.Listen(path); fail.Token(err) != "socket_exists" {
+	if err := sup.Listen(path); fail.Token(err) != "socket_busy" {
 		t.Fatal(err)
 	}
 	if err := sup.Close(); err != nil {

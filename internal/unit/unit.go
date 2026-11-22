@@ -203,6 +203,23 @@ func ResolveTrusted(p string) (string, error) {
 	return cur, nil
 }
 
+// TrustedDir resolves dir with ResolveTrusted and checks the directory
+// itself by the same rule (exec_perm when it fails).
+func TrustedDir(dir string) (string, error) {
+	r, err := ResolveTrusted(dir)
+	if err != nil {
+		return "", err
+	}
+	st, err := os.Lstat(r)
+	if err != nil || !st.IsDir() {
+		return "", fail.E("exec_not_file")
+	}
+	if !ownedPerm(st, true) {
+		return "", fail.E("exec_perm")
+	}
+	return r, nil
+}
+
 func splitPath(p string) []string {
 	var out []string
 	for _, part := range strings.Split(p, "/") {
