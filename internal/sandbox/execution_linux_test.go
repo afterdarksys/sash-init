@@ -85,7 +85,7 @@ func TestExecutionIdentityLinux(t *testing.T) {
 				if lines[2] != expected {
 					t.Fatalf("groups %q, want %q", lines[2], expected)
 				}
-				if sandboxed && claim != claimFull {
+				if sandboxed && claim != SandboxClaim(min(landlockABI(), MaxLandlockABI)) {
 					t.Fatal(claim)
 				}
 			}

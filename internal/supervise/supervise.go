@@ -29,7 +29,6 @@ import (
 
 const (
 	claimNone = "none"
-	claimFull = "no_new_privs,landlock,caps"
 
 	defaultBurst  = 5
 	defaultWindow = 30 * time.Second
@@ -517,11 +516,11 @@ func (sup *Supervisor) launch(ctx context.Context, s *runtime, argv []string, ge
 		sup.failLaunch(s, gen, err)
 		return err
 	}
-	want := claimNone
+	claimOK := claim == claimNone
 	if s.svc.Sandbox != nil {
-		want = claimFull
+		claimOK = sandbox.IsSandboxClaim(claim)
 	}
-	if claim != want || cmd == nil || cmd.Process == nil {
+	if !claimOK || cmd == nil || cmd.Process == nil {
 		if cerr := killCollected(cmd, notifyR); cerr != nil {
 			sup.failLaunch(s, gen, fail.E("failed"))
 			return fail.E("failed")

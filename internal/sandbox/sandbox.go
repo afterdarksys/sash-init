@@ -2,7 +2,8 @@
 //
 // Threats: sandbox setup runs in a fresh process so a multithreaded parent
 // is not restricted. openat2 failure, landlock rejection, and capset failure
-// skip exec. The status claim lists only mechanisms that returned success.
+// skip exec. The status claim lists only mechanisms that returned success,
+// with the Landlock ABI that was applied.
 // No path is granted MAKE_SYM. The spec cannot name the executable.
 // Network is not confined in v1.
 package sandbox
@@ -12,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -22,10 +24,28 @@ import (
 
 const (
 	claimNone = "none"
-	claimFull = "no_new_privs,landlock,caps"
 	maxArgv   = 32
 	maxArg    = 256
+
+	// MaxLandlockABI is the newest Landlock ABI whose access rights this
+	// package knows. A newer kernel is used at this ABI.
+	MaxLandlockABI = 5
 )
+
+// SandboxClaim is the status claim for a sandbox applied at a Landlock ABI.
+func SandboxClaim(abi int) string {
+	return "no_new_privs,landlock_v" + strconv.Itoa(abi) + ",caps"
+}
+
+// IsSandboxClaim reports whether claim is a sandbox claim for a known ABI.
+func IsSandboxClaim(claim string) bool {
+	for abi := 1; abi <= MaxLandlockABI; abi++ {
+		if claim == SandboxClaim(abi) {
+			return true
+		}
+	}
+	return false
+}
 
 // Launch starts argv[0]. A nil sandbox is a direct exec and claims "none".
 // A sandbox is applied in a re-exec of self. claim is empty when err != nil.

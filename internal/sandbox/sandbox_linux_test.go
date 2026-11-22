@@ -44,7 +44,7 @@ func runProbe() {
 	deny := os.Getenv("SAHINIT_PROBE_DENY")
 	sym := os.Getenv("SAHINIT_PROBE_SYM")
 	sb := &unit.Sandbox{NoNewPrivs: true, ReadWrite: []string{rw}}
-	h, err := restrict(sb)
+	h, _, err := restrict(sb)
 	if err != nil {
 		unix.Exit(1)
 	}
@@ -234,12 +234,12 @@ func TestChildStatusWaitsForExec(t *testing.T) {
 			result := make(chan error, 1)
 			go func() {
 				claim, err := readChildStatus(context.Background(), r, time.Second)
-				if err == nil && claim != claimFull {
+				if err == nil && claim != SandboxClaim(3) {
 					err = fmt.Errorf("claim %q", claim)
 				}
 				result <- err
 			}()
-			if _, err := w.Write(okLine); err != nil {
+			if _, err := w.Write(okLine(3)); err != nil {
 				t.Fatal(err)
 			}
 			select {
@@ -288,7 +288,7 @@ func TestLaunchSandboxedExecFailure(t *testing.T) {
 	if err := cmd.Wait(); err != nil {
 		t.Fatal(err)
 	}
-	if claim != claimFull {
+	if claim != SandboxClaim(min(landlockABI(), MaxLandlockABI)) {
 		t.Fatalf("claim %q", claim)
 	}
 	cmd, claim, _, err = Launch(context.Background(), self, []string{target}, sb, false, time.Second, Options{Execution: ident})

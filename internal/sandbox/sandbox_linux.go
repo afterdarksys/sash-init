@@ -35,6 +35,26 @@ const (
 	// execPathFD runs the exec fd of a direct launch.
 	execPathFD = "/proc/self/fd/4"
 
+	// Landlock ABI 1 file rights. ABI 2 adds REFER, ABI 3 TRUNCATE, ABI 5
+	// IOCTL_DEV (ABI 4 adds only network rights).
+	accessV1 = unix.LANDLOCK_ACCESS_FS_EXECUTE |
+		unix.LANDLOCK_ACCESS_FS_WRITE_FILE |
+		unix.LANDLOCK_ACCESS_FS_READ_FILE |
+		unix.LANDLOCK_ACCESS_FS_READ_DIR |
+		unix.LANDLOCK_ACCESS_FS_REMOVE_DIR |
+		unix.LANDLOCK_ACCESS_FS_REMOVE_FILE |
+		unix.LANDLOCK_ACCESS_FS_MAKE_CHAR |
+		unix.LANDLOCK_ACCESS_FS_MAKE_DIR |
+		unix.LANDLOCK_ACCESS_FS_MAKE_REG |
+		unix.LANDLOCK_ACCESS_FS_MAKE_SOCK |
+		unix.LANDLOCK_ACCESS_FS_MAKE_FIFO |
+		unix.LANDLOCK_ACCESS_FS_MAKE_BLOCK |
+		unix.LANDLOCK_ACCESS_FS_MAKE_SYM
+	// accessOptional is granted only when the ABI handles it. An ABI that
+	// does not handle a right leaves that operation unrestricted, so a
+	// read_write grant still holds without it.
+	accessOptional = unix.LANDLOCK_ACCESS_FS_TRUNCATE
+
 	accessRead = unix.LANDLOCK_ACCESS_FS_EXECUTE |
 		unix.LANDLOCK_ACCESS_FS_READ_FILE |
 		unix.LANDLOCK_ACCESS_FS_READ_DIR
@@ -58,10 +78,7 @@ const (
 // errExec is the post-status failure. It is compared with == and never wrapped.
 var errExec = errors.New("exec")
 
-var (
-	okLine   []byte
-	errLines map[string][]byte
-)
+var errLines map[string][]byte
 
 var specKeys = map[string]struct{}{
 	"no_new_privs": {}, "read_only_paths": {}, "read_write_paths": {}, "caps": {},
@@ -70,12 +87,15 @@ var specKeys = map[string]struct{}{
 
 var childTokens = map[string]struct{}{
 	"sandbox_cap": {}, "sandbox_path": {}, "sandbox_privs": {}, "sandbox_overlap": {},
-	"openat2_unavailable": {}, "landlock_unavailable": {},
+	"openat2_unavailable": {}, "landlock_unavailable": {}, "landlock_abi": {},
 	"exec_relative": {}, "exec_not_file": {}, "failed": {}, "sandbox_root": {},
 }
 
+func okLine(abi int) []byte {
+	return []byte("{\"ok\":true,\"claim\":\"" + SandboxClaim(abi) + "\"}\n")
+}
+
 func init() {
-	okLine = []byte("{\"ok\":true,\"claim\":\"" + claimFull + "\"}\n")
 	errLines = make(map[string][]byte, len(childTokens)+1)
 	for tok := range childTokens {
 		errLines[tok] = []byte("{\"ok\":false,\"error\":\"" + tok + "\",\"claim\":\"\"}\n")
@@ -140,7 +160,7 @@ func ApplyCLI(args []string) int {
 		env = append(env, "SAHINIT_READY_FD=3")
 	}
 	argv = append([]string{}, argv...)
-	h, err := restrict(sb)
+	h, abi, err := restrict(sb)
 	cerr := closeHeld(h)
 	if err != nil {
 		return writeStatus(fail.Token(err))
@@ -148,7 +168,7 @@ func ApplyCLI(args []string) int {
 	if cerr != nil {
 		return writeStatus("failed")
 	}
-	if err := writeFD(fdStatus, okLine); err != nil {
+	if err := writeFD(fdStatus, okLine(abi)); err != nil {
 		return 1
 	}
 	if err := execTarget(argv, env); err == errExec {
@@ -363,33 +383,85 @@ func openExec(p string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), p), nil
 }
 
+// landlockABI asks the kernel for its Landlock ABI version.
+func landlockABI() int {
+	r1, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, unix.LANDLOCK_CREATE_RULESET_VERSION)
+	if errno != 0 {
+		return 0
+	}
+	return int(r1)
+}
+
+// landlockAccess returns the file rights to handle at a kernel ABI, and the
+// ABI applied (the kernel's, capped at MaxLandlockABI). Only rights the ABI
+// knows are requested, as the Landlock documentation recommends. Each want
+// is a set of rights a grant needs; a want the ABI cannot express is
+// landlock_abi. No ABI at all is landlock_unavailable.
+func landlockAccess(abi int, wants ...uint64) (uint64, int, error) {
+	if abi < 1 {
+		return 0, 0, fail.E("landlock_unavailable")
+	}
+	if abi > MaxLandlockABI {
+		abi = MaxLandlockABI
+	}
+	known := uint64(accessV1)
+	if abi >= 2 {
+		known |= unix.LANDLOCK_ACCESS_FS_REFER
+	}
+	if abi >= 3 {
+		known |= unix.LANDLOCK_ACCESS_FS_TRUNCATE
+	}
+	if abi >= 5 {
+		known |= unix.LANDLOCK_ACCESS_FS_IOCTL_DEV
+	}
+	for _, want := range wants {
+		if want&^known != 0 {
+			return 0, 0, fail.E("landlock_abi")
+		}
+	}
+	return accessHandled & known, abi, nil
+}
+
 // restrict opens paths, drops privileges, and landlocks the calling thread.
 // no_new_privs is set before landlock_restrict_self. Fds are left open for
-// the caller to close before any success status is written.
-func restrict(sb *unit.Sandbox) (*held, error) {
+// the caller to close before any success status is written. It returns the
+// Landlock ABI applied.
+//
+// Threats: on an older kernel the rights it does not know stay unrestricted
+// (for TRUNCATE before ABI 3, truncate(2) anywhere the uid may write); every
+// right a grant needs is still enforced or the launch is refused.
+func restrict(sb *unit.Sandbox) (*held, int, error) {
 	if sb == nil || !sb.NoNewPrivs {
-		return nil, fail.E("sandbox_privs")
+		return nil, 0, fail.E("sandbox_privs")
 	}
 	h := &held{ruleset: -1}
 	for _, p := range sb.ReadOnly {
 		fd, err := openNoSym(p)
 		if err != nil {
-			return h, err
+			return h, 0, err
 		}
 		h.paths = append(h.paths, pathFD{fd: fd, rw: false})
 	}
 	for _, p := range sb.ReadWrite {
 		fd, err := openNoSym(p)
 		if err != nil {
-			return h, err
+			return h, 0, err
 		}
 		h.paths = append(h.paths, pathFD{fd: fd, rw: true})
 	}
-	attr := unix.LandlockRulesetAttr{Access_fs: accessHandled}
+	wants := []uint64{accessRead}
+	if len(sb.ReadWrite) > 0 {
+		wants = append(wants, accessWrite&^accessOptional)
+	}
+	handled, abi, err := landlockAccess(landlockABI(), wants...)
+	if err != nil {
+		return h, 0, err
+	}
+	attr := unix.LandlockRulesetAttr{Access_fs: handled}
 	r1, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr), 0)
 	runtime.KeepAlive(&attr)
 	if errno != 0 {
-		return h, fail.E("landlock_unavailable")
+		return h, 0, fail.E("landlock_unavailable")
 	}
 	h.ruleset = int(r1)
 	for _, p := range h.paths {
@@ -397,27 +469,28 @@ func restrict(sb *unit.Sandbox) (*held, error) {
 		if p.rw {
 			access = uint64(accessWrite)
 		}
+		access &= handled
 		rule := unix.LandlockPathBeneathAttr{Allowed_access: access, Parent_fd: int32(p.fd)}
 		_, _, errno = unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE, uintptr(h.ruleset), uintptr(unix.LANDLOCK_RULE_PATH_BENEATH), uintptr(unsafe.Pointer(&rule)), 0, 0, 0)
 		runtime.KeepAlive(&rule)
 		if errno != 0 {
-			return h, fail.E("landlock_unavailable")
+			return h, 0, fail.E("landlock_unavailable")
 		}
 	}
 	if err := dropCaps(sb.Caps); err != nil {
-		return h, err
+		return h, 0, err
 	}
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
-		return h, fail.E("failed")
+		return h, 0, fail.E("failed")
 	}
 	if err := unix.Prctl(unix.PR_CAP_AMBIENT, uintptr(unix.PR_CAP_AMBIENT_CLEAR_ALL), 0, 0, 0); err != nil {
-		return h, fail.E("failed")
+		return h, 0, fail.E("failed")
 	}
 	_, _, errno = unix.Syscall(unix.SYS_LANDLOCK_RESTRICT_SELF, uintptr(h.ruleset), 0, 0)
 	if errno != 0 {
-		return h, fail.E("landlock_unavailable")
+		return h, 0, fail.E("landlock_unavailable")
 	}
-	return h, nil
+	return h, abi, nil
 }
 
 func openNoSym(p string) (int, error) {
@@ -695,8 +768,8 @@ func parseStatus(line []byte) (string, error) {
 		return "", fail.E("failed")
 	}
 	if st.OK {
-		if st.Error == "" && st.Claim == claimFull {
-			return claimFull, nil
+		if st.Error == "" && IsSandboxClaim(st.Claim) {
+			return st.Claim, nil
 		}
 		return "", fail.E("failed")
 	}
