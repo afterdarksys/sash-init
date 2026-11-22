@@ -1043,7 +1043,7 @@ func TestSocketFailClosed(t *testing.T) {
 	if _, raw = rpc(t, path, `{"op":"stop","name":"agent"}`); !strings.Contains(string(raw), `"state":"stopped"`) {
 		t.Fatalf("%s", raw)
 	}
-	wantExact(t, path, `{"op":"stop","name":"agent"}`, `{"ok":true,"error":"","rows":[`+stoppedRow("agent", "none")+`]}`)
+	wantExact(t, path, `{"op":"stop","name":"agent"}`, `{"ok":true,"error":"","rows":[`+stoppedRow("agent", "")+`]}`)
 	resp, raw = rpc(t, path, `{"op":"restart","name":"agent"}`)
 	if !resp.OK || resp.Error != "" || len(resp.Rows) != 1 || resp.Rows[0].State != "running" || !resp.Rows[0].Ready || resp.Rows[0].Sandbox != "none" || resp.Rows[0].Pid <= 0 {
 		t.Fatalf("%s", raw)

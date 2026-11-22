@@ -25,7 +25,37 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "apply" {
 		os.Exit(sandbox.ApplyCLI(os.Args[1:]))
 	}
+	if sock := os.Getenv("SAHT_CLIENT_SOCK"); sock != "" {
+		os.Exit(socketClient(sock, os.Getenv("SAHT_CLIENT_OUT")))
+	}
 	os.Exit(m.Run())
+}
+
+// socketClient runs inside a supervised service: one status request, with
+// the raw response written to out.
+func socketClient(sock, out string) int {
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		return 3
+	}
+	defer c.Close()
+	if err := c.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		return 3
+	}
+	if err := frame.Write(c, []byte(`{"op":"status"}`)); err != nil {
+		return 3
+	}
+	raw, err := frame.Read(c)
+	if err != nil {
+		return 3
+	}
+	if err := os.WriteFile(out+".tmp", raw, 0o600); err != nil {
+		return 3
+	}
+	if err := os.Rename(out+".tmp", out); err != nil {
+		return 3
+	}
+	return 0
 }
 
 var pathSeq atomic.Uint64

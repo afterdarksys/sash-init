@@ -9,12 +9,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func peerUID(conn *net.UnixConn) (uint32, error) {
+// peerCred returns the peer's uid and pid from SO_PEERCRED. A pid of 0 (a
+// peer in another pid namespace) is returned as is; the caller refuses it.
+func peerCred(conn *net.UnixConn) (uint32, int, error) {
 	raw, err := conn.SyscallConn()
 	if err != nil {
-		return 0, fail.E("uid_denied")
+		return 0, 0, fail.E("uid_denied")
 	}
 	var uid uint32
+	var pid int
 	var got bool
 	var credErr error
 	if err := raw.Control(func(fd uintptr) {
@@ -24,12 +27,13 @@ func peerUID(conn *net.UnixConn) (uint32, error) {
 			return
 		}
 		uid = cred.Uid
+		pid = int(cred.Pid)
 		got = true
 	}); err != nil {
-		return 0, fail.E("uid_denied")
+		return 0, 0, fail.E("uid_denied")
 	}
 	if credErr != nil || !got {
-		return 0, fail.E("uid_denied")
+		return 0, 0, fail.E("uid_denied")
 	}
-	return uid, nil
+	return uid, pid, nil
 }

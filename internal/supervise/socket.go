@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"syscall"
 	"time"
 
 	"github.com/afterdarksys/sahinit/internal/fail"
@@ -117,9 +118,13 @@ func (sup *Supervisor) Serve() error {
 
 func (sup *Supervisor) rejectFull(conn *net.UnixConn) {
 	defer conn.Close()
-	uid, err := peerUID(conn)
+	uid, pid, err := peerCred(conn)
 	if err != nil || !sup.allowed(uid) {
 		sup.writeResp(conn, response{OK: false, Error: "uid_denied"})
+		return
+	}
+	if sup.supervisedPeer(pid) {
+		sup.writeResp(conn, response{OK: false, Error: "peer_supervised"})
 		return
 	}
 	sup.writeResp(conn, response{OK: false, Error: "busy"})
@@ -134,10 +139,16 @@ func (sup *Supervisor) handle(conn *net.UnixConn) {
 	if err := conn.SetReadDeadline(time.Now().Add(dl)); err != nil {
 		return
 	}
-	uid, uidErr := peerUID(conn)
+	uid, pid, uidErr := peerCred(conn)
 	payload, readErr := frame.Read(conn)
 	if uidErr != nil || !sup.allowed(uid) {
 		sup.writeResp(conn, response{OK: false, Error: "uid_denied"})
+		return
+	}
+	// Checked when the request is acted on, after the frame is read, so a
+	// service started after the peer connected is still caught.
+	if sup.supervisedPeer(pid) {
+		sup.writeResp(conn, response{OK: false, Error: "peer_supervised"})
 		return
 	}
 	if readErr != nil {
@@ -209,6 +220,32 @@ func (sup *Supervisor) mutResp(name string, err error) response {
 	}
 	resp.Rows = rows
 	return resp
+}
+
+// supervisedPeer reports whether pid is in the process group of a running
+// service. Each service leads its own group, so the group id is the service
+// pid. An unknown pid (0, or a process that is gone) counts as supervised.
+//
+// Threats: a service with an allowed uid could otherwise stop or restart
+// other services. A service that leaves its group with setsid or setpgid is
+// not caught here; that needs cgroups (batch 2).
+func (sup *Supervisor) supervisedPeer(pid int) bool {
+	if pid <= 0 {
+		return true
+	}
+	pgid, err := syscall.Getpgid(pid)
+	if err != nil {
+		return true
+	}
+	for _, s := range sup.rt {
+		s.mu.Lock()
+		svc := s.pid
+		s.mu.Unlock()
+		if svc > 0 && (svc == pgid || svc == pid) {
+			return true
+		}
+	}
+	return false
 }
 
 func (sup *Supervisor) allowed(uid uint32) bool {

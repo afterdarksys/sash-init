@@ -2,7 +2,8 @@
 //
 // Threats: the control socket is local and uid-gated. A denied peer is
 // refused before the body is acted on, and a peer-cred failure denies the
-// caller. The supervisor holds no keys, does not understand leases, and does
+// caller. A peer inside a running service's process group is refused
+// (peer_supervised), so a service cannot drive the supervisor. The supervisor holds no keys, does not understand leases, and does
 // not log oneshot arguments. A sandbox claim is stored only when Launch
 // returns it. Stop signals the process group. This package does not confine
 // the network beyond the sandbox package and does not check leases.
@@ -349,16 +350,22 @@ func (sup *Supervisor) Status(name string) ([]Row, error) {
 	return []Row{s.row()}, nil
 }
 
+// row reports the sandbox claim only while a process holds it: a stopped,
+// exited, or failed service has no sandbox, whatever it had before.
 func (s *runtime) row() Row {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	sandbox := s.sandbox
+	if s.pid <= 0 {
+		sandbox = ""
+	}
 	return Row{
 		Name:      s.svc.Name,
 		State:     s.state,
 		Pid:       s.pid,
 		Ready:     s.ready,
 		Restarts:  s.restarts,
-		Sandbox:   s.sandbox,
+		Sandbox:   sandbox,
 		LastError: s.lastError,
 	}
 }
