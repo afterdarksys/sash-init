@@ -15,6 +15,7 @@ import (
 	"errors"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
@@ -79,6 +80,9 @@ type Service struct {
 	Boot      bool
 	Sandbox   *Sandbox
 	Execution Execution
+	// Path is Exec[0] resolved and checked by Load. It is empty when that
+	// failed at load; the launch then resolves and checks Exec[0] itself.
+	Path string
 }
 
 // Sandbox is present only when the unit named a sandbox object.
@@ -109,13 +113,78 @@ func ExecPath(p string) error {
 	return nil
 }
 
-// ExecFile checks the path at start time. A symlink is not a regular file.
+// ExecFile resolves p and checks the target, as ResolveExec does.
 func ExecFile(p string) error {
+	_, err := ResolveExec(p)
+	return err
+}
+
+// ResolveExec follows symlinks in p once and checks the result with
+// CheckExec. It returns the resolved path, which is what must be run.
+//
+// Threats: links such as /bin/sh -> dash or /etc/alternatives entries are
+// followed once, here; the caller runs the resolved path and never resolves
+// the link again, so a link swapped later does not change what runs.
+func ResolveExec(p string) (string, error) {
+	if err := ExecPath(p); err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return "", fail.E("exec_not_file")
+	}
+	if err := CheckExec(resolved); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+// CheckExec checks an already resolved path without following any link.
+// The file must be a regular executable file. It and every parent directory
+// up to / must be owned by root or the supervisor's own uid and not writable
+// by group or other; a parent directory with the sticky bit (such as /tmp)
+// may be writable by others, since they cannot rename or remove entries they
+// do not own. A link anywhere in the path is exec_not_file; a bad owner or
+// mode is exec_perm.
+//
+// Threats: with every component writable only by root or the supervisor,
+// nobody else can replace the file between this check and exec. On Linux the
+// caller also execs the file through an fd it checks again with fstat.
+func CheckExec(p string) error {
+	if err := ExecPath(p); err != nil {
+		return err
+	}
 	st, err := os.Lstat(p)
 	if err != nil || !st.Mode().IsRegular() || st.Mode()&0o111 == 0 {
 		return fail.E("exec_not_file")
 	}
-	return nil
+	if !ownedPerm(st, false) {
+		return fail.E("exec_perm")
+	}
+	for dir := path.Dir(p); ; dir = path.Dir(dir) {
+		st, err := os.Lstat(dir)
+		if err != nil || !st.IsDir() {
+			return fail.E("exec_not_file")
+		}
+		if !ownedPerm(st, true) {
+			return fail.E("exec_perm")
+		}
+		if dir == "/" {
+			return nil
+		}
+	}
+}
+
+func ownedPerm(st os.FileInfo, stickyOK bool) bool {
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+	perm := uint32(st.Mode().Perm())
+	if stickyOK && st.Mode()&os.ModeSticky != 0 {
+		perm &^= 0o022
+	}
+	return trustedOwner(sys.Uid, perm)
 }
 
 // Load reads every unit in dir. The directory itself must not be a symlink,
@@ -174,6 +243,9 @@ func Load(dir string) (svcs map[string]*Service, refused map[string]string, err 
 		}
 		if _, exists := out[svc.Name]; exists {
 			return nil, nil, fail.E("duplicate_field")
+		}
+		if resolved, err := ResolveExec(svc.Exec[0]); err == nil {
+			svc.Path = resolved
 		}
 		out[svc.Name] = svc
 	}

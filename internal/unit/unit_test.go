@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -220,7 +221,15 @@ func TestExecFileAndPath(t *testing.T) {
 	if err := os.Symlink("/bin/sh", link); err != nil {
 		t.Fatal(err)
 	}
-	if err := ExecFile(link); !errors.Is(err, fail.E("exec_not_file")) {
+	// A link is followed once; the target is what is checked and returned.
+	want, err := filepath.EvalSymlinks("/bin/sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ResolveExec(link); err != nil || got != want {
+		t.Fatalf("%q %v", got, err)
+	}
+	if err := CheckExec(link); !errors.Is(err, fail.E("exec_not_file")) {
 		t.Fatal(err)
 	}
 	exe := dir + "/exe"
@@ -481,4 +490,123 @@ func TestLoadUnitPermOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantLoad(t, dir, "unit_perm")
+}
+
+func TestCheckExecOwnerAndMode(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckExec(base + "/../" + filepath.Base(base)); !errors.Is(err, fail.E("exec_relative")) {
+		t.Fatal(err)
+	}
+	dir := base + "/bin"
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := dir + "/exe"
+	if err := os.WriteFile(exe, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckExec(exe); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []os.FileMode{0o775, 0o757, 0o777} {
+		if err := os.Chmod(exe, mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := CheckExec(exe); !errors.Is(err, fail.E("exec_perm")) {
+			t.Fatalf("file %o: %v", mode, err)
+		}
+		if _, err := ResolveExec(exe); !errors.Is(err, fail.E("exec_perm")) {
+			t.Fatalf("file %o: %v", mode, err)
+		}
+	}
+	if err := os.Chmod(exe, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []os.FileMode{0o775, 0o757, 0o777} {
+		if err := os.Chmod(dir, mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := CheckExec(exe); !errors.Is(err, fail.E("exec_perm")) {
+			t.Fatalf("dir %o: %v", mode, err)
+		}
+	}
+	// A sticky directory, like /tmp, cannot have entries swapped by others.
+	if err := os.Chmod(dir, 0o777|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckExec(exe); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A writable directory above the link target is refused too.
+	link := base + "/link"
+	if err := os.Symlink(exe, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(base, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveExec(link); !errors.Is(err, fail.E("exec_perm")) {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ResolveExec(link); err != nil || got != exe {
+		t.Fatalf("%q %v", got, err)
+	}
+}
+
+func TestCheckExecOwner(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to chown")
+	}
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe := base + "/exe"
+	if err := os.WriteFile(exe, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(exe, 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckExec(exe); !errors.Is(err, fail.E("exec_perm")) {
+		t.Fatal(err)
+	}
+	if err := os.Chown(exe, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(base, 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckExec(exe); !errors.Is(err, fail.E("exec_perm")) {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadResolvesExec(t *testing.T) {
+	dir := t.TempDir()
+	writeRaw(t, dir, "a.json", `{"name":"a","exec":["/bin/sh","-c","true"],"type":"simple","ready":"exec"}`)
+	writeRaw(t, dir, "b.json", `{"name":"b","exec":["/tmp/sahinit-not-a-file"],"type":"simple","ready":"exec"}`)
+	svcs, _, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks("/bin/sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if svcs["a"].Path != want || svcs["a"].Exec[0] != "/bin/sh" {
+		t.Fatalf("%q %q", svcs["a"].Path, svcs["a"].Exec)
+	}
+	if svcs["b"].Path != "" {
+		t.Fatalf("%q", svcs["b"].Path)
+	}
 }

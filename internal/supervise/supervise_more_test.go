@@ -720,7 +720,19 @@ func TestNewRejects(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { removeFile(t, link) })
-	if sup, err := New(map[string]*unit.Service{"agent": svc}, link); sup != nil || fail.Token(err) != "exec_not_file" {
+	// A link to a good binary is followed once and accepted.
+	if sup, err := New(map[string]*unit.Service{"agent": svc}, link); sup == nil || err != nil {
+		t.Fatalf("%v %v", sup, err)
+	}
+	writable := tmpPath("sahs")
+	if err := os.WriteFile(writable, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { removeFile(t, writable) })
+	if err := os.Chmod(writable, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if sup, err := New(map[string]*unit.Service{"agent": svc}, writable); sup != nil || fail.Token(err) != "exec_perm" {
 		t.Fatalf("%v %v", sup, err)
 	}
 }
