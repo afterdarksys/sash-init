@@ -390,3 +390,66 @@ func TestLaunchSandboxRootRefused(t *testing.T) {
 		t.Fatalf("cmd=%v nf=%v claim=%q err=%v", cmd, nf, claim, err)
 	}
 }
+
+// A #! script runs only with an absolute, trusted interpreter that is not a
+// script itself; env-style lookups and relative interpreters are refused.
+func TestLaunchScriptInterpreter(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "sahinit-interp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	open := dir + "/open"
+	if err := os.Mkdir(open, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/bin/sh", open+"/sh"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(open, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, body string) string {
+		p := dir + "/" + name
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	inner := write("inner", "#!/bin/sh\nexit 0\n")
+	cases := []struct {
+		name, body, want string
+	}{
+		{"ok", "#!/bin/sh\nprintf ok\n", ""},
+		{"ok-space", "#! /bin/sh -e\nprintf ok\n", ""},
+		{"env", "#!/usr/bin/env sh\nprintf ok\n", "exec_interp"},
+		{"relative", "#!sh\nprintf ok\n", "exec_interp"},
+		{"empty", "#!\nprintf ok\n", "exec_interp"},
+		{"long", "#!/bin/sh " + strings.Repeat("x", 300) + "\n", "exec_interp"},
+		{"nested", "#!" + inner + "\n", "exec_interp"},
+		{"untrusted", "#!" + open + "/sh\nprintf ok\n", "exec_perm"},
+		{"missing", "#!/sahinit-missing-interpreter\n", "exec_not_file"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			script := write(tc.name, tc.body)
+			var out strings.Builder
+			cmd, claim, nf, err := Launch(context.Background(), "/bin/sh", []string{script}, nil, false, time.Second, Options{Stdout: &out})
+			if tc.want != "" {
+				if cmd != nil || nf != nil || claim != "" || !errors.Is(err, fail.E(tc.want)) {
+					t.Fatalf("cmd=%v claim=%q err=%v", cmd, claim, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Wait(); err != nil || out.String() != "ok" {
+				t.Fatalf("%v %q", err, out.String())
+			}
+		})
+	}
+}

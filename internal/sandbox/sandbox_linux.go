@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 	"unsafe"
@@ -32,8 +33,10 @@ const (
 	maxSpec  = 64 * 1024
 	maxLine  = 1024
 
-	// execPathFD runs the exec fd of a direct launch.
+	// execPathFD runs a script's exec fd on a direct launch.
 	execPathFD = "/proc/self/fd/4"
+	// execFDMin keeps a binary's exec fd clear of the fds placed in the child.
+	execFDMin = 10
 
 	// Landlock ABI 1 file rights. ABI 2 adds REFER, ABI 3 TRUNCATE, ABI 5
 	// IOCTL_DEV (ABI 4 adds only network rights).
@@ -355,6 +358,56 @@ func execTarget(argv, env []string) error {
 	return errExec
 }
 
+// directTarget places the exec fd for a direct launch. A script's fd goes
+// to fd 4 and stays open, since the interpreter opens /proc/self/fd/4. A
+// binary is run through a close-on-exec copy at fd 10 or above: the forked
+// child still holds it when it calls execve on /proc/self/fd/N, and the
+// kernel closes it at exec, so the binary keeps no fd. The copy is returned
+// for the caller to close after the start.
+func directTarget(target string, execF *os.File, script bool, notifyW *os.File) (string, []*os.File, *os.File, error) {
+	if execF == nil {
+		return "", nil, nil, fail.E("failed")
+	}
+	if script {
+		// A nil entry closes fd 3 in the child when notify is off.
+		return execPathFD, []*os.File{notifyW, execF}, nil, nil
+	}
+	fd, err := unix.FcntlInt(execF.Fd(), unix.F_DUPFD_CLOEXEC, execFDMin)
+	if err != nil {
+		return "", nil, nil, fail.E("failed")
+	}
+	held := os.NewFile(uintptr(fd), execF.Name())
+	var extra []*os.File
+	if notifyW != nil {
+		extra = []*os.File{notifyW}
+	}
+	return "/proc/self/fd/" + strconv.Itoa(fd), extra, held, nil
+}
+
+// readHead reads the start of the open target. An O_PATH fd cannot be read
+// and has no head. Without an fd (an interpreter) the path is opened.
+func readHead(f *os.File, p string) ([]byte, error) {
+	if f == nil {
+		var err error
+		if f, err = os.OpenFile(p, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0); err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				return nil, nil
+			}
+			return nil, fail.E("exec_not_file")
+		}
+		defer f.Close()
+	}
+	buf := make([]byte, headLen)
+	n, err := unix.Pread(int(f.Fd()), buf, 0)
+	if errors.Is(err, unix.EBADF) {
+		return nil, nil
+	}
+	if err != nil || n < 0 {
+		return nil, fail.E("exec_not_file")
+	}
+	return buf[:n], nil
+}
+
 func execveat(fd int, argv, env []*byte) syscall.Errno {
 	empty := [1]byte{}
 	_, _, errno := unix.Syscall6(unix.SYS_EXECVEAT, uintptr(fd), uintptr(unsafe.Pointer(&empty[0])),
@@ -364,10 +417,16 @@ func execveat(fd int, argv, env []*byte) syscall.Errno {
 	return errno
 }
 
-// openExec opens the checked target O_PATH without following a link, then
-// checks the open file again, so the file checked is the file run.
+// openExec opens the checked target without following a link, then checks
+// the open file again, so the file checked is the file run. It is opened for
+// reading, so its #! line can be read from the same file; a file the
+// supervisor may not read is opened O_PATH, and could not be a runnable
+// script anyway.
 func openExec(p string) (*os.File, error) {
-	fd, err := unix.Open(p, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open(p, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if errors.Is(err, unix.EACCES) {
+		fd, err = unix.Open(p, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	}
 	if err != nil {
 		return nil, fail.E("exec_not_file")
 	}

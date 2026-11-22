@@ -47,8 +47,8 @@ func helperSelf(t *testing.T) (string, unit.Execution) {
 	return f.Name(), unit.Execution{UID: &uid, GID: &gid}
 }
 
-// The service lists its own open fds. Only stdio, the readiness fd when
-// notify is on, and on a direct launch the exec fd (fd 4) may be open.
+// The service lists its own open fds. Only stdio and the readiness fd when
+// notify is on may be open; a binary keeps no exec fd.
 func TestServiceFDs(t *testing.T) {
 	self, ident := helperSelf(t)
 	script := `ls -1 /proc/$$/fd | tr '\n' ' '; printf '%s' "${SAHINIT_READY_FD-unset}"`
@@ -58,8 +58,8 @@ func TestServiceFDs(t *testing.T) {
 		notify    bool
 		want      string
 	}{
-		{"direct", false, false, "0 1 2 4 unset"},
-		{"direct-notify", false, true, "0 1 2 3 4 3"},
+		{"direct", false, false, "0 1 2 unset"},
+		{"direct-notify", false, true, "0 1 2 3 3"},
 		{"sandbox", true, false, "0 1 2 unset"},
 		{"sandbox-notify", true, true, "0 1 2 3 3"},
 	}
@@ -91,6 +91,33 @@ func TestServiceFDs(t *testing.T) {
 				t.Fatalf("fds %q, want %q (stderr %q)", got, tc.want, errb.String())
 			}
 		})
+	}
+}
+
+// A #! script keeps fd 4, which its interpreter reads the script through.
+func TestDirectScriptKeepsExecFD(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "sahinit-script")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := dir + "/run"
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nls -1 /proc/$$/fd | tr '\\n' ' '\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	cmd, _, _, err := Launch(context.Background(), "/bin/sh", []string{script}, nil, false, time.Second, Options{Stdout: &out})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(" "+out.String(), " 4 ") {
+		t.Fatalf("fds %q", out.String())
 	}
 }
 
@@ -136,7 +163,7 @@ func TestLaunchRunsCheckedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	cmd, _, err := direct(target, []string{target}, execF, false, Options{Stdout: &out})
+	cmd, _, err := direct(target, []string{target}, execF, true, false, Options{Stdout: &out})
 	if err != nil {
 		t.Fatal(err)
 	}

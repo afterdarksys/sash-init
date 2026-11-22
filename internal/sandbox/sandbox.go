@@ -9,10 +9,12 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"strconv"
 	"strings"
 	"syscall"
@@ -89,10 +91,18 @@ func Launch(ctx context.Context, self string, argv []string, sb *unit.Sandbox, n
 	if execF != nil {
 		defer execF.Close()
 	}
+	head, err := readHead(execF, target)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	script, err := checkInterp(head)
+	if err != nil {
+		return nil, "", nil, err
+	}
 	if sb != nil {
 		return launchSandboxed(ctx, self, argv, execF, sb, notify, timeout, opts)
 	}
-	cmd, notifyR, err := direct(target, argv, execF, notify, opts)
+	cmd, notifyR, err := direct(target, argv, execF, script, notify, opts)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -108,6 +118,48 @@ func runsAsRoot(e unit.Execution) bool {
 	return *e.UID == 0
 }
 
+// headLen is the kernel's limit on the #! line (BINPRM_BUF_SIZE).
+const headLen = 256
+
+// checkInterp reports whether head starts a #! script, and checks its
+// interpreter: an absolute path resolved and checked like the target itself
+// (unit.ResolveExec), which must not be a script in turn. A relative
+// interpreter, a #! line longer than the kernel reads, or an env-style
+// interpreter that looks the real one up in PATH is exec_interp.
+//
+// Threats: the kernel runs the interpreter by path with the target's
+// privileges, so an interpreter in a directory someone else can write would
+// let them choose what runs. env lookups depend on a PATH the unit sets.
+func checkInterp(head []byte) (bool, error) {
+	if !bytes.HasPrefix(head, []byte("#!")) {
+		return false, nil
+	}
+	line, _, found := bytes.Cut(head[2:], []byte{'\n'})
+	if !found && len(head) >= headLen {
+		return true, fail.E("exec_interp")
+	}
+	fields := strings.Fields(string(line))
+	if len(fields) == 0 || !strings.HasPrefix(fields[0], "/") {
+		return true, fail.E("exec_interp")
+	}
+	interp := fields[0]
+	if path.Base(interp) == "env" {
+		return true, fail.E("exec_interp")
+	}
+	resolved, err := unit.ResolveExec(path.Clean(interp))
+	if err != nil {
+		return true, err
+	}
+	inner, err := readHead(nil, resolved)
+	if err != nil {
+		return true, err
+	}
+	if bytes.HasPrefix(inner, []byte("#!")) {
+		return true, fail.E("exec_interp")
+	}
+	return true, nil
+}
+
 func checkArgv(argv []string) error {
 	if len(argv) < 1 || len(argv) > maxArgv {
 		return fail.E("failed")
@@ -120,11 +172,10 @@ func checkArgv(argv []string) error {
 	return unit.ExecPath(argv[0])
 }
 
-// direct starts the target without the helper. With an exec fd (Linux) the
-// fd sits at fdExec and the kernel runs /proc/self/fd/4, the checked file;
-// the target keeps that O_PATH fd, which a script interpreter needs to read
-// the script. Elsewhere the resolved path is run.
-func direct(target string, argv []string, execF *os.File, notify bool, opts Options) (*exec.Cmd, *os.File, error) {
+// direct starts the target without the helper. On Linux the kernel runs the
+// checked file through its fd (see directTarget); elsewhere the resolved path
+// is run.
+func direct(target string, argv []string, execF *os.File, script, notify bool, opts Options) (*exec.Cmd, *os.File, error) {
 	var notifyR, notifyW *os.File
 	if notify {
 		var err error
@@ -142,14 +193,14 @@ func direct(target string, argv []string, execF *os.File, notify bool, opts Opti
 	if notify {
 		env = append(env, "SAHINIT_READY_FD=3")
 	}
-	var extra []*os.File
-	if notifyW != nil {
-		extra = []*os.File{notifyW}
+	target, extra, held, err := directTarget(target, execF, script, notifyW)
+	if err != nil {
+		null.Close()
+		closePair(notifyR, notifyW)
+		return nil, nil, fail.E("failed")
 	}
-	if execF != nil {
-		// A nil entry closes fd 3 in the child when notify is off.
-		extra = []*os.File{notifyW, execF}
-		target = execPathFD
+	if held != nil {
+		defer held.Close()
 	}
 	cmd := &exec.Cmd{
 		Path:        target,
