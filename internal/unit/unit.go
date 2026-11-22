@@ -428,6 +428,12 @@ func Parse(raw []byte, stem string) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Threats: a sandboxed unit running as uid 0 regains every capability
+	// at exec and passes the control socket's uid check, so the sandbox
+	// would claim confinement it does not have.
+	if sb != nil && (execution.UID == nil || *execution.UID == 0) {
+		return nil, fail.E("sandbox_root")
+	}
 	return &Service{
 		Name: name, Exec: exec, Type: typ, Restart: restart, Ready: ready,
 		After: after, Needs: needs, Wants: wants, Timeout: timeout, Boot: boot,

@@ -23,11 +23,11 @@ func TestParseDefaults(t *testing.T) {
 	if oneshot.Boot || oneshot.Ready != "exit" {
 		t.Fatalf("%+v", oneshot)
 	}
-	boxed := mustParse(t, `{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","sandbox":{}}`, "a")
+	boxed := mustParse(t, `{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","execution":{"uid":65534,"gid":65534},"sandbox":{}}`, "a")
 	if boxed.Sandbox == nil || !boxed.Sandbox.NoNewPrivs {
 		t.Fatalf("%+v", boxed.Sandbox)
 	}
-	capped := mustParse(t, `{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","sandbox":{"caps":["kill"]}}`, "a")
+	capped := mustParse(t, `{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","execution":{"uid":65534,"gid":65534},"sandbox":{"caps":["kill"]}}`, "a")
 	if len(capped.Sandbox.Caps) != 1 || capped.Sandbox.Caps[0] != "kill" || !capped.Sandbox.NoNewPrivs {
 		t.Fatalf("%+v", capped.Sandbox)
 	}
@@ -339,7 +339,8 @@ func TestParseArgvAndPaths(t *testing.T) {
 	caps := []string{"chown", "dac_override", "fowner", "kill", "setgid", "setuid", "net_bind_service", "net_admin", "sys_admin"}
 	raw = unitJSON(t, map[string]any{
 		"name": "a", "exec": []string{"/bin/sh"}, "type": "simple", "ready": "exec",
-		"sandbox": map[string]any{"caps": caps},
+		"execution": map[string]any{"uid": 65534, "gid": 65534},
+		"sandbox":   map[string]any{"caps": caps},
 	})
 	boxed := mustParse(t, string(raw), "a")
 	if boxed.Sandbox == nil || !boxed.Sandbox.NoNewPrivs || len(boxed.Sandbox.Caps) != len(caps) {
@@ -354,7 +355,8 @@ func TestParseArgvAndPaths(t *testing.T) {
 	}
 	raw = unitJSON(t, map[string]any{
 		"name": "a", "exec": []string{"/bin/sh"}, "type": "simple", "ready": "exec",
-		"sandbox": map[string]any{"read_only_paths": ro, "read_write_paths": rw},
+		"execution": map[string]any{"uid": 65534, "gid": 65534},
+		"sandbox":   map[string]any{"read_only_paths": ro, "read_write_paths": rw},
 	})
 	both := mustParse(t, string(raw), "a")
 	if len(both.Sandbox.ReadOnly) != 32 || len(both.Sandbox.ReadWrite) != 32 {
@@ -363,7 +365,8 @@ func TestParseArgvAndPaths(t *testing.T) {
 	ro33 := append(append([]string{}, ro...), "/ro/extra")
 	wantParse(t, map[string]any{
 		"name": "a", "exec": []string{"/bin/sh"}, "type": "simple", "ready": "exec",
-		"sandbox": map[string]any{"read_only_paths": ro33, "read_write_paths": rw},
+		"execution": map[string]any{"uid": 65534, "gid": 65534},
+		"sandbox":   map[string]any{"read_only_paths": ro33, "read_write_paths": rw},
 	}, "failed")
 	tooMany := make([]string, 65)
 	for i := range tooMany {
@@ -371,12 +374,14 @@ func TestParseArgvAndPaths(t *testing.T) {
 	}
 	wantParse(t, map[string]any{
 		"name": "a", "exec": []string{"/bin/sh"}, "type": "simple", "ready": "exec",
-		"sandbox": map[string]any{"read_only_paths": tooMany},
+		"execution": map[string]any{"uid": 65534, "gid": 65534},
+		"sandbox":   map[string]any{"read_only_paths": tooMany},
 	}, "failed")
 	okPath := "/" + strings.Repeat("a", 4095)
 	raw = unitJSON(t, map[string]any{
 		"name": "a", "exec": []string{"/bin/sh"}, "type": "simple", "ready": "exec",
-		"sandbox": map[string]any{"read_only_paths": []string{okPath}},
+		"execution": map[string]any{"uid": 65534, "gid": 65534},
+		"sandbox":   map[string]any{"read_only_paths": []string{okPath}},
 	})
 	long := mustParse(t, string(raw), "a")
 	if long.Sandbox.ReadOnly[0] != okPath {
@@ -384,7 +389,8 @@ func TestParseArgvAndPaths(t *testing.T) {
 	}
 	wantParse(t, map[string]any{
 		"name": "a", "exec": []string{"/bin/sh"}, "type": "simple", "ready": "exec",
-		"sandbox": map[string]any{"read_only_paths": []string{"/" + strings.Repeat("a", 4096)}},
+		"execution": map[string]any{"uid": 65534, "gid": 65534},
+		"sandbox":   map[string]any{"read_only_paths": []string{"/" + strings.Repeat("a", 4096)}},
 	}, "sandbox_path")
 }
 
@@ -635,4 +641,22 @@ func TestLoadResolvesSandboxPaths(t *testing.T) {
 	}
 	writeRaw(t, dir, "a.json", `{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","execution":{"uid":65534,"gid":65534},"sandbox":{"read_only_paths":["`+base+`/link"],"read_write_paths":["`+real+`"]}}`)
 	wantLoad(t, dir, "sandbox_overlap")
+}
+
+func TestParseSandboxRoot(t *testing.T) {
+	for _, exe := range []string{``, `,"execution":{"uid":0,"gid":0}`, `,"execution":{"uid":0,"gid":65534}`} {
+		raw := `{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","sandbox":{}` + exe + `}`
+		if _, err := Parse([]byte(raw), "a"); !errors.Is(err, fail.E("sandbox_root")) {
+			t.Fatalf("%s: %v", raw, err)
+		}
+	}
+	raw := `{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","sandbox":{},"execution":{"uid":1,"gid":0}}`
+	if _, err := Parse([]byte(raw), "a"); err != nil {
+		t.Fatal(err)
+	}
+	// Without a sandbox, root is still allowed.
+	raw = `{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","execution":{"uid":0,"gid":0}}`
+	if _, err := Parse([]byte(raw), "a"); err != nil {
+		t.Fatal(err)
+	}
 }
