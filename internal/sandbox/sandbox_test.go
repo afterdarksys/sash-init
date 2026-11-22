@@ -426,6 +426,8 @@ func TestLaunchScriptInterpreter(t *testing.T) {
 		{"ok", "#!/bin/sh\nprintf ok\n", ""},
 		{"ok-space", "#! /bin/sh -e\nprintf ok\n", ""},
 		{"env", "#!/usr/bin/env sh\nprintf ok\n", "exec_interp"},
+		{"multicall-env", "#!/bin/sh env sh\nprintf ok\n", "exec_interp"},
+		{"cr", "#!/bin/sh\r\nprintf ok\n", "exec_not_file"},
 		{"relative", "#!sh\nprintf ok\n", "exec_interp"},
 		{"empty", "#!\nprintf ok\n", "exec_interp"},
 		{"long", "#!/bin/sh " + strings.Repeat("x", 300) + "\n", "exec_interp"},

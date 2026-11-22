@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -28,7 +29,11 @@ func TestMain(m *testing.M) {
 	if sock := os.Getenv("SAHT_CLIENT_SOCK"); sock != "" {
 		os.Exit(socketClient(sock, os.Getenv("SAHT_CLIENT_OUT")))
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	if dir := tmpDirMade.Load(); dir != nil {
+		os.RemoveAll(*dir)
+	}
+	os.Exit(code)
 }
 
 // socketClient runs inside a supervised service: one status request, with
@@ -62,8 +67,21 @@ func socketClient(sock, out string) int {
 
 var pathSeq atomic.Uint64
 
+// tmpRoot is a private 0700 directory under /tmp (short enough for a Unix
+// socket path): a socket's directory must be writable by its owner only.
+var tmpDirMade atomic.Pointer[string]
+
+var tmpRoot = sync.OnceValue(func() string {
+	dir, err := os.MkdirTemp("/tmp", "sah")
+	if err != nil {
+		panic(err)
+	}
+	tmpDirMade.Store(&dir)
+	return dir
+})
+
 func tmpPath(prefix string) string {
-	return fmt.Sprintf("/tmp/%s-%d-%d", prefix, os.Getpid(), pathSeq.Add(1))
+	return fmt.Sprintf("%s/%s-%d", tmpRoot(), prefix, pathSeq.Add(1))
 }
 
 func removeFile(t *testing.T, path string) {

@@ -8,7 +8,7 @@ It is not yet a PID 1 replacement.
 ```sh
 go build -o /tmp/sahinit ./cmd/sahinit
 /tmp/sahinit plan --dir ./units
-/tmp/sahinit supervise --dir ./units --socket /tmp/sahinit.sock
+/tmp/sahinit supervise --dir ./units --socket /run/sahinit/sahinit.sock
 ```
 
 Preview migration from systemd, daemontools, or OpenRC:

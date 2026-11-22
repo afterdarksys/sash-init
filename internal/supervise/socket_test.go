@@ -184,6 +184,14 @@ func TestSocketUntrustedDir(t *testing.T) {
 	if err := sup.Listen(dir + "/s"); fail.Token(err) != "socket_perm" {
 		t.Fatal(err)
 	}
+	// A sticky directory, like /tmp, is not a socket directory: anyone
+	// could pre-create the socket or its lock there.
+	if err := os.Chmod(dir, 0o1777); err != nil {
+		t.Fatal(err)
+	}
+	if err := sup.Listen(dir + "/s"); fail.Token(err) != "socket_perm" {
+		t.Fatalf("sticky: %v", err)
+	}
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}

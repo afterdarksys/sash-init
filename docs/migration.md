@@ -14,7 +14,7 @@ go build -o /tmp/sahinit ./cmd/sahinit
 # Write a NEW directory after reviewing the JSON report:
 /tmp/sahinit migrate --from systemd --source ./exported-services --out ./converted --boot
 /tmp/sahinit plan --dir ./converted
-/tmp/sahinit supervise --dir ./converted --socket /tmp/sahinit.sock
+/tmp/sahinit supervise --dir ./converted --socket /run/sahinit/sahinit.sock
 ```
 
 Omitting `--out` produces a JSON preview only. Exit codes: 0 = conversion succeeded,

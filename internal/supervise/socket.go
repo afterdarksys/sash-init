@@ -56,6 +56,12 @@ func (sup *Supervisor) Listen(path string) error {
 	if err != nil {
 		return fail.E("socket_perm")
 	}
+	// A sticky directory (/tmp) is trusted for executables, but anyone can
+	// pre-create the socket or its lock there and keep the supervisor from
+	// starting: the socket's directory must be writable by its owner only.
+	if st, err := os.Stat(dir); err != nil || st.Mode().Perm()&0o022 != 0 {
+		return fail.E("socket_perm")
+	}
 	path = filepath.Join(dir, filepath.Base(path))
 	lock, err := lockSocket(path + ".lock")
 	if err != nil {

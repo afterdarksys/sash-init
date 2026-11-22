@@ -138,12 +138,16 @@ func checkInterp(head []byte) (bool, error) {
 	if !found && len(head) >= headLen {
 		return true, fail.E("exec_interp")
 	}
-	fields := strings.Fields(string(line))
+	// The kernel splits a #! line on space and tab only: a CR or other
+	// whitespace stays part of the interpreter path, and is checked so.
+	fields := strings.FieldsFunc(string(line), func(r rune) bool { return r == ' ' || r == '\t' })
 	if len(fields) == 0 || !strings.HasPrefix(fields[0], "/") {
 		return true, fail.E("exec_interp")
 	}
 	interp := fields[0]
-	if path.Base(interp) == "env" {
+	// env, or a multi-call binary asked to act as env (busybox env),
+	// looks the real interpreter up in PATH.
+	if path.Base(interp) == "env" || len(fields) > 1 && fields[1] == "env" {
 		return true, fail.E("exec_interp")
 	}
 	resolved, err := unit.ResolveExec(path.Clean(interp))

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"github.com/afterdarksys/sahinit/internal/frame"
 	"net"
 	"os"
@@ -133,7 +132,7 @@ func TestPlanCycle(t *testing.T) {
 
 func TestSuperviseNegativeUID(t *testing.T) {
 	dir := t.TempDir()
-	sock := fmt.Sprintf("/tmp/sahc-%d-neg", os.Getpid())
+	sock := privTmp(t) + "/s"
 	t.Cleanup(func() {
 		if err := os.Remove(sock); err != nil && !os.IsNotExist(err) {
 			t.Errorf("remove %s: %v", sock, err)
@@ -154,7 +153,7 @@ func TestSuperviseNegativeUID(t *testing.T) {
 
 func TestSuperviseUIDZeroEmpty(t *testing.T) {
 	dir := t.TempDir()
-	sock := fmt.Sprintf("/tmp/sahc-%d-zero", os.Getpid())
+	sock := privTmp(t) + "/s"
 	t.Cleanup(func() {
 		if err := os.Remove(sock); err != nil && !os.IsNotExist(err) {
 			t.Errorf("remove %s: %v", sock, err)
@@ -174,7 +173,7 @@ func TestSuperviseCycleNoSocket(t *testing.T) {
 	dir := t.TempDir()
 	putUnit(t, dir, simpleUnit("a", []string{"b"}))
 	putUnit(t, dir, simpleUnit("b", []string{"a"}))
-	sock := fmt.Sprintf("/tmp/sahc-%d-cycle", os.Getpid())
+	sock := privTmp(t) + "/s"
 	t.Cleanup(func() {
 		if err := os.Remove(sock); err != nil && !os.IsNotExist(err) {
 			t.Errorf("remove %s: %v", sock, err)
@@ -192,7 +191,7 @@ func TestSuperviseCycleNoSocket(t *testing.T) {
 
 func sockPath(t *testing.T, tag string) string {
 	t.Helper()
-	sock := fmt.Sprintf("/tmp/sahc-%d-%s", os.Getpid(), tag)
+	sock := privTmp(t) + "/s"
 	t.Cleanup(func() {
 		if err := os.Remove(sock); err != nil && !os.IsNotExist(err) {
 			t.Errorf("remove %s: %v", sock, err)
@@ -319,7 +318,7 @@ func TestBootSignalHelper(t *testing.T) {
 func TestSignalDuringBoot(t *testing.T) {
 	dir := t.TempDir()
 	// Keep the Unix socket path below the platform length limit.
-	sock := fmt.Sprintf("/tmp/sahboot-%d.sock", os.Getpid())
+	sock := privTmp(t) + "/s"
 	defer os.Remove(sock)
 	marker := dir + "/pid"
 	script := dir + "/start.sh"
@@ -403,4 +402,16 @@ func TestSuperviseGIDFlag(t *testing.T) {
 	wantRun(t, []string{"supervise", "--dir", dir, "--socket", sock, "--gid", "1", "--gid", "2"}, 2, "", usageText)
 	wantRun(t, []string{"supervise", "--dir", dir, "--socket", sock, "--gid", "1"}, 2, "", "empty\n")
 	absentSock(t, sock)
+}
+
+// privTmp is a private 0700 directory under /tmp, short enough for a Unix
+// socket path: a socket's directory must be writable by its owner only.
+func privTmp(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "sahc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
 }
