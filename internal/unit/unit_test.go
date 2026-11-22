@@ -660,3 +660,115 @@ func TestParseSandboxRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A link in a directory someone else can write is refused, even when it
+// points at a trusted binary: that directory's owner chooses what runs.
+func TestResolveExecLinkInUntrustedDir(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := base + "/trusted"
+	open := base + "/open"
+	for _, d := range []string{trusted, open} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(open, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/bin/sh", open+"/tool"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveExec(open + "/tool"); !errors.Is(err, fail.E("exec_perm")) {
+		t.Fatalf("link in writable dir: %v", err)
+	}
+	// A trusted link whose target walks into the writable directory.
+	if err := os.Symlink(open+"/tool", trusted+"/via"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveExec(trusted + "/via"); !errors.Is(err, fail.E("exec_perm")) {
+		t.Fatalf("chain through writable dir: %v", err)
+	}
+	// A relative link that climbs into it.
+	if err := os.Symlink("../open/tool", trusted+"/rel"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveExec(trusted + "/rel"); !errors.Is(err, fail.E("exec_perm")) {
+		t.Fatalf("relative link into writable dir: %v", err)
+	}
+	// Trusted links resolve, relative ones included.
+	want, err := ResolveExec("/bin/sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/bin/sh", trusted+"/sh"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("./sh", trusted+"/dot"); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{trusted + "/sh", trusted + "/dot"} {
+		if got, err := ResolveExec(p); err != nil || got != want {
+			t.Fatalf("%s: %q %v", p, got, err)
+		}
+	}
+	if err := os.Symlink(trusted+"/loop", trusted+"/loop"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveExec(trusted + "/loop"); !errors.Is(err, fail.E("exec_not_file")) {
+		t.Fatalf("loop: %v", err)
+	}
+}
+
+// The reviewer's reproduction: a user-owned ~/bin holding a link to bash.
+func TestResolveExecLinkInUserOwnedDir(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to chown")
+	}
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := base + "/bin"
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/bin/sh", bin+"/tool"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(bin, 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveExec(bin + "/tool"); !errors.Is(err, fail.E("exec_perm")) {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	writeRaw(t, dir, "t.json", `{"name":"t","exec":["`+bin+`/tool","-c","id"],"type":"simple","ready":"exec"}`)
+	svcs, _, err := Load(dir)
+	if err != nil || svcs["t"].Path != "" {
+		t.Fatalf("%v %v", svcs, err)
+	}
+}
+
+func TestResolveSandboxPathLinkInUntrustedDir(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := base + "/open"
+	if err := os.Mkdir(open, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(open, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/", open+"/root"); err != nil {
+		t.Fatal(err)
+	}
+	got := resolvePaths([]string{open + "/root"})
+	if len(got) != 1 || got[0] != open+"/root" {
+		t.Fatalf("followed a link in a writable dir: %q", got)
+	}
+}

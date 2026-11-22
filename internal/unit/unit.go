@@ -15,7 +15,6 @@ import (
 	"errors"
 	"os"
 	"path"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
@@ -119,24 +118,99 @@ func ExecFile(p string) error {
 	return err
 }
 
-// ResolveExec follows symlinks in p once and checks the result with
-// CheckExec. It returns the resolved path, which is what must be run.
+// ResolveExec follows symlinks in p once, with ResolveTrusted, and checks
+// the result with CheckExec. It returns the resolved path, which is what must
+// be run.
 //
 // Threats: links such as /bin/sh -> dash or /etc/alternatives entries are
 // followed once, here; the caller runs the resolved path and never resolves
-// the link again, so a link swapped later does not change what runs.
+// the link again, so a link swapped later does not change what runs. A link
+// in a directory someone else can write (such as a user's ~/bin) is refused.
 func ResolveExec(p string) (string, error) {
 	if err := ExecPath(p); err != nil {
 		return "", err
 	}
-	resolved, err := filepath.EvalSymlinks(p)
+	resolved, err := ResolveTrusted(p)
 	if err != nil {
-		return "", fail.E("exec_not_file")
+		return "", err
 	}
 	if err := CheckExec(resolved); err != nil {
 		return "", err
 	}
 	return resolved, nil
+}
+
+const maxLinks = 40
+
+// ResolveTrusted resolves an absolute path one component at a time and
+// returns it with no links left. Every directory the walk passes through,
+// from / on, must meet the CheckExec directory rule: the directory holding
+// each link, and every directory a link target leads into. The final
+// component is not checked. A missing component or too many links is
+// exec_not_file; an untrusted directory is exec_perm.
+func ResolveTrusted(p string) (string, error) {
+	if p == "" || p[0] != '/' || strings.ContainsRune(p, 0) {
+		return "", fail.E("exec_relative")
+	}
+	st, err := os.Lstat("/")
+	if err != nil || !ownedPerm(st, true) {
+		return "", fail.E("exec_perm")
+	}
+	cur := "/"
+	todo := splitPath(p)
+	links := 0
+	for len(todo) > 0 {
+		name := todo[0]
+		todo = todo[1:]
+		switch name {
+		case ".":
+			continue
+		case "..":
+			cur = path.Dir(cur) // every ancestor of cur was checked on the way in
+			continue
+		}
+		next := path.Join(cur, name)
+		st, err := os.Lstat(next)
+		if err != nil {
+			return "", fail.E("exec_not_file")
+		}
+		if st.Mode()&os.ModeSymlink != 0 {
+			links++
+			if links > maxLinks {
+				return "", fail.E("exec_not_file")
+			}
+			target, err := os.Readlink(next)
+			if err != nil || target == "" {
+				return "", fail.E("exec_not_file")
+			}
+			if target[0] == '/' {
+				cur = "/"
+			}
+			todo = append(splitPath(target), todo...)
+			continue
+		}
+		if len(todo) == 0 {
+			return next, nil
+		}
+		if !st.IsDir() {
+			return "", fail.E("exec_not_file")
+		}
+		if !ownedPerm(st, true) {
+			return "", fail.E("exec_perm")
+		}
+		cur = next
+	}
+	return cur, nil
+}
+
+func splitPath(p string) []string {
+	var out []string
+	for _, part := range strings.Split(p, "/") {
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 // CheckExec checks an already resolved path without following any link.
@@ -556,9 +630,10 @@ func FinishSandbox(sb *Sandbox, privsPresent, privs bool) error {
 }
 
 // resolveSandbox replaces each sandbox path with its target, resolved once
-// at load like the executable, so /lib on a merged-/usr system becomes
-// /usr/lib. A path that does not resolve is kept as written; the helper then
-// refuses it with sandbox_path, since it opens paths without following links.
+// at load with the executable's trusted walk, so /lib on a merged-/usr system
+// becomes /usr/lib. A path that does not resolve, or whose walk passes an
+// untrusted directory, is kept as written; the helper then refuses any link
+// in it with sandbox_path, since it opens paths without following links.
 // Two paths with one target in the same list become one; in both lists they
 // are sandbox_overlap.
 func resolveSandbox(sb *Sandbox) error {
@@ -583,7 +658,7 @@ func resolvePaths(in []string) []string {
 	var out []string
 	seen := make(map[string]struct{}, len(in))
 	for _, p := range in {
-		if r, err := filepath.EvalSymlinks(p); err == nil && sandboxPath(r) == nil {
+		if r, err := ResolveTrusted(p); err == nil && sandboxPath(r) == nil {
 			p = r
 		}
 		if _, ok := seen[p]; ok {
