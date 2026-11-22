@@ -46,6 +46,9 @@ func Launch(ctx context.Context, self string, argv []string, sb *unit.Sandbox, n
 	if err := ctx.Err(); err != nil {
 		return nil, "", nil, fail.E("failed")
 	}
+	if sb != nil && runsAsRoot(opts.Execution) {
+		return nil, "", nil, fail.E("sandbox_root")
+	}
 	if err := checkArgv(argv); err != nil {
 		return nil, "", nil, err
 	}
@@ -74,6 +77,15 @@ func Launch(ctx context.Context, self string, argv []string, sb *unit.Sandbox, n
 		return nil, "", nil, err
 	}
 	return cmd, claimNone, notifyR, nil
+}
+
+// runsAsRoot reports whether the process would run as uid 0: an explicit
+// uid 0, or no uid while the supervisor is root.
+func runsAsRoot(e unit.Execution) bool {
+	if e.UID == nil {
+		return os.Geteuid() == 0
+	}
+	return *e.UID == 0
 }
 
 func checkArgv(argv []string) error {

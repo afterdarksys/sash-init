@@ -71,7 +71,7 @@ var specKeys = map[string]struct{}{
 var childTokens = map[string]struct{}{
 	"sandbox_cap": {}, "sandbox_path": {}, "sandbox_privs": {}, "sandbox_overlap": {},
 	"openat2_unavailable": {}, "landlock_unavailable": {},
-	"exec_relative": {}, "exec_not_file": {}, "failed": {},
+	"exec_relative": {}, "exec_not_file": {}, "failed": {}, "sandbox_root": {},
 }
 
 func init() {
@@ -124,6 +124,9 @@ func ApplyCLI(args []string) int {
 	}
 	if notify && !isFIFO(fdReady) {
 		return writeStatus("failed")
+	}
+	if unix.Geteuid() == 0 || unix.Getuid() == 0 {
+		return writeStatus("sandbox_root")
 	}
 	var st unix.Stat_t
 	if err := unix.Fstat(fdExec, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Mode&0o111 == 0 {

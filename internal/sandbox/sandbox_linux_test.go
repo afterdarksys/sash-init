@@ -261,12 +261,17 @@ func TestChildStatusWaitsForExec(t *testing.T) {
 }
 
 func TestLaunchSandboxedExecFailure(t *testing.T) {
-	self, err := os.Executable()
+	self, ident := helperSelf(t)
+	dir, err := os.MkdirTemp("/tmp", "sahinit-interp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := t.TempDir() + "/missing-interpreter"
-	if err := os.WriteFile(target, []byte("#!/sahinit-nonexistent-interpreter\n"), 0o700); err != nil {
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := dir + "/missing-interpreter"
+	if err := os.WriteFile(target, []byte("#!/sahinit-nonexistent-interpreter\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// First establish that sandbox setup works, so setup failure cannot make
@@ -276,7 +281,7 @@ func TestLaunchSandboxedExecFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	sb := &unit.Sandbox{NoNewPrivs: true, ReadOnly: []string{"/"}}
-	cmd, claim, _, err := Launch(context.Background(), self, []string{good}, sb, false, time.Second)
+	cmd, claim, _, err := Launch(context.Background(), self, []string{good}, sb, false, time.Second, Options{Execution: ident})
 	if err != nil {
 		t.Fatalf("sandbox setup: %v", err)
 	}
@@ -286,11 +291,37 @@ func TestLaunchSandboxedExecFailure(t *testing.T) {
 	if claim != claimFull {
 		t.Fatalf("claim %q", claim)
 	}
-	cmd, claim, _, err = Launch(context.Background(), self, []string{target}, sb, false, time.Second)
+	cmd, claim, _, err = Launch(context.Background(), self, []string{target}, sb, false, time.Second, Options{Execution: ident})
 	if cmd != nil {
 		defer reap(cmd)
 	}
 	if err == nil || claim != "" {
 		t.Fatalf("failed exec accepted: cmd=%v claim=%q err=%v", cmd, claim, err)
+	}
+}
+
+// The helper itself refuses to apply a sandbox while it runs as root, even
+// when the caller skipped the check in Launch.
+func TestHelperRefusesRoot(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root")
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := unit.ResolveExec("/bin/true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	execF, err := openExec(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execF.Close()
+	sb := &unit.Sandbox{NoNewPrivs: true, ReadOnly: []string{"/"}}
+	cmd, claim, _, err := launchSandboxed(context.Background(), self, []string{"/bin/true"}, execF, sb, false, time.Second, Options{})
+	if cmd != nil || claim != "" || fail.Token(err) != "sandbox_root" {
+		t.Fatalf("cmd=%v claim=%q err=%v", cmd, claim, err)
 	}
 }

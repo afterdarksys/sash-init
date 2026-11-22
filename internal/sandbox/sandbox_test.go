@@ -26,7 +26,7 @@ func TestLaunchRelative(t *testing.T) {
 func TestLaunchMissingIsExecNotFile(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	cmd, claim, nf, err := Launch(ctx, "/bin/sh", []string{"/tmp/sahinit-missing-exec"}, &unit.Sandbox{}, false, time.Second)
+	cmd, claim, nf, err := Launch(ctx, "/bin/sh", []string{"/tmp/sahinit-missing-exec"}, nil, false, time.Second)
 	if cmd != nil || nf != nil || claim != "" || !errors.Is(err, fail.E("exec_not_file")) {
 		t.Fatalf("cmd=%v nf=%v claim=%q err=%v", cmd, nf, claim, err)
 	}
@@ -86,7 +86,7 @@ func TestLaunchNonExecIsExecNotFile(t *testing.T) {
 	t.Cleanup(func() { os.Remove(path) })
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	cmd, claim, nf, err := Launch(ctx, "/bin/sh", []string{path}, &unit.Sandbox{}, false, time.Second)
+	cmd, claim, nf, err := Launch(ctx, "/bin/sh", []string{path}, nil, false, time.Second)
 	if cmd != nil || nf != nil || claim != "" || !errors.Is(err, fail.E("exec_not_file")) {
 		t.Fatalf("cmd=%v nf=%v claim=%q err=%v", cmd, nf, claim, err)
 	}
@@ -378,5 +378,15 @@ func TestLaunchRelativeArg(t *testing.T) {
 	got, err := os.ReadFile(mark)
 	if err != nil || string(got) != "rel/ative\n" {
 		t.Fatalf("%q %v", got, err)
+	}
+}
+
+func TestLaunchSandboxRootRefused(t *testing.T) {
+	zero := uint32(0)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd, claim, nf, err := Launch(ctx, "/bin/sh", []string{"/bin/sh"}, &unit.Sandbox{NoNewPrivs: true}, false, time.Second, Options{Execution: unit.Execution{UID: &zero, GID: &zero}})
+	if cmd != nil || nf != nil || claim != "" || !errors.Is(err, fail.E("sandbox_root")) {
+		t.Fatalf("cmd=%v nf=%v claim=%q err=%v", cmd, nf, claim, err)
 	}
 }
