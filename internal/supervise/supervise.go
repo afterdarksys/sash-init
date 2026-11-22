@@ -5,7 +5,8 @@
 // caller. A peer inside a running service's process group is refused
 // (peer_supervised), so a service cannot drive the supervisor. The supervisor holds no keys, does not understand leases, and does
 // not log oneshot arguments. A sandbox claim is stored only when Launch
-// returns it. Stop signals the process group. This package does not confine
+// returns it. Stop signals the process group, under the service lock and
+// through a pidfd where the kernel allows (see runtime.signalGroup). This package does not confine
 // the network beyond the sandbox package and does not check leases.
 package supervise
 
@@ -89,6 +90,14 @@ type runtime struct {
 	procDone   chan struct{}
 	readyCh    chan struct{}
 	cmd        *exec.Cmd
+	// group is the pid of the last started process, which leads its own
+	// process group; pidfd is a pidfd for it (-1 when unavailable). Both are
+	// kept after it exits, for signalling what remains of its group, and
+	// replaced at the next start. exiting is set, under mu, before the
+	// leader is reaped.
+	group   int
+	pidfd   int
+	exiting bool
 }
 
 // New checks the catalog and the re-exec binary. self is not required to be absolute.
@@ -110,6 +119,7 @@ func New(svcs map[string]*unit.Service, self string) (*Supervisor, error) {
 			svc:      svc,
 			state:    "stopped",
 			procDone: done,
+			pidfd:    -1,
 		}
 	}
 	return &Supervisor{
@@ -219,11 +229,11 @@ func (sup *Supervisor) Stop(ctx context.Context, name string) error {
 	procDone := s.procDone
 	s.mu.Unlock()
 
-	if err := signalGroup(pid, syscall.SIGTERM); err != nil {
+	if err := s.signalGroup(pid, syscall.SIGTERM); err != nil {
 		return fail.E("failed")
 	}
-	if err := waitGroup(ctx, pid, procDone, timeoutOf(s.svc)); err != nil {
-		if killErr := signalGroup(pid, syscall.SIGKILL); killErr != nil {
+	if err := s.waitGroup(ctx, pid, procDone, timeoutOf(s.svc)); err != nil {
+		if killErr := s.signalGroup(pid, syscall.SIGKILL); killErr != nil {
 			return fail.E("failed")
 		}
 		<-procDone
@@ -305,15 +315,15 @@ func (sup *Supervisor) Shutdown(ctx context.Context) error {
 		wg.Add(1)
 		go func(s *runtime, pid int, procDone chan struct{}) {
 			defer wg.Done()
-			if err := signalGroup(pid, syscall.SIGTERM); err != nil {
+			if err := s.signalGroup(pid, syscall.SIGTERM); err != nil {
 				note(err)
 			}
 			waitCtx := ctx
 			if waitCtx.Err() != nil {
 				waitCtx = context.Background()
 			}
-			if err := waitGroup(waitCtx, pid, procDone, timeoutOf(s.svc)); err != nil {
-				if killErr := signalGroup(pid, syscall.SIGKILL); killErr != nil {
+			if err := s.waitGroup(waitCtx, pid, procDone, timeoutOf(s.svc)); err != nil {
+				if killErr := s.signalGroup(pid, syscall.SIGKILL); killErr != nil {
 					note(killErr)
 				}
 				<-procDone
@@ -537,6 +547,8 @@ func (sup *Supervisor) launch(ctx context.Context, s *runtime, argv []string, ge
 	if notify {
 		readyCh = make(chan struct{})
 	}
+	// The child is not reaped until lifetime runs, so its pid is still its.
+	pidfd := openPidfd(cmd.Process.Pid)
 	s.mu.Lock()
 	lost := s.gen != gen || s.stopReq || sup.shuttingDown.Load()
 	if lost {
@@ -546,11 +558,14 @@ func (sup *Supervisor) launch(ctx context.Context, s *runtime, argv []string, ge
 			s.ready = false
 		}
 		s.mu.Unlock()
+		closePidfd(pidfd)
 		if cerr := killCollected(cmd, notifyR); cerr != nil {
 			return fail.E("failed")
 		}
 		return fail.E("failed")
 	}
+	oldPidfd := s.pidfd
+	s.group, s.pidfd, s.exiting = cmd.Process.Pid, pidfd, false
 	s.pid = cmd.Process.Pid
 	s.eventLocked("started", "", nil)
 	s.cmd = cmd
@@ -563,6 +578,7 @@ func (sup *Supervisor) launch(ctx context.Context, s *runtime, argv []string, ge
 		s.eventLocked("ready", "", nil)
 	}
 	s.mu.Unlock()
+	closePidfd(oldPidfd)
 
 	go sup.lifetime(s, cmd, notifyR, procDone, readyCh, gen)
 	if s.svc.Ready == "exec" {
@@ -591,10 +607,7 @@ func (sup *Supervisor) lifetime(s *runtime, cmd *exec.Cmd, notifyR *os.File, pro
 				close(readyCh)
 			}
 		} else if rerr == nil && n >= 1 && cerr != nil {
-			s.mu.Lock()
-			pid := s.pid
-			s.mu.Unlock()
-			if err := signalGroup(pid, syscall.SIGKILL); err != nil {
+			if err := s.signalGroup(cmd.Process.Pid, syscall.SIGKILL); err != nil {
 				waitErr := cmd.Wait()
 				if waitErr != nil && cmd.ProcessState == nil {
 					sup.onExit(s, procDone, gen, false)
@@ -605,6 +618,7 @@ func (sup *Supervisor) lifetime(s *runtime, cmd *exec.Cmd, notifyR *os.File, pro
 			}
 		}
 	}
+	s.markExiting(cmd.Process.Pid)
 	waitErr := cmd.Wait()
 	s.mu.Lock()
 	exit := &Exit{Code: -1, Time: time.Now().UTC()}
@@ -809,7 +823,7 @@ func (sup *Supervisor) timeOut(s *runtime, procDone chan struct{}, gen uint64) e
 	s.eventLocked("timeout", "timeout", nil)
 	pid := s.pid
 	s.mu.Unlock()
-	if err := signalGroup(pid, syscall.SIGKILL); err != nil {
+	if err := s.signalGroup(pid, syscall.SIGKILL); err != nil {
 		<-procDone
 		return fail.E("failed")
 	}
@@ -854,6 +868,79 @@ func (sup *Supervisor) failLaunch(s *runtime, gen uint64, err error) {
 	}
 }
 
+// markExiting waits until the leader can be reaped, then sets exiting under
+// mu. The caller reaps only after this returns, so a signal sent under mu
+// while exiting is false reaches a process that has not been reaped.
+func (s *runtime) markExiting(pid int) {
+	waitExited(pid)
+	s.mu.Lock()
+	if s.group == pid {
+		s.exiting = true
+	}
+	s.mu.Unlock()
+}
+
+// signalGroup sends sig to the process group led by pid, only while pid is
+// this service's last started process, and with mu held. With a pidfd and
+// Linux 6.9 or later the signal goes through the pidfd, which cannot reach a
+// reused pid. Otherwise kill(-pid) is used: before the leader is reaped its
+// pid cannot be reused; after, the group id stays reserved while any member
+// lives.
+//
+// Threats: without the pidfd path, a group that empties just before a
+// signal sent after the leader was reaped could have its id reused by an
+// unrelated group. Cgroups (batch 2) remove this. The single-pid fallback is
+// used only before the leader is reaped.
+func (s *runtime) signalGroup(pid int, sig syscall.Signal) error {
+	if pid <= 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.group != pid {
+		return nil
+	}
+	if s.pidfd >= 0 {
+		err := pidfdSignalGroup(s.pidfd, sig)
+		if err == nil || err == syscall.ESRCH {
+			return nil
+		}
+		if err != syscall.EINVAL && err != syscall.ENOSYS {
+			return err
+		}
+	}
+	err := syscall.Kill(-pid, sig)
+	if err == nil || err == syscall.ESRCH {
+		return nil
+	}
+	if s.exiting {
+		return err
+	}
+	err = syscall.Kill(pid, sig)
+	if err == nil || err == syscall.ESRCH {
+		return nil
+	}
+	return err
+}
+
+// groupGone reports whether the process group led by pid has no members.
+func (s *runtime) groupGone(pid int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.group != pid {
+		return true
+	}
+	if s.pidfd >= 0 {
+		err := pidfdSignalGroup(s.pidfd, 0)
+		if err != syscall.EINVAL && err != syscall.ENOSYS {
+			return err == syscall.ESRCH
+		}
+	}
+	return syscall.Kill(-pid, 0) == syscall.ESRCH
+}
+
+// signalGroup is for a child no lifetime has started on: it is not reaped
+// until the caller waits for it.
 func signalGroup(pid int, sig syscall.Signal) error {
 	if pid <= 0 {
 		return nil
@@ -899,7 +986,7 @@ func killCollected(cmd *exec.Cmd, notifyR *os.File) error {
 }
 
 // A collected leader does not imply that its process group is empty.
-func waitGroup(ctx context.Context, pid int, done chan struct{}, d time.Duration) error {
+func (s *runtime) waitGroup(ctx context.Context, pid int, done chan struct{}, d time.Duration) error {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	tick := time.NewTicker(10 * time.Millisecond)
@@ -907,7 +994,7 @@ func waitGroup(ctx context.Context, pid int, done chan struct{}, d time.Duration
 	for {
 		select {
 		case <-done:
-			if pid <= 0 || syscall.Kill(-pid, 0) == syscall.ESRCH {
+			if pid <= 0 || s.groupGone(pid) {
 				return nil
 			}
 		default:
