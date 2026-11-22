@@ -57,3 +57,51 @@ func TestPolicyCLI(t *testing.T) {
 		}
 	}
 }
+
+func TestPolicyCLILifetimeAndFloor(t *testing.T) {
+	trust := "../../internal/bootpolicy/testdata/trust.json"
+	never := "../../internal/bootpolicy/testdata/policy-never.json"
+	floor := "../../internal/bootpolicy/testdata/floor.json"
+	cache := filepath.Join(t.TempDir(), "cache")
+	if err := os.Mkdir(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	call := func(args ...string) (int, string, string) {
+		var out, stderr bytes.Buffer
+		code := run(append([]string{"policy"}, args...), &out, &stderr)
+		return code, out.String(), stderr.String()
+	}
+	// A never-policy caches and reports valid without any clock.
+	if code, out, errs := call("cache", "--trust", trust, "--document", never, "--cache", cache); code != 0 || !bytes.Contains([]byte(out), []byte(`"state":"valid"`)) || !bytes.Contains([]byte(out), []byte(`"lifetime":"never"`)) {
+		t.Fatal(code, out, errs)
+	}
+	if code, _, errs := call("floor-show", "--trust", trust, "--cache", cache); code != 1 || errs != "policy_floor_missing\n" {
+		t.Fatal(code, errs)
+	}
+	code, out, errs := call("floor-install", "--trust", trust, "--document", floor, "--cache", cache)
+	var fr floorReport
+	if err := json.Unmarshal([]byte(out), &fr); err != nil || code != 0 || !fr.Verified || fr.MinSequence != 2 || len(fr.FloorSHA256) != 64 {
+		t.Fatal(code, out, errs)
+	}
+	if code, out, _ := call("floor-show", "--trust", trust, "--cache", cache); code != 0 || !bytes.Contains([]byte(out), []byte(`"min_sequence":2`)) {
+		t.Fatal(code, out)
+	}
+	// The cached sequence-1 policy is now below the floor.
+	code, out, _ = call("status", "--trust", trust, "--cache", cache)
+	var report policyReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil || code != 1 || report.Verified || report.State != bootpolicy.Revoked || report.Error != "policy_revoked" || report.FloorMinSequence != 2 {
+		t.Fatal(code, out)
+	}
+	if code, _, errs := call("cache", "--trust", trust, "--document", never, "--cache", cache); code != 1 || errs != "policy_revoked\n" {
+		t.Fatal(code, errs)
+	}
+	// A policy document is not a floor.
+	if code, _, errs := call("floor-install", "--trust", trust, "--document", never, "--cache", cache); code != 1 || errs != "policy_bad_signature\n" {
+		t.Fatal(code, errs)
+	}
+	for _, args := range [][]string{{"floor-install", "--trust", trust, "--cache", cache}, {"floor-install", "--trust", trust, "--document", floor}, {"floor-show", "--trust", trust, "--cache", cache, "--document", floor}, {"floor-show", "--trust", trust}} {
+		if got, _, _ := call(args...); got != 2 {
+			t.Fatal(args, got)
+		}
+	}
+}

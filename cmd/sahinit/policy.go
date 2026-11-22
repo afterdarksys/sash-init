@@ -13,7 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const policyUsage = "usage: sahinit policy verify|cache|status --trust FILE [--document FILE] [--cache DIR] [--trust-system-clock]\n"
+const policyUsage = "usage: sahinit policy verify|cache|status|floor-install|floor-show --trust FILE [--document FILE] [--cache DIR] [--trust-system-clock]\n"
 
 type policyReport struct {
 	Verified          bool             `json:"verified"`
@@ -25,6 +25,16 @@ type policyReport struct {
 	PolicySHA256      string           `json:"policy_sha256,omitempty"`
 	ExpiresAt         int64            `json:"expires_at,omitempty"`
 	OfflineUntil      int64            `json:"offline_until,omitempty"`
+	Lifetime          string           `json:"lifetime,omitempty"`
+	FloorMinSequence  uint64           `json:"floor_min_sequence,omitempty"`
+}
+
+type floorReport struct {
+	Verified    bool   `json:"verified"`
+	Enforcement string `json:"enforcement"`
+	MinSequence uint64 `json:"min_sequence"`
+	IssuedAt    int64  `json:"issued_at"`
+	FloorSHA256 string `json:"floor_sha256"`
 }
 
 func runPolicy(args []string, stdout, stderr io.Writer) int {
@@ -33,7 +43,7 @@ func runPolicy(args []string, stdout, stderr io.Writer) int {
 		return usage()
 	}
 	op := args[0]
-	if op != "verify" && op != "cache" && op != "status" {
+	if op != "verify" && op != "cache" && op != "status" && op != "floor-install" && op != "floor-show" {
 		return usage()
 	}
 	fs := flag.NewFlagSet("policy", flag.ContinueOnError)
@@ -45,7 +55,8 @@ func runPolicy(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 || *trustPath == "" {
 		return usage()
 	}
-	if (op == "verify" && (*docPath == "" || *cache != "")) || (op == "cache" && (*docPath == "" || *cache == "")) || (op == "status" && (*docPath != "" || *cache == "")) {
+	install := op == "cache" || op == "floor-install"
+	if (op == "verify" && (*docPath == "" || *cache != "")) || (install && (*docPath == "" || *cache == "")) || ((op == "status" || op == "floor-show") && (*docPath != "" || *cache == "")) {
 		return usage()
 	}
 	refuse := func(err error) int { fmt.Fprintln(stderr, fail.Token(err)); return 1 }
@@ -53,11 +64,8 @@ func runPolicy(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return refuse(err)
 	}
-	var trust bootpolicy.Trust
-	if err := bootpolicy.DecodeStrict(raw, &trust); err != nil {
-		return refuse(err)
-	}
-	if err := trust.Validate(); err != nil {
+	trust, err := bootpolicy.DecodeTrust(raw)
+	if err != nil {
 		return refuse(err)
 	}
 	var clock bootpolicy.Clock
@@ -65,12 +73,13 @@ func runPolicy(args []string, stdout, stderr io.Writer) int {
 		clock = bootpolicy.NewClock(time.Now())
 	}
 	var d *bootpolicy.Document
-	if op == "verify" || op == "cache" {
+	if op == "verify" || install {
 		raw, err = policyFile(*docPath, bootpolicy.MaxEnvelope, false)
 		if err != nil {
 			return refuse(err)
 		}
 	}
+	var floor *bootpolicy.FloorDocument
 	if op == "verify" {
 		d, err = bootpolicy.Verify(raw, trust)
 	} else {
@@ -79,17 +88,42 @@ func runPolicy(args []string, stdout, stderr io.Writer) int {
 			return refuse(e)
 		}
 		defer store.Close()
-		if op == "cache" {
+		switch op {
+		case "cache":
 			d, err = store.Install(raw)
-		} else {
+		case "floor-install":
+			floor, err = store.InstallFloor(raw)
+		case "floor-show":
+			floor, err = store.Floor()
+		default:
 			d, err = store.Load()
+			if err == nil || fail.Token(err) == "policy_revoked" {
+				if floor, e = store.Floor(); e != nil && fail.Token(e) != "policy_floor_missing" {
+					return refuse(e)
+				}
+			}
 		}
+	}
+	if fail.Token(err) == "policy_revoked" && op == "status" && floor != nil {
+		// Revoked metadata is reported, never returned; exit 1 like any refusal.
+		json.NewEncoder(stdout).Encode(policyReport{Enforcement: "metadata_only", State: bootpolicy.Revoked, Error: fail.Token(err), FloorMinSequence: floor.Floor().MinSequence})
+		return 1
 	}
 	if err != nil {
 		return refuse(err)
 	}
+	if d == nil {
+		f := floor.Floor()
+		if e := json.NewEncoder(stdout).Encode(floorReport{Verified: true, Enforcement: "metadata_only", MinSequence: f.MinSequence, IssuedAt: f.IssuedAt, FloorSHA256: floor.Digest()}); e != nil {
+			return 1
+		}
+		return 0
+	}
 	p := d.Policy()
-	report := policyReport{Verified: true, Enforcement: "metadata_only", State: d.State(clock), Sequence: p.Sequence, CatalogGeneration: p.CatalogGeneration, PolicySHA256: d.Digest(), ExpiresAt: p.ExpiresAt, OfflineUntil: p.OfflineUntil}
+	report := policyReport{Verified: true, Enforcement: "metadata_only", State: d.State(clock), Sequence: p.Sequence, CatalogGeneration: p.CatalogGeneration, PolicySHA256: d.Digest(), ExpiresAt: p.ExpiresAt, OfflineUntil: p.OfflineUntil, Lifetime: p.Lifetime}
+	if floor != nil {
+		report.FloorMinSequence = floor.Floor().MinSequence
+	}
 	if op == "verify" {
 		err = d.CheckFresh(clock)
 		report.Error = fail.Token(err)
