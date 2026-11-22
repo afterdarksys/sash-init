@@ -65,9 +65,11 @@ stderr as `unit_perm FILE`, and the rest of the catalog loads.
 regular executable, and it and every parent directory must be owned by root
 (or the supervisor's uid) and not writable by group or other, except sticky
 directories such as `/tmp` (`exec_perm`). On Linux the checked file is opened
-and run through that fd, so the file checked is the file run. A direct launch
-keeps that `O_PATH` fd as fd 4, which a script interpreter needs; a sandboxed
-launch closes it on exec for binaries. Every other fd from 3 up, except the
+and run through that fd, so the file checked is the file run. A binary keeps
+no fd from this; a `#!` script keeps it as fd 4 for its interpreter, which must
+be an absolute, trusted path that is not `env` or another script
+(`exec_interp`). Links are followed only through directories that pass the
+same owner and mode rule. Every other fd from 3 up, except the
 readiness fd, is closed on exec. Sandbox paths are resolved once at load too.
 
 The migration converters still reject user, group, environment, and working-directory
@@ -90,7 +92,9 @@ The socket is 0600 when only the supervisor's uid may connect; when `--uid`
 names another uid it is 0660 and `--gid GID` names its group (`socket_group`
 otherwise). A request from inside a running service's process group is refused
 with `peer_supervised`. A leftover socket from a crash is replaced only when it
-is a socket, owned by the supervisor's uid, and refuses a connect.
+is a socket, owned by the supervisor's uid, and refuses a connect. The socket's
+directory must pass the owner and mode rule (`socket_perm`), and `PATH.lock`
+is held for the supervisor's life (`socket_busy` for a second one).
 This is local control; SystemAPI grants and remote transport are not added here.
 
 The framed request `{"op":"diagnostics","name":"worker"}` returns a
