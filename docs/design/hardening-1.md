@@ -30,3 +30,12 @@ Every fix below comes with:
 - `./build.sh` passes: race tests, vet, gofmt, and Linux cross-compilation.
 - Linux tests run as root in `golang:1.26-bookworm`, which uses a Debian `/bin/sh` link.
 - An adversarial review of the batch is done before any push.
+
+## Decisions made during the build (2026-11-22)
+
+1. **Sticky parent directories** are accepted for the executable path (as `/tmp`): a sticky directory lets no one replace a file they do not own. Every parent directory is also checked for owner (root or the supervisor's uid), which is stricter than the table above asks.
+2. **An executable that cannot be resolved at load time** leaves the unit loaded with an empty `Path`. Launch then resolves and checks it with the same rules, so a binary installed later still works and is still checked.
+3. **A direct (unsandboxed) launch on Linux** runs the binary through `/proc/self/fd/4` and keeps that O_PATH fd open: script interpreters need it. That fd names only the service's own executable. Direct launches need `/proc`, which PID 1 mounts before starting any service.
+4. **`landlock_abi`** exists, but no unit field asks yet for a right newer than ABI 1. Below ABI 3, TRUNCATE stays unrestricted instead of refusing read-write units.
+5. **The H7 fallback on kernels before 6.9 and on macOS** still signals a group with `kill(-pid)` after its leader is reaped, so that leftover children die. A narrow pid-reuse race remains there until the cgroups batch, which closes it.
+6. **Not exercised:** the older-kernel fallbacks (no `close_range`, older Landlock ABIs, no group pidfd signal). Docker runs kernel 7.0. A QEMU matrix belongs to the PID 1 harness.
