@@ -102,6 +102,18 @@ func (s *Store) load() (*Document, error) {
 	return Verify(raw, s.trust)
 }
 
+// loadForOrder is load with the lifetime cap lifted, for Install's
+// ordering check only; it never admits a document for use.
+func (s *Store) loadForOrder() (*Document, error) {
+	raw, err := s.read("policy.json")
+	if err != nil {
+		return nil, err
+	}
+	t := s.trust
+	t.MaxLifetime = LifetimeNever
+	return Verify(raw, t)
+}
+
 // loadFloor returns nil when no floor was ever installed. A floor file that
 // is present but unreadable, unsafe or unverifiable fails closed.
 func (s *Store) loadFloor() (*FloorDocument, error) {
@@ -216,7 +228,12 @@ func (s *Store) Install(raw []byte) (*Document, error) {
 	if err := floor.admits(next); err != nil {
 		return nil, err
 	}
-	old, err := s.load()
+	// The cached document only orders the new one (no rollback, no
+	// conflict), so it is read with the lifetime cap lifted: after the cap
+	// is tightened to renew, a cached never-policy no longer loads, but a
+	// renew replacement at a higher sequence must still install. Its
+	// signature and shape are still verified.
+	old, err := s.loadForOrder()
 	if err != nil && fail.Token(err) != "policy_missing" {
 		return nil, err
 	}

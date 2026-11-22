@@ -213,9 +213,27 @@ func TestTrustLifetimeCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer capped.Close()
 	_, err = capped.Load()
 	requireCode(t, err, "policy_lifetime_cap")
+	capped.Close()
+	// A renew replacement still installs over it (the cached never-policy
+	// only orders it), while one at the cached sequence is still refused.
+	fixer, err := OpenStore(path, trust, fixed(p.IssuedAt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fixer.Close()
+	stale := p
+	_, err = fixer.Install(signed(stale, key))
+	requireCode(t, err, "policy_sequence_conflict")
+	r := p
+	r.Version, r.Lifetime, r.Sequence, r.CatalogGeneration = Version2, LifetimeRenew, p.Sequence+1, p.CatalogGeneration+1
+	if _, err := fixer.Install(signed(r, key)); err != nil {
+		t.Fatal("renew replacement after the cap tightened", err)
+	}
+	if _, err := fixer.Load(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestLifetimeRenewalOrdering(t *testing.T) {

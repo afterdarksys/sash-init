@@ -81,7 +81,14 @@ enrollment and recovery-profile IDs; a map of key IDs to standard-base64 raw
 
 The validity, grace and refresh ceilings apply to `renew` policies only; they
 are still required. Tightening `max_lifetime` to `renew` makes a cached `never`
-policy fail to load.
+policy fail to load with `policy_lifetime_cap`. A `renew` replacement at a higher
+sequence (and, since the mode changes, a higher catalog generation) still
+installs over it: the cached document is read without the cap only to order the
+new one.
+
+Because an omitted `max_lifetime` means `never`, a trust file written before
+this field existed accepts `never` policies signed by its keys. A host that
+must always expire needs `max_lifetime: "renew"` written into its trust file.
 
 There must be 1–16 distinct public keys. The trust file must be a regular file,
 owned by the effective user and not writable by group/others; the command rejects
