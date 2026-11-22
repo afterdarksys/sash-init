@@ -1,0 +1,304 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+)
+
+func putUnit(t *testing.T, dir string, fields map[string]any) {
+	t.Helper()
+	name, ok := fields["name"].(string)
+	if !ok || name == "" {
+		t.Fatal("name")
+	}
+	buf, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/"+name+".json", buf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func simpleUnit(name string, needs []string) map[string]any {
+	fields := map[string]any{
+		"name":  name,
+		"exec":  []string{"/bin/sh"},
+		"type":  "simple",
+		"ready": "exec",
+	}
+	if needs != nil {
+		fields["needs"] = needs
+	}
+	return fields
+}
+
+func TestRunUsage(t *testing.T) {
+	dir := t.TempDir()
+	cases := [][]string{
+		nil,
+		{"nope"},
+		{"plan"},
+		{"supervise"},
+		{"supervise", "--dir", dir},
+		{"plan", "--dir", dir, "extra"},
+	}
+	for _, args := range cases {
+		var stdout, stderr bytes.Buffer
+		code := run(args, &stdout, &stderr)
+		if code != 2 || stdout.Len() != 0 || stderr.String() != usageText {
+			t.Fatalf("%q code %d out %q err %q", args, code, stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestRunApplySilent(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"apply"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("code %d", code)
+	}
+	got := stdout.String() + stderr.String()
+	if got != "" || strings.Contains(got, "apply") {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestPlanWaves(t *testing.T) {
+	dir := t.TempDir()
+	putUnit(t, dir, simpleUnit("a", nil))
+	putUnit(t, dir, simpleUnit("b", []string{"a"}))
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"plan", "--dir", dir}, &stdout, &stderr)
+	if code != 0 || stdout.String() != "a\nb\n" || stderr.Len() != 0 {
+		t.Fatalf("code %d out %q err %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestPlanSameWave(t *testing.T) {
+	dir := t.TempDir()
+	putUnit(t, dir, simpleUnit("b", nil))
+	putUnit(t, dir, simpleUnit("a", nil))
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"plan", "--dir", dir}, &stdout, &stderr)
+	if code != 0 || stdout.String() != "a b\n" || stderr.Len() != 0 {
+		t.Fatalf("code %d out %q err %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestPlanEmptyBoot(t *testing.T) {
+	dir := t.TempDir()
+	putUnit(t, dir, map[string]any{
+		"name":  "job",
+		"exec":  []string{"/bin/sh"},
+		"type":  "oneshot",
+		"ready": "exit",
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"plan", "--dir", dir}, &stdout, &stderr)
+	if code != 0 || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("code %d out %q err %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestPlanEmptyDir(t *testing.T) {
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"plan", "--dir", dir}, &stdout, &stderr)
+	if code != 2 || stdout.Len() != 0 || stderr.String() != "empty\n" {
+		t.Fatalf("code %d out %q err %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestPlanCycle(t *testing.T) {
+	dir := t.TempDir()
+	putUnit(t, dir, simpleUnit("a", []string{"b"}))
+	putUnit(t, dir, simpleUnit("b", []string{"a"}))
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"plan", "--dir", dir}, &stdout, &stderr)
+	if code != 2 || stdout.Len() != 0 || stderr.String() != "cycle\n" {
+		t.Fatalf("code %d out %q err %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestSuperviseNegativeUID(t *testing.T) {
+	dir := t.TempDir()
+	sock := fmt.Sprintf("/tmp/sahc-%d-neg", os.Getpid())
+	t.Cleanup(func() {
+		if err := os.Remove(sock); err != nil && !os.IsNotExist(err) {
+			t.Errorf("remove %s: %v", sock, err)
+		}
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"supervise", "--dir", dir, "--socket", sock, "--uid", "-1"}, &stdout, &stderr)
+	if code != 2 || stdout.Len() != 0 || stderr.String() != usageText {
+		t.Fatalf("code %d out %q err %q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "empty") {
+		t.Fatalf("stderr %q", stderr.String())
+	}
+	if _, err := os.Lstat(sock); !os.IsNotExist(err) {
+		t.Fatalf("socket %v", err)
+	}
+}
+
+func TestSuperviseUIDZeroEmpty(t *testing.T) {
+	dir := t.TempDir()
+	sock := fmt.Sprintf("/tmp/sahc-%d-zero", os.Getpid())
+	t.Cleanup(func() {
+		if err := os.Remove(sock); err != nil && !os.IsNotExist(err) {
+			t.Errorf("remove %s: %v", sock, err)
+		}
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"supervise", "--dir", dir, "--socket", sock, "--uid", "0"}, &stdout, &stderr)
+	if code != 2 || stdout.Len() != 0 || stderr.String() != "empty\n" {
+		t.Fatalf("code %d out %q err %q", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Lstat(sock); !os.IsNotExist(err) {
+		t.Fatalf("socket %v", err)
+	}
+}
+
+func TestSuperviseCycleNoSocket(t *testing.T) {
+	dir := t.TempDir()
+	putUnit(t, dir, simpleUnit("a", []string{"b"}))
+	putUnit(t, dir, simpleUnit("b", []string{"a"}))
+	sock := fmt.Sprintf("/tmp/sahc-%d-cycle", os.Getpid())
+	t.Cleanup(func() {
+		if err := os.Remove(sock); err != nil && !os.IsNotExist(err) {
+			t.Errorf("remove %s: %v", sock, err)
+		}
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"supervise", "--dir", dir, "--socket", sock}, &stdout, &stderr)
+	if code != 2 || stdout.Len() != 0 || stderr.String() != "cycle\n" {
+		t.Fatalf("code %d out %q err %q", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Lstat(sock); !os.IsNotExist(err) {
+		t.Fatalf("socket %v", err)
+	}
+}
+
+func sockPath(t *testing.T, tag string) string {
+	t.Helper()
+	sock := fmt.Sprintf("/tmp/sahc-%d-%s", os.Getpid(), tag)
+	t.Cleanup(func() {
+		if err := os.Remove(sock); err != nil && !os.IsNotExist(err) {
+			t.Errorf("remove %s: %v", sock, err)
+		}
+	})
+	return sock
+}
+
+func wantRun(t *testing.T, args []string, code int, stdout, stderr string) {
+	t.Helper()
+	var out, errb bytes.Buffer
+	got := run(args, &out, &errb)
+	if got != code || out.String() != stdout || errb.String() != stderr {
+		t.Fatalf("%q code %d out %q err %q", args, got, out.String(), errb.String())
+	}
+}
+
+func absentSock(t *testing.T, sock string) {
+	t.Helper()
+	if _, err := os.Lstat(sock); !os.IsNotExist(err) {
+		t.Fatalf("socket %v", err)
+	}
+}
+
+func TestPlanBootNeeds(t *testing.T) {
+	dir := t.TempDir()
+	putUnit(t, dir, map[string]any{
+		"name":  "job",
+		"exec":  []string{"/bin/sh"},
+		"type":  "oneshot",
+		"ready": "exit",
+	})
+	putUnit(t, dir, simpleUnit("a", []string{"job"}))
+	wantRun(t, []string{"plan", "--dir", dir}, 2, "", "boot_needs\n")
+}
+
+func TestPlanMissingNeeds(t *testing.T) {
+	dir := t.TempDir()
+	putUnit(t, dir, simpleUnit("a", []string{"gone"}))
+	wantRun(t, []string{"plan", "--dir", dir}, 2, "", "missing_needs\n")
+}
+
+func TestPlanNotADir(t *testing.T) {
+	dir := t.TempDir()
+	file := dir + "/unit.json"
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wantRun(t, []string{"plan", "--dir", file}, 2, "", "failed\n")
+	wantRun(t, []string{"plan", "--dir", dir + "/missing"}, 2, "", "failed\n")
+}
+
+func TestSuperviseStray(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/note.txt", []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sock := sockPath(t, "stray")
+	wantRun(t, []string{"supervise", "--dir", dir, "--socket", sock}, 2, "", "stray_file\n")
+	absentSock(t, sock)
+}
+
+func TestPlanWantsMissing(t *testing.T) {
+	dir := t.TempDir()
+	fields := simpleUnit("agent", nil)
+	fields["wants"] = []string{"gone"}
+	putUnit(t, dir, fields)
+	wantRun(t, []string{"plan", "--dir", dir}, 0, "agent\n", "")
+}
+
+func TestPlanBogusFlag(t *testing.T) {
+	wantRun(t, []string{"plan", "--bogus"}, 2, "", usageText)
+}
+
+func TestSuperviseBogusFlag(t *testing.T) {
+	dir := t.TempDir()
+	sock := sockPath(t, "bogus")
+	wantRun(t, []string{"supervise", "--dir", dir, "--socket", sock, "--bogus"}, 2, "", usageText)
+	absentSock(t, sock)
+}
+
+func TestSuperviseUIDMax(t *testing.T) {
+	dir := t.TempDir()
+	sock := sockPath(t, "uidmax")
+	wantRun(t, []string{"supervise", "--dir", dir, "--socket", sock, "--uid", "4294967295"}, 2, "", "empty\n")
+	absentSock(t, sock)
+}
+
+func TestSuperviseUIDOverflow(t *testing.T) {
+	dir := t.TempDir()
+	sock := sockPath(t, "uidover")
+	wantRun(t, []string{"supervise", "--dir", dir, "--socket", sock, "--uid", "4294967296"}, 2, "", usageText)
+	absentSock(t, sock)
+}
+
+func TestSuperviseRepeatedUID(t *testing.T) {
+	dir := t.TempDir()
+	sock := sockPath(t, "uidrep")
+	wantRun(t, []string{"supervise", "--dir", dir, "--socket", sock, "--uid", "0", "--uid", "1"}, 2, "", "empty\n")
+	absentSock(t, sock)
+}
+
+func TestSuperviseNotADir(t *testing.T) {
+	dir := t.TempDir()
+	file := dir + "/unit.json"
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sockFile := sockPath(t, "notdir")
+	wantRun(t, []string{"supervise", "--dir", file, "--socket", sockFile}, 2, "", "failed\n")
+	absentSock(t, sockFile)
+	sockMissing := sockPath(t, "missing")
+	wantRun(t, []string{"supervise", "--dir", dir + "/missing", "--socket", sockMissing}, 2, "", "failed\n")
+	absentSock(t, sockMissing)
+}

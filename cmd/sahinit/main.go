@@ -1,0 +1,147 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+
+	"github.com/afterdarksys/sahinit/internal/fail"
+	"github.com/afterdarksys/sahinit/internal/graph"
+	"github.com/afterdarksys/sahinit/internal/sandbox"
+	"github.com/afterdarksys/sahinit/internal/supervise"
+	"github.com/afterdarksys/sahinit/internal/unit"
+)
+
+const usageText = "usage: sahinit plan --dir DIR\n" +
+	"usage: sahinit supervise --dir DIR --socket PATH [--uid UID]\n"
+
+func main() {
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprint(stderr, usageText)
+		return 2
+	}
+	if args[0] == "apply" {
+		return sandbox.ApplyCLI(args)
+	}
+	switch args[0] {
+	case "plan":
+		return runPlan(args[1:], stdout, stderr)
+	case "supervise":
+		return runSupervise(args[1:], stdout, stderr)
+	default:
+		fmt.Fprint(stderr, usageText)
+		return 2
+	}
+}
+
+func runPlan(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dir := fs.String("dir", "", "")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || *dir == "" {
+		fmt.Fprint(stderr, usageText)
+		return 2
+	}
+	svcs, err := unit.Load(*dir)
+	if err != nil {
+		fmt.Fprintln(stderr, fail.Token(err))
+		return 2
+	}
+	waves, err := graph.Plan(svcs)
+	if err != nil {
+		fmt.Fprintln(stderr, fail.Token(err))
+		return 2
+	}
+	for _, wave := range waves {
+		fmt.Fprintln(stdout, strings.Join(wave, " "))
+	}
+	return 0
+}
+
+func runSupervise(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("supervise", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dir := fs.String("dir", "", "")
+	sock := fs.String("socket", "", "")
+	var uids []uint32
+	passed := false
+	fs.Func("uid", "", func(s string) error {
+		n, err := strconv.ParseUint(s, 10, 32)
+		if err != nil {
+			return err
+		}
+		passed = true
+		uids = append(uids, uint32(n))
+		return nil
+	})
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || *dir == "" || *sock == "" {
+		fmt.Fprint(stderr, usageText)
+		return 2
+	}
+	svcs, err := unit.Load(*dir)
+	if err != nil {
+		fmt.Fprintln(stderr, fail.Token(err))
+		return 2
+	}
+	waves, err := graph.Plan(svcs)
+	if err != nil {
+		fmt.Fprintln(stderr, fail.Token(err))
+		return 2
+	}
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(stderr, "failed")
+		return 2
+	}
+	sup, err := supervise.New(svcs, self)
+	if err != nil {
+		fmt.Fprintln(stderr, fail.Token(err))
+		return 2
+	}
+	if passed {
+		sup.Allow = map[uint32]struct{}{}
+		for _, uid := range uids {
+			sup.Allow[uid] = struct{}{}
+		}
+	}
+	if err := sup.Listen(*sock); err != nil {
+		fmt.Fprintln(stderr, fail.Token(err))
+		return 2
+	}
+	if err := sup.Boot(context.Background(), waves); err != nil {
+		fmt.Fprintln(stderr, fail.Token(err))
+	}
+	errc := make(chan error, 1)
+	go func() {
+		errc <- sup.Serve()
+	}()
+	signal.Ignore(syscall.SIGHUP)
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
+	var serveErr error
+	select {
+	case <-sigc:
+	case serveErr = <-errc:
+	}
+	signal.Stop(sigc)
+	if serveErr != nil {
+		fmt.Fprintln(stderr, fail.Token(serveErr))
+	}
+	if err := sup.Shutdown(context.Background()); err != nil {
+		fmt.Fprintln(stderr, fail.Token(err))
+	}
+	if err := sup.Close(); err != nil {
+		fmt.Fprintln(stderr, fail.Token(err))
+	}
+	return 0
+}
