@@ -21,12 +21,19 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Helper fd layout. The parent places every fd; the helper never infers a
+// role from an fd merely being open, since the Go runtime itself opens fds
+// (such as the cgroup cpu.max file) at the lowest free number.
 const (
-	fdSpec   = 3
-	fdStatus = 4
-	fdNotify = 5
+	fdReady  = 3 // readiness pipe, only when the spec says notify
+	fdExec   = 4 // O_PATH fd of the checked target, run with execveat
+	fdSpec   = 5
+	fdStatus = 6
 	maxSpec  = 64 * 1024
 	maxLine  = 1024
+
+	// execPathFD runs the exec fd of a direct launch.
+	execPathFD = "/proc/self/fd/4"
 
 	accessRead = unix.LANDLOCK_ACCESS_FS_EXECUTE |
 		unix.LANDLOCK_ACCESS_FS_READ_FILE |
@@ -58,6 +65,7 @@ var (
 
 var specKeys = map[string]struct{}{
 	"no_new_privs": {}, "read_only_paths": {}, "read_write_paths": {}, "caps": {},
+	"notify": {},
 }
 
 var childTokens = map[string]struct{}{
@@ -85,38 +93,45 @@ type held struct {
 	paths   []pathFD
 }
 
-// ApplyCLI is the re-exec entry. It reads the spec on fd 3, writes one
-// setup status on fd 4, then execs the target. Successful exec closes fd 4;
-// a failed exec appends an error status before exiting. A missing handshake fd exits 2
-// and writes nothing.
+// ApplyCLI is the re-exec entry. It reads the spec on fd 5, writes one
+// setup status on fd 6, then execs the checked target held on fd 4.
+// Successful exec closes fd 6; a failed exec appends an error status before
+// exiting. A missing handshake fd exits 2 and writes nothing.
+//
+// Threats: readiness is used only when the spec says notify, and fd 3 must
+// then be a pipe. Every other fd from 3 up is marked close-on-exec before
+// exec, so nothing the helper or the Go runtime opened reaches the target.
+// argv[0] is never looked up; the target is the fd the parent checked.
 func ApplyCLI(args []string) int {
 	runtime.LockOSThread()
 	argv, ok := splitApply(args)
 	if !ok {
 		return 2
 	}
-	var st unix.Stat_t
-	if err := unix.Fstat(fdSpec, &st); err != nil {
-		return 2
-	}
-	if err := unix.Fstat(fdStatus, &st); err != nil {
+	if !isFIFO(fdSpec) || !isFIFO(fdStatus) {
 		return 2
 	}
 	if err := checkArgv(argv); err != nil {
-		return writeStatus(fail.Token(err))
-	}
-	if err := unit.ExecFile(argv[0]); err != nil {
 		return writeStatus(fail.Token(err))
 	}
 	raw, err := readSpec()
 	if err != nil {
 		return writeStatus(fail.Token(err))
 	}
-	sb, err := decodeSpec(raw)
+	sb, notify, err := decodeSpec(raw)
 	if err != nil {
 		return writeStatus(fail.Token(err))
 	}
-	notify := unix.Fstat(fdNotify, &st) == nil
+	if notify && !isFIFO(fdReady) {
+		return writeStatus("failed")
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fdExec, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Mode&0o111 == 0 {
+		return writeStatus("exec_not_file")
+	}
+	if err := cloexecFrom(notify); err != nil {
+		return writeStatus("failed")
+	}
 	env := os.Environ()
 	if notify {
 		env = append(env, "SAHINIT_READY_FD=3")
@@ -133,10 +148,43 @@ func ApplyCLI(args []string) int {
 	if err := writeFD(fdStatus, okLine); err != nil {
 		return 1
 	}
-	if err := execTarget(argv, env, notify); err == errExec {
+	if err := execTarget(argv, env); err == errExec {
 		return writeStatus("failed")
 	}
 	return 1
+}
+
+func isFIFO(fd int) bool {
+	var st unix.Stat_t
+	return unix.Fstat(fd, &st) == nil && st.Mode&unix.S_IFMT == unix.S_IFIFO
+}
+
+// cloexecFrom marks every fd from 3 up close-on-exec, except the readiness
+// fd when notify is set. The fds stay open until exec, so the Go runtime is
+// not disturbed. close_range needs Linux 5.11; older kernels get a loop up
+// to RLIMIT_NOFILE.
+func cloexecFrom(notify bool) error {
+	first := uint(fdReady)
+	if notify {
+		first = fdExec
+	}
+	err := unix.CloseRange(first, ^uint(0), unix.CLOSE_RANGE_CLOEXEC)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, unix.ENOSYS) && !errors.Is(err, unix.EINVAL) {
+		return fail.E("failed")
+	}
+	var lim unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &lim); err != nil {
+		return fail.E("failed")
+	}
+	for fd := uint64(first); fd < lim.Cur; fd++ {
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, unix.FD_CLOEXEC); err != nil && !errors.Is(err, unix.EBADF) {
+			return fail.E("failed")
+		}
+	}
+	return nil
 }
 
 func splitApply(args []string) ([]string, bool) {
@@ -204,11 +252,29 @@ func readSpec() ([]byte, error) {
 	return buf[:n], nil
 }
 
-func decodeSpec(raw []byte) (*unit.Sandbox, error) {
+// decodeSpec returns the sandbox and whether the parent passed a readiness
+// pipe. notify is required; it is never inferred.
+func decodeSpec(raw []byte) (*unit.Sandbox, bool, error) {
 	obj, err := jsonobj.Decode(raw, specKeys)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
+	rawNotify, ok := obj["notify"]
+	if !ok {
+		return nil, false, fail.E("failed")
+	}
+	var notify bool
+	if err := jsonobj.Unmarshal(rawNotify, &notify); err != nil {
+		return nil, false, err
+	}
+	sb, err := decodeSandbox(obj)
+	if err != nil {
+		return nil, false, err
+	}
+	return sb, notify, nil
+}
+
+func decodeSandbox(obj map[string]json.RawMessage) (*unit.Sandbox, error) {
 	sb := &unit.Sandbox{}
 	present := false
 	privs := true
@@ -239,25 +305,59 @@ func decodeSpec(raw []byte) (*unit.Sandbox, error) {
 	return sb, nil
 }
 
-func execTarget(argv, env []string, notify bool) error {
-	// Keep the status pipe open until exec succeeds. On failure the caller
-	// sends an error; a successful exec closes this descriptor atomically.
-	unix.CloseOnExec(fdStatus)
+// execTarget runs the fd on fdExec. The status pipe is close-on-exec, so it
+// stays open until exec succeeds; on failure the caller sends an error.
+func execTarget(argv, env []string) error {
 	if err := unix.Close(fdSpec); err != nil {
 		return errExec
 	}
-	if notify {
-		if err := unix.Dup2(fdNotify, fdSpec); err != nil {
-			return errExec
-		}
-		if err := unix.Close(fdNotify); err != nil {
-			return errExec
-		}
-	}
-	if err := syscall.Exec(argv[0], argv, env); err != nil {
+	argvp, err := syscall.SlicePtrFromStrings(argv)
+	if err != nil {
 		return errExec
 	}
+	envp, err := syscall.SlicePtrFromStrings(env)
+	if err != nil {
+		return errExec
+	}
+	// With a close-on-exec fd the kernel runs a binary but refuses a script
+	// with ENOENT before the point of no return, since the interpreter could
+	// not open /dev/fd/4. Only then is the fd kept for the interpreter.
+	if execveat(fdExec, argvp, envp) != unix.ENOENT {
+		return errExec
+	}
+	if _, err := unix.FcntlInt(fdExec, unix.F_SETFD, 0); err != nil {
+		return errExec
+	}
+	execveat(fdExec, argvp, envp)
 	return errExec
+}
+
+func execveat(fd int, argv, env []*byte) syscall.Errno {
+	empty := [1]byte{}
+	_, _, errno := unix.Syscall6(unix.SYS_EXECVEAT, uintptr(fd), uintptr(unsafe.Pointer(&empty[0])),
+		uintptr(unsafe.Pointer(&argv[0])), uintptr(unsafe.Pointer(&env[0])), unix.AT_EMPTY_PATH, 0)
+	runtime.KeepAlive(argv)
+	runtime.KeepAlive(env)
+	return errno
+}
+
+// openExec opens the checked target O_PATH without following a link, then
+// checks the open file again, so the file checked is the file run.
+func openExec(p string) (*os.File, error) {
+	fd, err := unix.Open(p, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fail.E("exec_not_file")
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Mode&0o111 == 0 {
+		unix.Close(fd)
+		return nil, fail.E("exec_not_file")
+	}
+	if (st.Uid != 0 && st.Uid != uint32(os.Geteuid())) || st.Mode&0o022 != 0 {
+		unix.Close(fd)
+		return nil, fail.E("exec_perm")
+	}
+	return os.NewFile(uintptr(fd), p), nil
 }
 
 // restrict opens paths, drops privileges, and landlocks the calling thread.
@@ -378,13 +478,15 @@ func closeHeld(h *held) error {
 	return nil
 }
 
-func marshalSpec(sb *unit.Sandbox) ([]byte, error) {
+func marshalSpec(sb *unit.Sandbox, notify bool) ([]byte, error) {
 	body := struct {
 		NoNewPrivs bool     `json:"no_new_privs"`
 		ReadOnly   []string `json:"read_only_paths"`
 		ReadWrite  []string `json:"read_write_paths"`
 		Caps       []string `json:"caps"`
+		Notify     bool     `json:"notify"`
 	}{
+		Notify:     notify,
 		NoNewPrivs: sb.NoNewPrivs,
 		ReadOnly:   emptyStr(sb.ReadOnly),
 		ReadWrite:  emptyStr(sb.ReadWrite),
@@ -404,11 +506,15 @@ func emptyStr(s []string) []string {
 	return s
 }
 
-func launchSandboxed(ctx context.Context, self string, argv []string, sb *unit.Sandbox, notify bool, timeout time.Duration, opts Options) (*exec.Cmd, string, *os.File, error) {
-	if err := unit.ExecFile(self); err != nil {
+func launchSandboxed(ctx context.Context, self string, argv []string, execF *os.File, sb *unit.Sandbox, notify bool, timeout time.Duration, opts Options) (*exec.Cmd, string, *os.File, error) {
+	self, err := unit.ResolveExec(self)
+	if err != nil {
 		return nil, "", nil, err
 	}
-	spec, err := marshalSpec(sb)
+	if execF == nil {
+		return nil, "", nil, fail.E("failed")
+	}
+	spec, err := marshalSpec(sb, notify)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -437,10 +543,8 @@ func launchSandboxed(ctx context.Context, self string, argv []string, sb *unit.S
 		closePair(notifyR, notifyW)
 		return nil, "", nil, fail.E("failed")
 	}
-	extra := []*os.File{specR, statusW}
-	if notifyW != nil {
-		extra = append(extra, notifyW)
-	}
+	// fdReady, fdExec, fdSpec, fdStatus. A nil entry is closed in the child.
+	extra := []*os.File{notifyW, execF, specR, statusW}
 	cmd := &exec.Cmd{
 		Path:        self,
 		Args:        append([]string{self, "apply", "--"}, argv...),

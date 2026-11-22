@@ -26,6 +26,12 @@ func TestMain(m *testing.M) {
 		unix.Exit(1)
 	}
 	if len(os.Args) > 1 && os.Args[1] == "apply" {
+		if os.Getenv("SAHT_STRAY_FD") == "1" {
+			// An fd opened without close-on-exec, like a stray runtime fd.
+			if _, err := syscall.Open("/dev/null", syscall.O_RDONLY, 0); err != nil {
+				unix.Exit(3)
+			}
+		}
 		unix.Exit(ApplyCLI(os.Args[1:]))
 	}
 	os.Exit(m.Run())

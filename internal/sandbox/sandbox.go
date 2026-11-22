@@ -30,6 +30,8 @@ const (
 // Launch starts argv[0]. A nil sandbox is a direct exec and claims "none".
 // A sandbox is applied in a re-exec of self. claim is empty when err != nil.
 // notify places the ready write end on fd 3 and sets SAHINIT_READY_FD.
+// argv[0] is passed to the target as written; the file run is argv[0]
+// resolved once (or opts.Path) and checked by unit.CheckExec.
 func Launch(ctx context.Context, self string, argv []string, sb *unit.Sandbox, notify bool, timeout time.Duration, options ...Options) (*exec.Cmd, string, *os.File, error) {
 	var opts Options
 	if len(options) > 1 {
@@ -47,13 +49,27 @@ func Launch(ctx context.Context, self string, argv []string, sb *unit.Sandbox, n
 	if err := checkArgv(argv); err != nil {
 		return nil, "", nil, err
 	}
-	if err := unit.ExecFile(argv[0]); err != nil {
+	target := opts.Path
+	var err error
+	if target == "" {
+		target, err = unit.ResolveExec(argv[0])
+	} else {
+		err = unit.CheckExec(target)
+	}
+	if err != nil {
 		return nil, "", nil, err
 	}
-	if sb != nil {
-		return launchSandboxed(ctx, self, argv, sb, notify, timeout, opts)
+	execF, err := openExec(target)
+	if err != nil {
+		return nil, "", nil, err
 	}
-	cmd, notifyR, err := direct(argv, notify, opts)
+	if execF != nil {
+		defer execF.Close()
+	}
+	if sb != nil {
+		return launchSandboxed(ctx, self, argv, execF, sb, notify, timeout, opts)
+	}
+	cmd, notifyR, err := direct(target, argv, execF, notify, opts)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -72,7 +88,11 @@ func checkArgv(argv []string) error {
 	return unit.ExecPath(argv[0])
 }
 
-func direct(argv []string, notify bool, opts Options) (*exec.Cmd, *os.File, error) {
+// direct starts the target without the helper. With an exec fd (Linux) the
+// fd sits at fdExec and the kernel runs /proc/self/fd/4, the checked file;
+// the target keeps that O_PATH fd, which a script interpreter needs to read
+// the script. Elsewhere the resolved path is run.
+func direct(target string, argv []string, execF *os.File, notify bool, opts Options) (*exec.Cmd, *os.File, error) {
 	var notifyR, notifyW *os.File
 	if notify {
 		var err error
@@ -94,8 +114,13 @@ func direct(argv []string, notify bool, opts Options) (*exec.Cmd, *os.File, erro
 	if notifyW != nil {
 		extra = []*os.File{notifyW}
 	}
+	if execF != nil {
+		// A nil entry closes fd 3 in the child when notify is off.
+		extra = []*os.File{notifyW, execF}
+		target = execPathFD
+	}
 	cmd := &exec.Cmd{
-		Path:        argv[0],
+		Path:        target,
 		Args:        append([]string{}, argv...),
 		Dir:         "/",
 		Env:         env,
@@ -171,6 +196,9 @@ func reap(cmd *exec.Cmd) error {
 
 // Options supplies execution identity and bounded output sinks. Callers own sinks.
 type Options struct {
+	// Path is argv[0] already resolved (unit.Service.Path). Empty means
+	// Launch resolves argv[0] itself. Either way it is checked again.
+	Path      string
 	Execution unit.Execution
 	Stdout    io.Writer
 	Stderr    io.Writer

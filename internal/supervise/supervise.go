@@ -499,7 +499,7 @@ func (sup *Supervisor) launch(ctx context.Context, s *runtime, argv []string, ge
 	s.mu.Unlock()
 
 	notify := s.svc.Ready == "notify"
-	cmd, claim, notifyR, err := sandbox.Launch(ctx, sup.self, argv, s.svc.Sandbox, notify, timeoutOf(s.svc), sandbox.Options{Execution: s.svc.Execution, Stdout: &s.stdout, Stderr: &s.stderr})
+	cmd, claim, notifyR, err := sandbox.Launch(ctx, sup.self, argv, s.svc.Sandbox, notify, timeoutOf(s.svc), sandbox.Options{Path: s.svc.Path, Execution: s.svc.Execution, Stdout: &s.stdout, Stderr: &s.stderr})
 	if err != nil {
 		if notifyR != nil {
 			if cerr := notifyR.Close(); cerr != nil {

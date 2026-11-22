@@ -32,7 +32,8 @@ func TestLaunchMissingIsExecNotFile(t *testing.T) {
 	}
 }
 
-func TestLaunchSymlinkIsExecNotFile(t *testing.T) {
+// A link such as Debian's /bin/sh -> dash runs its checked target.
+func TestLaunchSymlinkRunsTarget(t *testing.T) {
 	link := "/tmp/sahinit-exec-link"
 	os.Remove(link)
 	if err := os.Symlink("/bin/sh", link); err != nil {
@@ -41,8 +42,38 @@ func TestLaunchSymlinkIsExecNotFile(t *testing.T) {
 	t.Cleanup(func() { os.Remove(link) })
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	cmd, claim, nf, err := Launch(ctx, "/bin/sh", []string{link}, &unit.Sandbox{}, false, time.Second)
+	var out strings.Builder
+	cmd, claim, nf, err := Launch(ctx, "/bin/sh", []string{link, "-c", "printf ok"}, nil, false, time.Second, Options{Stdout: &out})
+	if err != nil || claim != "none" || nf != nil || cmd == nil {
+		t.Fatalf("cmd=%v nf=%v claim=%q err=%v", cmd, nf, claim, err)
+	}
+	if err := cmd.Wait(); err != nil || out.String() != "ok" {
+		t.Fatalf("%v %q", err, out.String())
+	}
+	// A resolved path is never followed again.
+	cmd, claim, nf, err = Launch(ctx, "/bin/sh", []string{link}, nil, false, time.Second, Options{Path: link})
 	if cmd != nil || nf != nil || claim != "" || !errors.Is(err, fail.E("exec_not_file")) {
+		t.Fatalf("cmd=%v nf=%v claim=%q err=%v", cmd, nf, claim, err)
+	}
+}
+
+func TestLaunchWritableDirIsExecPerm(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "sahinit-wdir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	exe := dir + "/run"
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd, claim, nf, err := Launch(ctx, "/bin/sh", []string{exe}, nil, false, time.Second)
+	if cmd != nil || nf != nil || claim != "" || !errors.Is(err, fail.E("exec_perm")) {
 		t.Fatalf("cmd=%v nf=%v claim=%q err=%v", cmd, nf, claim, err)
 	}
 }
