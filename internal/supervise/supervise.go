@@ -98,6 +98,61 @@ type runtime struct {
 	group   int
 	pidfd   int
 	exiting bool
+	// led holds the groups this service led before the current one, kept
+	// until each is empty, so their leftover members stay recognisable.
+	led []ledGroup
+}
+
+type ledGroup struct {
+	pid, pidfd int
+}
+
+// retireGroupLocked moves the current group to led before a new start, and
+// drops led groups that are empty. Caller holds mu.
+func (s *runtime) retireGroupLocked() {
+	if s.group > 0 {
+		s.led = append(s.led, ledGroup{pid: s.group, pidfd: s.pidfd})
+	}
+	s.group, s.pidfd = 0, -1
+	kept := s.led[:0]
+	for _, g := range s.led {
+		if groupEmpty(g.pid, g.pidfd) {
+			closePidfd(g.pidfd)
+			continue
+		}
+		kept = append(kept, g)
+	}
+	s.led = kept
+}
+
+// ledGroupLocked reports whether pgid is a non-empty group this service has
+// led, now or before. Caller holds mu.
+func (s *runtime) ledGroupLocked(pgid int) bool {
+	if pgid <= 0 {
+		return false
+	}
+	if s.group == pgid && !groupEmpty(s.group, s.pidfd) {
+		return true
+	}
+	for _, g := range s.led {
+		if g.pid == pgid && !groupEmpty(g.pid, g.pidfd) {
+			return true
+		}
+	}
+	return false
+}
+
+// groupEmpty reports whether the group led by pid has no members. With a
+// pidfd on Linux 6.9+ it asks about that exact pid, so a reused number reads
+// as empty; otherwise it asks kill(-pid, 0).
+func groupEmpty(pid, pidfd int) bool {
+	if pidfd >= 0 {
+		err := pidfdSignalGroup(pidfd, 0)
+		if err != syscall.EINVAL && err != syscall.ENOSYS {
+			return err == syscall.ESRCH
+		}
+	}
+	return syscall.Kill(-pid, 0) == syscall.ESRCH
 }
 
 // New checks the catalog and the re-exec binary. self is not required to be absolute.
@@ -564,7 +619,7 @@ func (sup *Supervisor) launch(ctx context.Context, s *runtime, argv []string, ge
 		}
 		return fail.E("failed")
 	}
-	oldPidfd := s.pidfd
+	s.retireGroupLocked()
 	s.group, s.pidfd, s.exiting = cmd.Process.Pid, pidfd, false
 	s.pid = cmd.Process.Pid
 	s.eventLocked("started", "", nil)
@@ -578,7 +633,6 @@ func (sup *Supervisor) launch(ctx context.Context, s *runtime, argv []string, ge
 		s.eventLocked("ready", "", nil)
 	}
 	s.mu.Unlock()
-	closePidfd(oldPidfd)
 
 	go sup.lifetime(s, cmd, notifyR, procDone, readyCh, gen)
 	if s.svc.Ready == "exec" {
@@ -930,13 +984,7 @@ func (s *runtime) groupGone(pid int) bool {
 	if s.group != pid {
 		return true
 	}
-	if s.pidfd >= 0 {
-		err := pidfdSignalGroup(s.pidfd, 0)
-		if err != syscall.EINVAL && err != syscall.ENOSYS {
-			return err == syscall.ESRCH
-		}
-	}
-	return syscall.Kill(-pid, 0) == syscall.ESRCH
+	return groupEmpty(pid, s.pidfd)
 }
 
 // signalGroup is for a child no lifetime has started on: it is not reaped

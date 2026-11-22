@@ -280,13 +280,16 @@ func (sup *Supervisor) mutResp(name string, err error) response {
 	return resp
 }
 
-// supervisedPeer reports whether pid is in the process group of a running
-// service. Each service leads its own group, so the group id is the service
-// pid. An unknown pid (0, or a process that is gone) counts as supervised.
+// supervisedPeer reports whether pid is in a process group that a service
+// has led, now or in an earlier start, while that group has members. Each
+// service leads its own group, so a leader's leftover children are still
+// recognised after it exits. An unknown pid (0, or a process that is gone)
+// counts as supervised.
 //
 // Threats: a service with an allowed uid could otherwise stop or restart
-// other services. A service that leaves its group with setsid or setpgid is
-// not caught here; that needs cgroups (batch 2).
+// other services. Not caught here, until cgroups (batch 2): a service that
+// leaves its group with setsid or setpgid, and a peer that exits after
+// sending its request whose pid is reused before this check.
 func (sup *Supervisor) supervisedPeer(pid int) bool {
 	if pid <= 0 {
 		return true
@@ -297,9 +300,9 @@ func (sup *Supervisor) supervisedPeer(pid int) bool {
 	}
 	for _, s := range sup.rt {
 		s.mu.Lock()
-		svc := s.pid
+		hit := s.ledGroupLocked(pgid)
 		s.mu.Unlock()
-		if svc > 0 && (svc == pgid || svc == pid) {
+		if hit {
 			return true
 		}
 	}

@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
 }
 
 // socketClient runs inside a supervised service: one status request, with
-// the raw response written to out.
+// the raw response written to out-PGID.
 func socketClient(sock, out string) int {
 	c, err := net.Dial("unix", sock)
 	if err != nil {
@@ -49,6 +49,8 @@ func socketClient(sock, out string) int {
 	if err != nil {
 		return 3
 	}
+	// One file per process group, so several clients can be told apart.
+	out += "-" + strconv.Itoa(syscall.Getpgrp())
 	if err := os.WriteFile(out+".tmp", raw, 0o600); err != nil {
 		return 3
 	}
