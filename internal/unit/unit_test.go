@@ -324,9 +324,6 @@ func TestParseArgvAndPaths(t *testing.T) {
 		"name": "a", "exec": exec33, "type": "simple", "ready": "exec",
 	}, "failed")
 	wantParse(t, map[string]any{
-		"name": "a", "exec": []string{"/bin/sh", "x", "x"}, "type": "simple", "ready": "exec",
-	}, "duplicate_field")
-	wantParse(t, map[string]any{
 		"name": "a", "exec": []string{"/bin/sh", "a\x00b"}, "type": "simple", "ready": "exec",
 	}, "failed")
 
@@ -396,5 +393,15 @@ func wantParse(t *testing.T, fields map[string]any, token string) {
 	_, err := Parse(unitJSON(t, fields), "a")
 	if !errors.Is(err, fail.E(token)) {
 		t.Fatalf("%s: %v", token, err)
+	}
+}
+
+func TestRepeatedExecArguments(t *testing.T) {
+	svc, err := Parse([]byte(`{"name":"repeat","exec":["/usr/bin/printf","%s","%s"],"type":"simple","ready":"exec"}`), "repeat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(svc.Exec) != 3 || svc.Exec[1] != svc.Exec[2] {
+		t.Fatalf("argv changed: %q", svc.Exec)
 	}
 }

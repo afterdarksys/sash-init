@@ -1,0 +1,8 @@
+[Unit]
+Description=Migration foreground fixture
+[Service]
+Type=exec
+ExecStart=/bin/sleep 300
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target

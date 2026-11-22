@@ -4,9 +4,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/afterdarksys/sahinit/internal/frame"
+	"net"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func putUnit(t *testing.T, dir string, fields map[string]any) {
@@ -301,4 +307,81 @@ func TestSuperviseNotADir(t *testing.T) {
 	sockMissing := sockPath(t, "missing")
 	wantRun(t, []string{"supervise", "--dir", dir + "/missing", "--socket", sockMissing}, 2, "", "failed\n")
 	absentSock(t, sockMissing)
+}
+
+func TestBootSignalHelper(t *testing.T) {
+	if os.Getenv("SAHINIT_BOOT_SIGNAL_HELPER") != "1" {
+		return
+	}
+	os.Exit(run([]string{"supervise", "--dir", os.Getenv("SAHINIT_TEST_UNITS"), "--socket", os.Getenv("SAHINIT_TEST_SOCKET")}, os.Stdout, os.Stderr))
+}
+
+func TestSignalDuringBoot(t *testing.T) {
+	dir := t.TempDir()
+	// Keep the Unix socket path below the platform length limit.
+	sock := fmt.Sprintf("/tmp/sahboot-%d.sock", os.Getpid())
+	defer os.Remove(sock)
+	marker := dir + "/pid"
+	script := dir + "/start.sh"
+	if err := os.WriteFile(script, []byte("printf '%s\\n' \"$$\" > \"$1\"\nexec /bin/sleep 30\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	units := dir + "/units"
+	if err := os.Mkdir(units, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	putUnit(t, units, map[string]any{"name": "slow", "exec": []string{"/bin/sh", script, marker}, "type": "simple", "ready": "notify", "timeout": "30s"})
+	cmd := exec.Command(os.Args[0], "-test.run=^TestBootSignalHelper$")
+	cmd.Env = append(os.Environ(), "SAHINIT_BOOT_SIGNAL_HELPER=1", "SAHINIT_TEST_UNITS="+units, "SAHINIT_TEST_SOCKET="+sock)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	defer cmd.Process.Kill()
+	deadline := time.Now().Add(5 * time.Second)
+	var pid int
+	for time.Now().Before(deadline) {
+		b, err := os.ReadFile(marker)
+		if err == nil {
+			pid, _ = strconv.Atoi(strings.TrimSpace(string(b)))
+			if pid > 0 {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pid == 0 {
+		t.Fatal("service never launched")
+	}
+	defer syscall.Kill(-pid, syscall.SIGKILL)
+	c, err := net.DialTimeout("unix", sock, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(time.Second))
+	if err := frame.Write(c, []byte(`{"op":"status","name":"slow"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := frame.Read(c); err != nil {
+		t.Fatalf("control socket unavailable during boot: %v", err)
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("unclean shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown blocked on boot")
+	}
+	if _, err := os.Stat(sock); !os.IsNotExist(err) {
+		t.Fatalf("socket not cleaned up: %v", err)
+	}
+	if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
+		t.Fatalf("service remains after shutdown: %v", err)
+	}
 }

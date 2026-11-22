@@ -225,7 +225,7 @@ func Parse(raw []byte, stem string) (*Service, error) {
 	if name != stem {
 		return nil, fail.E("name_mismatch")
 	}
-	exec, err := stringsField(obj["exec"], maxArgv, false)
+	exec, err := argvField(obj["exec"])
 	if err != nil {
 		return nil, err
 	}
@@ -325,6 +325,18 @@ func optEdges(obj map[string]json.RawMessage, key string) ([]string, error) {
 		return nil, nil
 	}
 	return stringsField(raw, maxEdges, true)
+}
+
+// argvField preserves argument order and repetition; argv is not a set.
+func argvField(raw json.RawMessage) ([]string, error) {
+	var args []string
+	if err := jsonobj.Unmarshal(raw, &args); err != nil {
+		return nil, err
+	}
+	if len(args) > maxArgv {
+		return nil, fail.E("failed")
+	}
+	return args, nil
 }
 
 func stringsField(raw json.RawMessage, limit int, edges bool) ([]string, error) {

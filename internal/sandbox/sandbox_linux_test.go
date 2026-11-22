@@ -5,9 +5,11 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"runtime"
 	"syscall"
 	"testing"
@@ -210,5 +212,79 @@ func TestApplyNoSpecFD(t *testing.T) {
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 2 || len(out) != 0 {
 		t.Fatalf("err=%v out=%q", err, out)
+	}
+}
+
+// A setup success line must not release the caller before exec closes fd 4.
+func TestChildStatusWaitsForExec(t *testing.T) {
+	for _, execFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("execFails=%v", execFails), func(t *testing.T) {
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			defer w.Close()
+			result := make(chan error, 1)
+			go func() {
+				claim, err := readChildStatus(context.Background(), r, time.Second)
+				if err == nil && claim != claimFull {
+					err = fmt.Errorf("claim %q", claim)
+				}
+				result <- err
+			}()
+			if _, err := w.Write(okLine); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-result:
+				t.Fatalf("returned before exec: %v", err)
+			case <-time.After(30 * time.Millisecond):
+			}
+			if execFails {
+				if _, err := w.Write(errLines["failed"]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			w.Close()
+			if err := <-result; (err != nil) != execFails {
+				t.Fatalf("execFails=%v, err=%v", execFails, err)
+			}
+		})
+	}
+}
+
+func TestLaunchSandboxedExecFailure(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir() + "/missing-interpreter"
+	if err := os.WriteFile(target, []byte("#!/sahinit-nonexistent-interpreter\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// First establish that sandbox setup works, so setup failure cannot make
+	// the broken-interpreter assertion pass accidentally.
+	good, err := filepath.EvalSymlinks("/bin/true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb := &unit.Sandbox{NoNewPrivs: true, ReadOnly: []string{"/"}}
+	cmd, claim, _, err := Launch(context.Background(), self, []string{good}, sb, false, time.Second)
+	if err != nil {
+		t.Fatalf("sandbox setup: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if claim != claimFull {
+		t.Fatalf("claim %q", claim)
+	}
+	cmd, claim, _, err = Launch(context.Background(), self, []string{target}, sb, false, time.Second)
+	if cmd != nil {
+		defer reap(cmd)
+	}
+	if err == nil || claim != "" {
+		t.Fatalf("failed exec accepted: cmd=%v claim=%q err=%v", cmd, claim, err)
 	}
 }

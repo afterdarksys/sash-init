@@ -1,0 +1,4 @@
+#!/sbin/openrc-run
+command="/bin/sleep"
+command_args="300"
+supervisor="supervise-daemon"

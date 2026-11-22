@@ -889,3 +889,34 @@ func TestSocketEmptyAllow(t *testing.T) {
 		t.Fatalf("%s", raw)
 	}
 }
+
+func TestStopAndShutdownKillStubbornDescendant(t *testing.T) {
+	for _, shutdown := range []bool{false, true} {
+		t.Run(fmt.Sprintf("shutdown=%v", shutdown), func(t *testing.T) {
+			childFile := marker(t)
+			childScript := writeScript(t, "trap '' TERM\nprintf '%s\\n' \"$$\" > \"$1\"\nwhile :; do /bin/sleep 1; done\n")
+			parentScript := writeScript(t, "/bin/sh \"$1\" \"$2\" &\nwait\n")
+			svc := newSvc("agent", "simple", "exec", "no", false, 150*time.Millisecond, shExec(parentScript, childScript, childFile))
+			sup := mustSup(t, map[string]*unit.Service{"agent": svc})
+			if err := sup.Start(context.Background(), "agent"); err != nil {
+				t.Fatal(err)
+			}
+			leader := rowOf(t, sup, "agent").Pid
+			t.Cleanup(func() { syscall.Kill(-leader, syscall.SIGKILL) })
+			child := readPIDFile(t, childFile)
+			var err error
+			if shutdown {
+				err = sup.Shutdown(context.Background())
+			} else {
+				err = sup.Stop(context.Background(), "agent")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			waitDead(t, child)
+			if row := rowOf(t, sup, "agent"); row.State != "stopped" || row.Pid != 0 {
+				t.Fatalf("%+v", row)
+			}
+		})
+	}
+}

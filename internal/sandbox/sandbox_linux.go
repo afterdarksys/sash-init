@@ -86,7 +86,8 @@ type held struct {
 }
 
 // ApplyCLI is the re-exec entry. It reads the spec on fd 3, writes one
-// status line on fd 4, then execs the target. A missing handshake fd exits 2
+// setup status on fd 4, then execs the target. Successful exec closes fd 4;
+// a failed exec appends an error status before exiting. A missing handshake fd exits 2
 // and writes nothing.
 func ApplyCLI(args []string) int {
 	runtime.LockOSThread()
@@ -133,7 +134,7 @@ func ApplyCLI(args []string) int {
 		return 1
 	}
 	if err := execTarget(argv, env, notify); err == errExec {
-		return 1
+		return writeStatus("failed")
 	}
 	return 1
 }
@@ -239,9 +240,9 @@ func decodeSpec(raw []byte) (*unit.Sandbox, error) {
 }
 
 func execTarget(argv, env []string, notify bool) error {
-	if err := unix.Close(fdStatus); err != nil {
-		return errExec
-	}
+	// Keep the status pipe open until exec succeeds. On failure the caller
+	// sends an error; a successful exec closes this descriptor atomically.
+	unix.CloseOnExec(fdStatus)
 	if err := unix.Close(fdSpec); err != nil {
 		return errExec
 	}
@@ -552,11 +553,11 @@ func readChildStatus(ctx context.Context, f *os.File, timeout time.Duration) (st
 				return "", fail.E("failed")
 			}
 			buf = append(buf, tmp[:n]...)
-			if i := bytes.IndexByte(buf, '\n'); i >= 0 {
-				return parseStatus(buf[:i+1])
-			}
 		}
 		if err != nil {
+			if err == io.EOF {
+				return parseStatus(buf)
+			}
 			if ctx.Err() != nil {
 				return "", fail.E("failed")
 			}

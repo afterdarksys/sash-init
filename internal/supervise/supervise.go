@@ -213,7 +213,7 @@ func (sup *Supervisor) Stop(ctx context.Context, name string) error {
 	if err := signalGroup(pid, syscall.SIGTERM); err != nil {
 		return fail.E("failed")
 	}
-	if err := waitProc(ctx, procDone, timeoutOf(s.svc)); err != nil {
+	if err := waitGroup(ctx, pid, procDone, timeoutOf(s.svc)); err != nil {
 		if killErr := signalGroup(pid, syscall.SIGKILL); killErr != nil {
 			return fail.E("failed")
 		}
@@ -302,7 +302,7 @@ func (sup *Supervisor) Shutdown(ctx context.Context) error {
 			if waitCtx.Err() != nil {
 				waitCtx = context.Background()
 			}
-			if err := waitProc(waitCtx, procDone, timeoutOf(s.svc)); err != nil {
+			if err := waitGroup(waitCtx, pid, procDone, timeoutOf(s.svc)); err != nil {
 				if killErr := signalGroup(pid, syscall.SIGKILL); killErr != nil {
 					note(killErr)
 				}
@@ -864,16 +864,27 @@ func killCollected(cmd *exec.Cmd, notifyR *os.File) error {
 	return nil
 }
 
-func waitProc(ctx context.Context, procDone chan struct{}, d time.Duration) error {
+// A collected leader does not imply that its process group is empty.
+func waitGroup(ctx context.Context, pid int, done chan struct{}, d time.Duration) error {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
-	select {
-	case <-procDone:
-		return nil
-	case <-timer.C:
-		return fail.E("timeout")
-	case <-ctx.Done():
-		return fail.E("timeout")
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-done:
+			if pid <= 0 || syscall.Kill(-pid, 0) == syscall.ESRCH {
+				return nil
+			}
+		default:
+		}
+		select {
+		case <-timer.C:
+			return fail.E("timeout")
+		case <-ctx.Done():
+			return fail.E("timeout")
+		case <-tick.C:
+		}
 	}
 }
 

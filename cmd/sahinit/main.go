@@ -19,7 +19,8 @@ import (
 )
 
 const usageText = "usage: sahinit plan --dir DIR\n" +
-	"usage: sahinit supervise --dir DIR --socket PATH [--uid UID]\n"
+	"usage: sahinit supervise --dir DIR --socket PATH [--uid UID]\n" +
+	"usage: sahinit migrate --from FORMAT --source DIR [--out NEW_DIR] [--boot]\n"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -34,6 +35,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return sandbox.ApplyCLI(args)
 	}
 	switch args[0] {
+	case "migrate":
+		return runMigrate(args[1:], stdout, stderr)
 	case "plan":
 		return runPlan(args[1:], stdout, stderr)
 	case "supervise":
@@ -118,22 +121,25 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, fail.Token(err))
 		return 2
 	}
-	if err := sup.Boot(context.Background(), waves); err != nil {
-		fmt.Fprintln(stderr, fail.Token(err))
-	}
+	signal.Ignore(syscall.SIGHUP)
+	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	errc := make(chan error, 1)
 	go func() {
 		errc <- sup.Serve()
+		cancel()
 	}()
-	signal.Ignore(syscall.SIGHUP)
-	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
+	if err := sup.Boot(ctx, waves); err != nil && ctx.Err() == nil {
+		fmt.Fprintln(stderr, fail.Token(err))
+	}
+	<-ctx.Done()
 	var serveErr error
 	select {
-	case <-sigc:
 	case serveErr = <-errc:
+	default:
 	}
-	signal.Stop(sigc)
 	if serveErr != nil {
 		fmt.Fprintln(stderr, fail.Token(serveErr))
 	}
