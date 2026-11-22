@@ -26,13 +26,31 @@ type response struct {
 	Diagnostics *Diagnostics `json:"diagnostics,omitempty"`
 }
 
-// Listen binds a local datagram-free unix socket. An existing path is left in place.
+// Listen binds a local stream unix socket. The mode follows the allowlist:
+// 0600 when only the supervisor's own uid may connect, otherwise 0660 with
+// group SocketGID, which must then be set (socket_group). A leftover socket
+// is removed only when it is a socket, owned by our uid, and refuses a
+// connect; anything else at the path is left in place (socket_exists).
+//
+// Threats: the mode is a first gate only; every request is still checked
+// against the allowlist by peer credentials. A live socket, another uid's
+// socket, or a non-socket is never removed, so a second supervisor cannot
+// take over a running one's path.
 func (sup *Supervisor) Listen(path string) error {
 	if path == "" {
 		return fail.E("failed")
 	}
-	if _, err := os.Lstat(path); err == nil {
-		return fail.E("socket_exists")
+	mode, gid, err := sup.socketMode()
+	if err != nil {
+		return err
+	}
+	if fi, err := os.Lstat(path); err == nil {
+		if !staleSocket(path, fi) {
+			return fail.E("socket_exists")
+		}
+		if err := os.Remove(path); err != nil {
+			return fail.E("failed")
+		}
 	} else if !os.IsNotExist(err) {
 		return fail.E("failed")
 	}
@@ -40,7 +58,7 @@ func (sup *Supervisor) Listen(path string) error {
 	if err != nil {
 		return fail.E("failed")
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err := setSocketPerm(path, mode, gid); err != nil {
 		cerr := ln.Close()
 		rerr := os.Remove(path)
 		if cerr != nil || (rerr != nil && !os.IsNotExist(rerr)) {
@@ -53,6 +71,46 @@ func (sup *Supervisor) Listen(path string) error {
 	sup.bound = path
 	sup.mu.Unlock()
 	return nil
+}
+
+// socketMode returns the socket mode and group (-1 for none).
+func (sup *Supervisor) socketMode() (os.FileMode, int, error) {
+	euid := uint32(os.Geteuid())
+	others := false
+	for uid := range sup.Allow {
+		if uid != euid {
+			others = true
+		}
+	}
+	if !others {
+		return 0o600, -1, nil
+	}
+	if sup.SocketGID == nil {
+		return 0, -1, fail.E("socket_group")
+	}
+	return 0o660, int(*sup.SocketGID), nil
+}
+
+func setSocketPerm(path string, mode os.FileMode, gid int) error {
+	if gid >= 0 {
+		if err := os.Lchown(path, -1, gid); err != nil {
+			return err
+		}
+	}
+	return os.Chmod(path, mode)
+}
+
+func staleSocket(path string, fi os.FileInfo) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || fi.Mode()&os.ModeSocket == 0 || st.Uid != uint32(os.Geteuid()) {
+		return false
+	}
+	c, err := net.DialTimeout("unix", path, time.Second)
+	if err == nil {
+		c.Close()
+		return false
+	}
+	return errors.Is(err, syscall.ECONNREFUSED)
 }
 
 // Close closes the listener and unlinks only the socket this process bound.

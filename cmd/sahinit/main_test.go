@@ -395,3 +395,12 @@ func TestPlanNamesRefusedUnit(t *testing.T) {
 	}
 	wantRun(t, []string{"plan", "--dir", dir}, 0, "agent\n", "unit_perm other.json\n")
 }
+
+func TestSuperviseGIDFlag(t *testing.T) {
+	dir := t.TempDir()
+	sock := sockPath(t, "gid")
+	wantRun(t, []string{"supervise", "--dir", dir, "--socket", sock, "--gid", "x"}, 2, "", usageText)
+	wantRun(t, []string{"supervise", "--dir", dir, "--socket", sock, "--gid", "1", "--gid", "2"}, 2, "", usageText)
+	wantRun(t, []string{"supervise", "--dir", dir, "--socket", sock, "--gid", "1"}, 2, "", "empty\n")
+	absentSock(t, sock)
+}

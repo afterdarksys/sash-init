@@ -22,7 +22,7 @@ import (
 const usageText = policyUsage +
 	"usage: sahinit ctl --socket PATH status|diagnostics|start|stop|restart [NAME]\n" +
 	"usage: sahinit plan --dir DIR\n" +
-	"usage: sahinit supervise --dir DIR --socket PATH [--uid UID]\n" +
+	"usage: sahinit supervise --dir DIR --socket PATH [--uid UID]... [--gid GID]\n" +
 	"usage: sahinit migrate --from FORMAT --source DIR [--out NEW_DIR] [--boot]\n"
 
 func main() {
@@ -109,6 +109,16 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		uids = append(uids, uint32(n))
 		return nil
 	})
+	var gid *uint32
+	fs.Func("gid", "", func(s string) error {
+		n, err := strconv.ParseUint(s, 10, 32)
+		if err != nil || gid != nil {
+			return fail.E("failed")
+		}
+		g := uint32(n)
+		gid = &g
+		return nil
+	})
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || *dir == "" || *sock == "" {
 		fmt.Fprint(stderr, usageText)
 		return 2
@@ -133,6 +143,7 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, fail.Token(err))
 		return 2
 	}
+	sup.SocketGID = gid
 	if passed {
 		sup.Allow = map[uint32]struct{}{}
 		for _, uid := range uids {

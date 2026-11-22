@@ -60,8 +60,11 @@ type Supervisor struct {
 	RestartBurst  int
 	RestartWindow time.Duration
 	Allow         map[uint32]struct{}
-	MaxHandlers   int
-	ReadDeadline  time.Duration
+	// SocketGID is the socket's group when Allow names a uid other than
+	// the supervisor's own; the socket is then mode 0660.
+	SocketGID    *uint32
+	MaxHandlers  int
+	ReadDeadline time.Duration
 }
 
 type runtime struct {

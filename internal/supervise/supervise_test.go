@@ -902,6 +902,8 @@ func TestSocketUIDDeny(t *testing.T) {
 	agent := newSvc("agent", "simple", "exec", "no", false, 2*time.Second, []string{"/bin/sleep", "30"})
 	sup := mustSup(t, map[string]*unit.Service{"agent": agent})
 	sup.Allow = map[uint32]struct{}{65534: {}}
+	gid := uint32(os.Getegid())
+	sup.SocketGID = &gid
 	path := listenServe(t, sup)
 	_, raw := rpc(t, path, `{"op":"status","name":"agent"}`)
 	if string(raw) != `{"ok":false,"error":"uid_denied"}` {
