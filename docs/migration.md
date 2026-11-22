@@ -48,7 +48,7 @@ migration host's filesystem.
 
 This is a conservative first converter, **not a claim of behavioral equivalence**.
 Even supported units use SAHINIT's clean PATH-only environment, `/` working directory,
-discarded service output, five-second default timeout, and bounded restart policy.
+bounded in-memory service output tails, five-second default timeout, and bounded restart policy.
 Systemd simple readiness becomes exec readiness. SAHINIT `After` orders boot only;
 shutdown ordering and runtime dependency propagation are not implemented.
 Daemontools originally runs in its service directory and retries indefinitely.

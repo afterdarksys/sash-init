@@ -18,7 +18,9 @@ import (
 	"github.com/afterdarksys/sahinit/internal/unit"
 )
 
-const usageText = "usage: sahinit plan --dir DIR\n" +
+const usageText = policyUsage +
+	"usage: sahinit ctl --socket PATH status|diagnostics|start|stop|restart [NAME]\n" +
+	"usage: sahinit plan --dir DIR\n" +
 	"usage: sahinit supervise --dir DIR --socket PATH [--uid UID]\n" +
 	"usage: sahinit migrate --from FORMAT --source DIR [--out NEW_DIR] [--boot]\n"
 
@@ -35,6 +37,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return sandbox.ApplyCLI(args)
 	}
 	switch args[0] {
+	case "policy":
+		return runPolicy(args[1:], stdout, stderr)
+	case "ctl":
+		return runCtl(args[1:], stdout, stderr)
 	case "migrate":
 		return runMigrate(args[1:], stdout, stderr)
 	case "plan":

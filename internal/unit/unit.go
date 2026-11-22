@@ -40,7 +40,7 @@ var nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 var unitKeys = map[string]struct{}{
 	"name": {}, "exec": {}, "type": {}, "restart": {}, "ready": {},
 	"after": {}, "needs": {}, "wants": {}, "timeout": {}, "boot": {},
-	"sandbox": {},
+	"sandbox": {}, "execution": {},
 }
 
 var sandboxKeys = map[string]struct{}{
@@ -62,17 +62,18 @@ var capByName = map[string]uint32{
 
 // Service is one catalog entry. Boot is the resolved boot-set bit.
 type Service struct {
-	Name    string
-	Exec    []string
-	Type    string
-	Restart string
-	Ready   string
-	After   []string
-	Needs   []string
-	Wants   []string
-	Timeout time.Duration
-	Boot    bool
-	Sandbox *Sandbox
+	Name      string
+	Exec      []string
+	Type      string
+	Restart   string
+	Ready     string
+	After     []string
+	Needs     []string
+	Wants     []string
+	Timeout   time.Duration
+	Boot      bool
+	Sandbox   *Sandbox
+	Execution Execution
 }
 
 // Sandbox is present only when the unit named a sandbox object.
@@ -312,10 +313,14 @@ func Parse(raw []byte, stem string) (*Service, error) {
 			return nil, err
 		}
 	}
+	execution, err := parseExecution(obj["execution"])
+	if err != nil {
+		return nil, err
+	}
 	return &Service{
 		Name: name, Exec: exec, Type: typ, Restart: restart, Ready: ready,
 		After: after, Needs: needs, Wants: wants, Timeout: timeout, Boot: boot,
-		Sandbox: sb,
+		Sandbox: sb, Execution: execution,
 	}, nil
 }
 

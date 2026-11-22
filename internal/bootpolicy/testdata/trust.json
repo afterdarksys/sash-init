@@ -1,0 +1,14 @@
+{
+  "tenant_id": "tenant-1",
+  "host_id": "host-1",
+  "enrollment_id": "enrollment-1",
+  "recovery_profile_id": "recovery-1",
+  "keys": {
+    "test-key": "IVL40Zt5HSRFMkLhXy6rbLfP+ntqXtMAl5YOBpiB2xI="
+  },
+  "max_validity_seconds": 604800,
+  "max_grace_seconds": 172800,
+  "max_job_seconds": 300,
+  "min_refresh_seconds": 30,
+  "max_refresh_seconds": 86400
+}

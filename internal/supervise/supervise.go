@@ -65,6 +65,11 @@ type Supervisor struct {
 }
 
 type runtime struct {
+	stdout     tail
+	stderr     tail
+	events     []Event
+	eventSeq   uint64
+	lastExit   *Exit
 	svc        *unit.Service
 	op         sync.Mutex
 	mu         sync.Mutex
@@ -206,6 +211,7 @@ func (sup *Supervisor) Stop(ctx context.Context, name string) error {
 	s.gen++
 	gen := s.gen
 	s.stopReq = true
+	s.eventLocked("stopping", "", nil)
 	s.state = "stopping"
 	procDone := s.procDone
 	s.mu.Unlock()
@@ -290,6 +296,7 @@ func (sup *Supervisor) Shutdown(ctx context.Context) error {
 			s.mu.Unlock()
 			continue
 		}
+		s.eventLocked("stopping", "", nil)
 		s.state = "stopping"
 		s.mu.Unlock()
 		wg.Add(1)
@@ -435,6 +442,7 @@ func (sup *Supervisor) startLocked(ctx context.Context, s *runtime, arg string, 
 		s.restartsAt = nil
 	}
 	gen := s.gen
+	s.eventLocked("starting", "", nil)
 	s.state = "starting"
 	s.ready = false
 	s.pid = 0
@@ -491,7 +499,7 @@ func (sup *Supervisor) launch(ctx context.Context, s *runtime, argv []string, ge
 	s.mu.Unlock()
 
 	notify := s.svc.Ready == "notify"
-	cmd, claim, notifyR, err := sandbox.Launch(ctx, sup.self, argv, s.svc.Sandbox, notify, timeoutOf(s.svc))
+	cmd, claim, notifyR, err := sandbox.Launch(ctx, sup.self, argv, s.svc.Sandbox, notify, timeoutOf(s.svc), sandbox.Options{Execution: s.svc.Execution, Stdout: &s.stdout, Stderr: &s.stderr})
 	if err != nil {
 		if notifyR != nil {
 			if cerr := notifyR.Close(); cerr != nil {
@@ -535,6 +543,7 @@ func (sup *Supervisor) launch(ctx context.Context, s *runtime, argv []string, ge
 		return fail.E("failed")
 	}
 	s.pid = cmd.Process.Pid
+	s.eventLocked("started", "", nil)
 	s.cmd = cmd
 	s.procDone = procDone
 	s.readyCh = readyCh
@@ -542,6 +551,7 @@ func (sup *Supervisor) launch(ctx context.Context, s *runtime, argv []string, ge
 	if s.svc.Ready == "exec" {
 		s.state = "running"
 		s.ready = true
+		s.eventLocked("ready", "", nil)
 	}
 	s.mu.Unlock()
 
@@ -564,6 +574,7 @@ func (sup *Supervisor) lifetime(s *runtime, cmd *exec.Cmd, notifyR *os.File, pro
 				s.state = "running"
 				s.ready = true
 				s.lastError = ""
+				s.eventLocked("ready", "", nil)
 				published = true
 			}
 			s.mu.Unlock()
@@ -586,6 +597,17 @@ func (sup *Supervisor) lifetime(s *runtime, cmd *exec.Cmd, notifyR *os.File, pro
 		}
 	}
 	waitErr := cmd.Wait()
+	s.mu.Lock()
+	exit := &Exit{Code: -1, Time: time.Now().UTC()}
+	if cmd.ProcessState != nil {
+		exit.Code = cmd.ProcessState.ExitCode()
+		if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			exit.Signal = int(ws.Signal())
+		}
+	}
+	s.lastExit = exit
+	s.eventLocked("exited", "", exit)
+	s.mu.Unlock()
 	ok := false
 	if cmd.ProcessState != nil && cmd.ProcessState.ExitCode() == 0 {
 		ok = true
@@ -672,6 +694,7 @@ func (sup *Supervisor) onExit(s *runtime, procDone chan struct{}, gen uint64, ex
 		s.ready = false
 		s.pid = 0
 		s.lastError = "restart_limit"
+		s.eventLocked("restart_limit", "restart_limit", nil)
 		s.sandbox = ""
 		s.mu.Unlock()
 		close(procDone)
@@ -774,6 +797,7 @@ func (sup *Supervisor) timeOut(s *runtime, procDone chan struct{}, gen uint64) e
 	}
 	s.timedOut = true
 	s.lastError = "timeout"
+	s.eventLocked("timeout", "timeout", nil)
 	pid := s.pid
 	s.mu.Unlock()
 	if err := signalGroup(pid, syscall.SIGKILL); err != nil {
@@ -815,6 +839,7 @@ func (sup *Supervisor) failLaunch(s *runtime, gen uint64, err error) {
 	s.ready = false
 	s.pid = 0
 	s.lastError = fail.Token(err)
+	s.eventLocked("launch_failed", s.lastError, nil)
 	if s.lastError == "" {
 		s.lastError = "failed"
 	}

@@ -9,6 +9,7 @@ package sandbox
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -24,13 +25,22 @@ const (
 	claimFull = "no_new_privs,landlock,caps"
 	maxArgv   = 32
 	maxArg    = 256
-	cleanPATH = "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
 )
 
 // Launch starts argv[0]. A nil sandbox is a direct exec and claims "none".
 // A sandbox is applied in a re-exec of self. claim is empty when err != nil.
 // notify places the ready write end on fd 3 and sets SAHINIT_READY_FD.
-func Launch(ctx context.Context, self string, argv []string, sb *unit.Sandbox, notify bool, timeout time.Duration) (*exec.Cmd, string, *os.File, error) {
+func Launch(ctx context.Context, self string, argv []string, sb *unit.Sandbox, notify bool, timeout time.Duration, options ...Options) (*exec.Cmd, string, *os.File, error) {
+	var opts Options
+	if len(options) > 1 {
+		return nil, "", nil, fail.E("failed")
+	}
+	if len(options) == 1 {
+		opts = options[0]
+	}
+	if err := opts.Execution.Validate(); err != nil {
+		return nil, "", nil, err
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, "", nil, fail.E("failed")
 	}
@@ -41,9 +51,9 @@ func Launch(ctx context.Context, self string, argv []string, sb *unit.Sandbox, n
 		return nil, "", nil, err
 	}
 	if sb != nil {
-		return launchSandboxed(ctx, self, argv, sb, notify, timeout)
+		return launchSandboxed(ctx, self, argv, sb, notify, timeout, opts)
 	}
-	cmd, notifyR, err := direct(argv, notify)
+	cmd, notifyR, err := direct(argv, notify, opts)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -62,7 +72,7 @@ func checkArgv(argv []string) error {
 	return unit.ExecPath(argv[0])
 }
 
-func direct(argv []string, notify bool) (*exec.Cmd, *os.File, error) {
+func direct(argv []string, notify bool, opts Options) (*exec.Cmd, *os.File, error) {
 	var notifyR, notifyW *os.File
 	if notify {
 		var err error
@@ -76,7 +86,7 @@ func direct(argv []string, notify bool) (*exec.Cmd, *os.File, error) {
 		closePair(notifyR, notifyW)
 		return nil, nil, fail.E("failed")
 	}
-	env := []string{cleanPATH}
+	env := opts.Execution.Env()
 	if notify {
 		env = append(env, "SAHINIT_READY_FD=3")
 	}
@@ -95,6 +105,7 @@ func direct(argv []string, notify bool) (*exec.Cmd, *os.File, error) {
 		ExtraFiles:  extra,
 		SysProcAttr: procAttr(),
 	}
+	opts.configure(cmd)
 	if err := cmd.Start(); err != nil {
 		null.Close()
 		closePair(notifyR, notifyW)
@@ -156,4 +167,28 @@ func reap(cmd *exec.Cmd) error {
 		return killErr
 	}
 	return fail.E("failed")
+}
+
+// Options supplies execution identity and bounded output sinks. Callers own sinks.
+type Options struct {
+	Execution unit.Execution
+	Stdout    io.Writer
+	Stderr    io.Writer
+}
+
+func (o Options) configure(cmd *exec.Cmd) {
+	if o.Execution.Directory != "" {
+		cmd.Dir = o.Execution.Directory
+	}
+	if o.Execution.UID != nil {
+		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: *o.Execution.UID, Gid: *o.Execution.GID, Groups: append([]uint32{}, o.Execution.Groups...)}
+	}
+	if o.Stdout != nil {
+		cmd.Stdout = o.Stdout
+	}
+	if o.Stderr != nil {
+		cmd.Stderr = o.Stderr
+	}
+	// Descendants may inherit output pipes after the main process exits.
+	cmd.WaitDelay = time.Second
 }

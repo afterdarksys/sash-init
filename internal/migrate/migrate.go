@@ -76,7 +76,7 @@ func Scan(format, source string, boot bool) (*Report, error) {
 		return nil, fmt.Errorf("source must contain 1..256 entries")
 	}
 	r := &Report{Format: format, Units: []Unit{}, Diagnostics: []Diagnostic{}}
-	r.note(source, 0, "warning", "Review required: output uses SAHINIT's clean environment, / working directory, discarded stdout/stderr, five-second timeouts and restart burst limits. No host enablement, global configuration or implicit dependencies are imported.")
+	r.note(source, 0, "warning", "Review required: output uses SAHINIT's clean environment, / working directory, bounded in-memory stdout/stderr tails, five-second timeouts and restart burst limits. No host enablement, global configuration or implicit dependencies are imported.")
 	for _, e := range entries {
 		path := filepath.Join(source, e.Name())
 		name := e.Name()

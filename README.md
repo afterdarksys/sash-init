@@ -1,7 +1,8 @@
 # SAHINIT
 
 A Go userspace service supervisor with strict JSON units, dependency boot waves,
-readiness checks, restart limits, a Unix control socket, and optional Linux sandboxing.
+readiness checks, restart limits, explicit execution identities, bounded output tails,
+a Unix control socket, and optional Linux sandboxing.
 It is not yet a PID 1 replacement.
 
 ```sh
@@ -27,3 +28,10 @@ See the [migration guide](docs/migration.md) for compatibility and the
 ./build.sh
 ./scripts/test-migration-docker.sh
 ```
+
+Execution context, local control commands, and lifecycle diagnostics are documented
+in [execution and diagnostics](docs/execution.md).
+
+Signed boot-policy metadata can be verified, cached, and inspected with
+`sahinit policy`. See [boot-policy metadata](docs/boot-policy.md) for the wire
+contract and scope; policy enforcement and network renewal are not wired yet.

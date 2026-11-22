@@ -117,7 +117,7 @@ func ApplyCLI(args []string) int {
 		return writeStatus(fail.Token(err))
 	}
 	notify := unix.Fstat(fdNotify, &st) == nil
-	env := []string{cleanPATH}
+	env := os.Environ()
 	if notify {
 		env = append(env, "SAHINIT_READY_FD=3")
 	}
@@ -404,7 +404,7 @@ func emptyStr(s []string) []string {
 	return s
 }
 
-func launchSandboxed(ctx context.Context, self string, argv []string, sb *unit.Sandbox, notify bool, timeout time.Duration) (*exec.Cmd, string, *os.File, error) {
+func launchSandboxed(ctx context.Context, self string, argv []string, sb *unit.Sandbox, notify bool, timeout time.Duration, opts Options) (*exec.Cmd, string, *os.File, error) {
 	if err := unit.ExecFile(self); err != nil {
 		return nil, "", nil, err
 	}
@@ -445,13 +445,14 @@ func launchSandboxed(ctx context.Context, self string, argv []string, sb *unit.S
 		Path:        self,
 		Args:        append([]string{self, "apply", "--"}, argv...),
 		Dir:         "/",
-		Env:         []string{cleanPATH},
+		Env:         opts.Execution.Env(),
 		Stdin:       null,
 		Stdout:      null,
 		Stderr:      null,
 		ExtraFiles:  extra,
 		SysProcAttr: procAttr(),
 	}
+	opts.configure(cmd)
 	if err := cmd.Start(); err != nil {
 		null.Close()
 		closePair(specR, specW)

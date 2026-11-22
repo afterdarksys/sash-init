@@ -12,7 +12,7 @@ import (
 	"github.com/afterdarksys/sahinit/internal/unit"
 )
 
-func launchSandboxed(context.Context, string, []string, *unit.Sandbox, bool, time.Duration) (*exec.Cmd, string, *os.File, error) {
+func launchSandboxed(context.Context, string, []string, *unit.Sandbox, bool, time.Duration, Options) (*exec.Cmd, string, *os.File, error) {
 	return nil, "", nil, fail.E("sandbox_unsupported")
 }
 

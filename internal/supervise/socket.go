@@ -19,9 +19,10 @@ var reqKeys = map[string]struct{}{
 }
 
 type response struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error"`
-	Rows  []Row  `json:"rows,omitempty"`
+	OK          bool         `json:"ok"`
+	Error       string       `json:"error"`
+	Rows        []Row        `json:"rows,omitempty"`
+	Diagnostics *Diagnostics `json:"diagnostics,omitempty"`
 }
 
 // Listen binds a local datagram-free unix socket. An existing path is left in place.
@@ -154,6 +155,9 @@ func (sup *Supervisor) handle(conn *net.UnixConn) {
 func (sup *Supervisor) dispatch(op, name, arg string) response {
 	ctx := context.Background()
 	switch op {
+	case "diagnostics":
+		d, err := sup.Diagnostics(name)
+		return response{OK: err == nil, Error: fail.Token(err), Diagnostics: d}
 	case "status":
 		rows, err := sup.Status(name)
 		if err != nil {
