@@ -46,6 +46,30 @@ refuse startup rather than weakening the sandbox. No capability elevation is
 provided by this feature. The target still receives `SAHINIT_READY_FD=3` for
 notify readiness.
 
+A unit with a `sandbox` must name a non-root `uid` (`sandbox_root`); the helper
+also refuses to apply a sandbox while it runs as uid 0. The Landlock ABI is
+detected and only the rights it knows are handled; a kernel without Landlock is
+`landlock_unavailable`, and a grant needing a right the ABI lacks is
+`landlock_abi`. The status claim names the ABI applied, for example
+`no_new_privs,landlock_v3,caps`, and is reported only while a process runs.
+
+## Unit files and executables
+
+The unit directory and each unit file must be owned by root (or by the
+supervisor's own uid) and not writable by group or other. A failing directory
+refuses the catalog with `unit_perm`; a failing file is left out, named on
+stderr as `unit_perm FILE`, and the rest of the catalog loads.
+
+`exec[0]` is resolved once at load, following links such as Debian's
+`/bin/sh -> dash`; argv[0] is passed as written. The resolved file must be a
+regular executable, and it and every parent directory must be owned by root
+(or the supervisor's uid) and not writable by group or other, except sticky
+directories such as `/tmp` (`exec_perm`). On Linux the checked file is opened
+and run through that fd, so the file checked is the file run. A direct launch
+keeps that `O_PATH` fd as fd 4, which a script interpreter needs; a sandboxed
+launch closes it on exec for binaries. Every other fd from 3 up, except the
+readiness fd, is closed on exec. Sandbox paths are resolved once at load too.
+
 The migration converters still reject user, group, environment, and working-directory
 directives they cannot translate. Native runtime support does not imply automatic
 conversion support.
@@ -62,6 +86,11 @@ sahinit ctl --socket /run/sahinit.sock restart worker
 allows an omitted service name. It prints the JSON response and exits 0 for success,
 1 for transport or operation failure, and 2 for invalid usage. The existing socket
 mode and peer UID authorization apply to every operation, including diagnostics.
+The socket is 0600 when only the supervisor's uid may connect; when `--uid`
+names another uid it is 0660 and `--gid GID` names its group (`socket_group`
+otherwise). A request from inside a running service's process group is refused
+with `peer_supervised`. A leftover socket from a crash is replaced only when it
+is a socket, owned by the supervisor's uid, and refuses a connect.
 This is local control; SystemAPI grants and remote transport are not added here.
 
 The framed request `{"op":"diagnostics","name":"worker"}` returns a
