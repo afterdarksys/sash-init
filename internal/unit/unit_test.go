@@ -610,3 +610,29 @@ func TestLoadResolvesExec(t *testing.T) {
 		t.Fatalf("%q", svcs["b"].Path)
 	}
 }
+
+func TestLoadResolvesSandboxPaths(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := base + "/real"
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, base+"/link"); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	writeRaw(t, dir, "a.json", `{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","execution":{"uid":65534,"gid":65534},"sandbox":{"read_only_paths":["`+base+`/link","`+real+`","`+base+`/missing"]}}`)
+	svcs, _, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := svcs["a"].Sandbox.ReadOnly
+	if len(got) != 2 || got[0] != real || got[1] != base+"/missing" {
+		t.Fatalf("%q", got)
+	}
+	writeRaw(t, dir, "a.json", `{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","execution":{"uid":65534,"gid":65534},"sandbox":{"read_only_paths":["`+base+`/link"],"read_write_paths":["`+real+`"]}}`)
+	wantLoad(t, dir, "sandbox_overlap")
+}

@@ -247,6 +247,9 @@ func Load(dir string) (svcs map[string]*Service, refused map[string]string, err 
 		if resolved, err := ResolveExec(svc.Exec[0]); err == nil {
 			svc.Path = resolved
 		}
+		if err := resolveSandbox(svc.Sandbox); err != nil {
+			return nil, nil, err
+		}
 		out[svc.Name] = svc
 	}
 	if len(out) == 0 {
@@ -544,6 +547,46 @@ func FinishSandbox(sb *Sandbox, privsPresent, privs bool) error {
 		}
 	}
 	return nil
+}
+
+// resolveSandbox replaces each sandbox path with its target, resolved once
+// at load like the executable, so /lib on a merged-/usr system becomes
+// /usr/lib. A path that does not resolve is kept as written; the helper then
+// refuses it with sandbox_path, since it opens paths without following links.
+// Two paths with one target in the same list become one; in both lists they
+// are sandbox_overlap.
+func resolveSandbox(sb *Sandbox) error {
+	if sb == nil {
+		return nil
+	}
+	ro, rw := resolvePaths(sb.ReadOnly), resolvePaths(sb.ReadWrite)
+	inRW := make(map[string]struct{}, len(rw))
+	for _, p := range rw {
+		inRW[p] = struct{}{}
+	}
+	for _, p := range ro {
+		if _, ok := inRW[p]; ok {
+			return fail.E("sandbox_overlap")
+		}
+	}
+	sb.ReadOnly, sb.ReadWrite = ro, rw
+	return nil
+}
+
+func resolvePaths(in []string) []string {
+	var out []string
+	seen := make(map[string]struct{}, len(in))
+	for _, p := range in {
+		if r, err := filepath.EvalSymlinks(p); err == nil && sandboxPath(r) == nil {
+			p = r
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out
 }
 
 func sandboxPath(p string) error {
