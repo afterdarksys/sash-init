@@ -20,5 +20,15 @@ The mode is part of the **signed** policy (`lifetime: "never"` or `"renew"`), so
 ## Build order
 
 1. Batch 1 hardening (`hardening-1.md`). It is independent of this decision.
-2. The `lifetime` field, the revocation floor, the trust cap, and the `never` default, with tests both ways.
+2. **Done** (`feat/policy-lifetime`). The `lifetime` field, the revocation floor, the trust cap, and the `never` default, with tests both ways.
 3. Finish the renewal slice behind `renew`.
+
+## Step 2 decisions (2026-11-22)
+
+- **Wire version.** `sahinit-boot-policy/1` is unchanged and always means `renew`; its golden vector is byte-identical. `sahinit-boot-policy/2` adds a required `lifetime`. The version selects the shape: `lifetime` is refused in version 1 and required in version 2. New policies should be version 2 with `never`.
+- **`never` and time.** `expires_at`, `offline_until` and `refresh_after_seconds` must be 0, and `not_before` must equal `issued_at`. We kept `not_before` on the wire but gave it no effect: honouring a delayed start would need a trusted clock forever, and a clock set back before it would end the policy. A `never` policy is `valid` with no clock, an untrusted clock, or any clock value.
+- **Mode change.** Switching lifetime needs a higher catalog generation. Version 1 to version-2 `renew` at the same generation is an ordinary renewal (the wire version is excluded from the renewal comparison).
+- **Floor.** A separate document, `sahinit-boot-floor/1`, in the same envelope, signed over the domain `sahinit-boot-floor-v1\n` (policies use `sahinit-boot-policy-v1\n`). Fields: `version`, `tenant_id`, `host_id`, `enrollment_id`, `min_sequence`, `issued_at`. Sequences at or above `min_sequence` are admitted. A lower floor is `policy_floor_rollback`, the same `min_sequence` with different bytes is `policy_floor_conflict`. Stored as `floor.json` beside `policy.json` with the same atomic write. A corrupt floor fails closed.
+- **Trust cap.** `max_lifetime` is optional in the trust file and defaults to `never` (both allowed). In code, `Trust.Validate` requires it to be set explicitly; only `DecodeTrust` applies the default.
+- **CLI.** `sahinit policy floor-install|floor-show`. `status` reports `lifetime` and `floor_min_sequence`, and reports a revoked cache as `state: revoked`, exit 1.
+- **Open.** The floor shares the anti-rollback limits of the policy cache: deleting the cache directory or restoring a snapshot removes it. Key rotation (audit item 10) is still not documented.
