@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -61,7 +62,7 @@ func runPlan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usageText)
 		return 2
 	}
-	svcs, err := unit.Load(*dir)
+	svcs, err := loadUnits(*dir, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, fail.Token(err))
 		return 2
@@ -75,6 +76,21 @@ func runPlan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, strings.Join(wave, " "))
 	}
 	return 0
+}
+
+// loadUnits loads the catalog and names each refused unit file on stderr as
+// "TOKEN FILE". A refused unit is left out; the rest of the catalog loads.
+func loadUnits(dir string, stderr io.Writer) (map[string]*unit.Service, error) {
+	svcs, refused, err := unit.Load(dir)
+	files := make([]string, 0, len(refused))
+	for file := range refused {
+		files = append(files, file)
+	}
+	sort.Strings(files)
+	for _, file := range files {
+		fmt.Fprintln(stderr, refused[file], file)
+	}
+	return svcs, err
 }
 
 func runSupervise(args []string, stdout, stderr io.Writer) int {
@@ -97,7 +113,7 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usageText)
 		return 2
 	}
-	svcs, err := unit.Load(*dir)
+	svcs, err := loadUnits(*dir, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, fail.Token(err))
 		return 2

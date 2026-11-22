@@ -94,7 +94,7 @@ func TestFinishSandboxNil(t *testing.T) {
 
 func TestLoadEmpty(t *testing.T) {
 	dir := t.TempDir()
-	_, err := Load(dir)
+	_, _, err := Load(dir)
 	if !errors.Is(err, fail.E("empty")) {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func mustParse(t *testing.T, raw, stem string) *Service {
 
 func wantLoad(t *testing.T, dir, token string) {
 	t.Helper()
-	_, err := Load(dir)
+	_, _, err := Load(dir)
 	if !errors.Is(err, fail.E(token)) {
 		t.Fatalf("%s: got %v", token, err)
 	}
@@ -404,4 +404,81 @@ func TestRepeatedExecArguments(t *testing.T) {
 	if len(svc.Exec) != 3 || svc.Exec[1] != svc.Exec[2] {
 		t.Fatalf("argv changed: %q", svc.Exec)
 	}
+}
+
+func TestLoadUnitPermRefusesOnlyThatFile(t *testing.T) {
+	dir := t.TempDir()
+	writeRaw(t, dir, "a.json", `{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec"}`)
+	writeRaw(t, dir, "b.json", `{"name":"b","exec":["/bin/sh"],"type":"simple","ready":"exec"}`)
+	for _, mode := range []os.FileMode{0o664, 0o646, 0o666} {
+		if err := os.Chmod(dir+"/b.json", mode); err != nil {
+			t.Fatal(err)
+		}
+		svcs, refused, err := Load(dir)
+		if err != nil {
+			t.Fatalf("mode %o: %v", mode, err)
+		}
+		if _, ok := svcs["a"]; !ok || len(svcs) != 1 {
+			t.Fatalf("mode %o: loaded %v", mode, svcs)
+		}
+		if len(refused) != 1 || refused["b.json"] != "unit_perm" {
+			t.Fatalf("mode %o: refused %v", mode, refused)
+		}
+	}
+	if err := os.Chmod(dir+"/b.json", 0o644); err != nil {
+		t.Fatal(err)
+	}
+	svcs, refused, err := Load(dir)
+	if err != nil || len(svcs) != 2 || len(refused) != 0 {
+		t.Fatalf("%v %v %v", svcs, refused, err)
+	}
+}
+
+func TestLoadUnitPermAllRefusedIsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	writeRaw(t, dir, "a.json", `{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec"}`)
+	if err := os.Chmod(dir+"/a.json", 0o666); err != nil {
+		t.Fatal(err)
+	}
+	svcs, refused, err := Load(dir)
+	if svcs != nil || refused["a.json"] != "unit_perm" || !errors.Is(err, fail.E("empty")) {
+		t.Fatalf("%v %v %v", svcs, refused, err)
+	}
+}
+
+func TestLoadUnitPermDirectory(t *testing.T) {
+	dir := t.TempDir()
+	writeRaw(t, dir, "a.json", `{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec"}`)
+	for _, mode := range []os.FileMode{0o770, 0o707, 0o777} {
+		if err := os.Chmod(dir, mode); err != nil {
+			t.Fatal(err)
+		}
+		wantLoad(t, dir, "unit_perm")
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Load(dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadUnitPermOwner(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to chown")
+	}
+	dir := t.TempDir()
+	writeRaw(t, dir, "a.json", `{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec"}`)
+	writeRaw(t, dir, "b.json", `{"name":"b","exec":["/bin/sh"],"type":"simple","ready":"exec"}`)
+	if err := os.Chown(dir+"/b.json", 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	svcs, refused, err := Load(dir)
+	if err != nil || len(svcs) != 1 || svcs["a"] == nil || refused["b.json"] != "unit_perm" {
+		t.Fatalf("%v %v %v", svcs, refused, err)
+	}
+	if err := os.Chown(dir, 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	wantLoad(t, dir, "unit_perm")
 }

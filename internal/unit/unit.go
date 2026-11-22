@@ -2,6 +2,10 @@
 //
 // Threats: a unit file is untrusted input. Unknown fields, duplicate keys,
 // relative exec paths, symlink unit files, and oversized files are rejected.
+// A unit file or unit directory that someone other than root (or the
+// supervisor's own uid) owns, or that group or other can write, could be
+// swapped for a unit running as root; such a file is refused with unit_perm
+// and such a directory refuses the whole catalog.
 // This package does not spawn processes and does not grant privileges.
 // It does not decide that a sandbox was applied.
 package unit
@@ -13,6 +17,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/afterdarksys/sahinit/internal/fail"
@@ -113,55 +118,76 @@ func ExecFile(p string) error {
 	return nil
 }
 
-// Load reads every unit in dir. The directory itself must not be a symlink.
-func Load(dir string) (map[string]*Service, error) {
+// Load reads every unit in dir. The directory itself must not be a symlink,
+// and it must pass the owner and mode rule or nothing loads (unit_perm). A
+// unit file failing that rule is left out and named in refused, keyed by file
+// name, while the rest of the catalog still loads.
+func Load(dir string) (svcs map[string]*Service, refused map[string]string, err error) {
 	fi, err := os.Lstat(dir)
 	if err != nil {
-		return nil, fail.E("failed")
+		return nil, nil, fail.E("failed")
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
-		return nil, fail.E("symlink")
+		return nil, nil, fail.E("symlink")
 	}
 	if !fi.IsDir() {
-		return nil, fail.E("failed")
+		return nil, nil, fail.E("failed")
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || !trustedOwner(st.Uid, uint32(fi.Mode().Perm())) {
+		return nil, nil, fail.E("unit_perm")
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, fail.E("failed")
+		return nil, nil, fail.E("failed")
 	}
 	if len(entries) == 0 {
-		return nil, fail.E("empty")
+		return nil, nil, fail.E("empty")
 	}
 	var names []string
 	for _, e := range entries {
 		if e.Type()&os.ModeSymlink != 0 {
-			return nil, fail.E("symlink")
+			return nil, nil, fail.E("symlink")
 		}
 		name := e.Name()
 		if e.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
-			return nil, fail.E("stray_file")
+			return nil, nil, fail.E("stray_file")
 		}
 		names = append(names, name)
 	}
 	if len(names) > maxUnits {
-		return nil, fail.E("too_many")
+		return nil, nil, fail.E("too_many")
 	}
 	out := make(map[string]*Service, len(names))
+	refused = map[string]string{}
 	for _, name := range names {
 		body, err := readUnit(dir + "/" + name)
+		if fail.Token(err) == "unit_perm" {
+			refused[name] = "unit_perm"
+			continue
+		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		svc, err := Parse(body, strings.TrimSuffix(name, ".json"))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if _, exists := out[svc.Name]; exists {
-			return nil, fail.E("duplicate_field")
+			return nil, nil, fail.E("duplicate_field")
 		}
 		out[svc.Name] = svc
 	}
-	return out, nil
+	if len(out) == 0 {
+		return nil, refused, fail.E("empty")
+	}
+	return out, refused, nil
+}
+
+// trustedOwner is the owner and mode rule for unit files and the unit
+// directory: owned by root or by the supervisor's own uid, and not writable
+// by group or other.
+func trustedOwner(uid, perm uint32) bool {
+	return (uid == 0 || uid == uint32(os.Geteuid())) && perm&0o022 == 0
 }
 
 func readUnit(path string) ([]byte, error) {
@@ -186,6 +212,16 @@ func readUnit(path string) ([]byte, error) {
 		return nil, fail.E("failed")
 	}
 	defer unix.Close(fd)
+	var fst unix.Stat_t
+	if err := unix.Fstat(fd, &fst); err != nil {
+		return nil, fail.E("failed")
+	}
+	if uint32(fst.Mode)&unix.S_IFMT != unix.S_IFREG {
+		return nil, fail.E("stray_file")
+	}
+	if !trustedOwner(fst.Uid, uint32(fst.Mode)&0o7777) {
+		return nil, fail.E("unit_perm")
+	}
 	buf := make([]byte, maxFile+1)
 	n := 0
 	for n < len(buf) {

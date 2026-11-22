@@ -38,7 +38,7 @@ func TestFixtureCatalogs(t *testing.T) {
 			if err := r.Write(out); err != nil {
 				t.Fatal(err)
 			}
-			catalog, err := unit.Load(out)
+			catalog, _, err := unit.Load(out)
 			if err != nil || len(catalog) != 1 {
 				t.Fatalf("catalog: %v %v", catalog, err)
 			}

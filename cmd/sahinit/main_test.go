@@ -385,3 +385,13 @@ func TestSignalDuringBoot(t *testing.T) {
 		t.Fatalf("service remains after shutdown: %v", err)
 	}
 }
+
+func TestPlanNamesRefusedUnit(t *testing.T) {
+	dir := t.TempDir()
+	putUnit(t, dir, simpleUnit("agent", nil))
+	putUnit(t, dir, simpleUnit("other", nil))
+	if err := os.Chmod(dir+"/other.json", 0o666); err != nil {
+		t.Fatal(err)
+	}
+	wantRun(t, []string{"plan", "--dir", dir}, 0, "agent\n", "unit_perm other.json\n")
+}
