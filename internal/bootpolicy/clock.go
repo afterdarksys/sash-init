@@ -21,11 +21,17 @@ const (
 	NotYetValid    State = "not_yet_valid"
 	ClockUncertain State = "clock_uncertain"
 	Missing        State = "missing"
+	Revoked        State = "revoked" // Below the revocation floor; reported by the CLI.
 )
 
 func (d *Document) State(c Clock) State {
 	if d == nil {
 		return Missing
+	}
+	// A never-policy has no deadlines and not_before equals issued_at, so the
+	// clock is not read: a clock jump forward or back cannot end it.
+	if d.policy.Lifetime == LifetimeNever {
+		return Valid
 	}
 	if c == nil {
 		return ClockUncertain

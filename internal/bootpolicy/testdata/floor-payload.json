@@ -1,0 +1,8 @@
+{
+  "version": "sahinit-boot-floor/1",
+  "tenant_id": "tenant-1",
+  "host_id": "host-1",
+  "enrollment_id": "enrollment-1",
+  "min_sequence": 2,
+  "issued_at": 1800000000
+}

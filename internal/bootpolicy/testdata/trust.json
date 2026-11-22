@@ -10,5 +10,6 @@
   "max_grace_seconds": 172800,
   "max_job_seconds": 300,
   "min_refresh_seconds": 30,
-  "max_refresh_seconds": 86400
+  "max_refresh_seconds": 86400,
+  "max_lifetime": "never"
 }

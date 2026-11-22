@@ -1,0 +1,58 @@
+{
+  "version": "sahinit-boot-policy/2",
+  "tenant_id": "tenant-1",
+  "host_id": "host-1",
+  "enrollment_id": "enrollment-1",
+  "policy_id": "standard",
+  "sequence": 1,
+  "catalog_generation": 1,
+  "issued_at": 1800000000,
+  "not_before": 1800000000,
+  "expires_at": 0,
+  "offline_until": 0,
+  "refresh_after_seconds": 0,
+  "catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "units": [
+    {
+      "id": "network",
+      "needs": []
+    },
+    {
+      "id": "agent",
+      "needs": [
+        "network"
+      ]
+    }
+  ],
+  "jobs": [
+    {
+      "id": "boot-agent",
+      "script_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "scopes": [
+        {
+          "operation": "unit.start",
+          "resource": "agent"
+        }
+      ],
+      "phases": [
+        "boot"
+      ],
+      "timeout_seconds": 30,
+      "needs_units": [
+        "network",
+        "agent"
+      ],
+      "needs_jobs": []
+    }
+  ],
+  "offline_units": [
+    "network",
+    "agent"
+  ],
+  "offline_jobs": [
+    "boot-agent"
+  ],
+  "runtime_restart_units": [],
+  "recovery_profile_id": "recovery-1",
+  "lifetime": "never"
+}

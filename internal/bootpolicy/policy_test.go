@@ -17,7 +17,7 @@ import (
 // Public deterministic test key, never a production signing credential.
 func fixture() (Trust, Policy, ed25519.PrivateKey) {
 	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x42}, ed25519.SeedSize))
-	t := Trust{TenantID: "tenant-1", HostID: "host-1", EnrollmentID: "enrollment-1", RecoveryProfileID: "recovery-1", Keys: map[string]string{"test-key": base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey))}, MaxValiditySeconds: 7 * 86400, MaxGraceSeconds: 2 * 86400, MaxJobSeconds: 300, MinRefreshSeconds: 30, MaxRefreshSeconds: 86400}
+	t := Trust{TenantID: "tenant-1", HostID: "host-1", EnrollmentID: "enrollment-1", RecoveryProfileID: "recovery-1", Keys: map[string]string{"test-key": base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey))}, MaxValiditySeconds: 7 * 86400, MaxGraceSeconds: 2 * 86400, MaxJobSeconds: 300, MinRefreshSeconds: 30, MaxRefreshSeconds: 86400, MaxLifetime: LifetimeNever}
 	p := Policy{Version: Version, TenantID: t.TenantID, HostID: t.HostID, EnrollmentID: t.EnrollmentID, PolicyID: "standard", Sequence: 1, CatalogGeneration: 1, IssuedAt: 1800000000, NotBefore: 1800000000, ExpiresAt: 1800604800, OfflineUntil: 1800777600, RefreshAfterSeconds: 21600, CatalogSHA256: strings.Repeat("a", 64), Units: []Unit{{ID: "network", Needs: []string{}}, {ID: "agent", Needs: []string{"network"}}}, Jobs: []Job{{ID: "boot-agent", ScriptSHA256: strings.Repeat("b", 64), Scopes: []Scope{{Operation: "unit.start", Resource: "agent"}}, Phases: []string{"boot"}, TimeoutSeconds: 30, NeedsUnits: []string{"network", "agent"}, NeedsJobs: []string{}}}, OfflineUnits: []string{"network", "agent"}, OfflineJobs: []string{"boot-agent"}, RuntimeRestartUnits: []string{}, RecoveryProfileID: t.RecoveryProfileID}
 	return t, p, key
 }

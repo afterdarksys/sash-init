@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	Version     = "sahinit-boot-policy/1"
+	Version     = "sahinit-boot-policy/1" // No lifetime field; always renew.
+	Version2    = "sahinit-boot-policy/2" // Carries a signed lifetime.
 	Domain      = "sahinit-boot-policy-v1\n"
 	MaxPayload  = 256 * 1024
 	MaxEnvelope = 384 * 1024
@@ -38,7 +39,14 @@ type Trust struct {
 	MaxJobSeconds      int64             `json:"max_job_seconds"`
 	MinRefreshSeconds  int64             `json:"min_refresh_seconds"`
 	MaxRefreshSeconds  int64             `json:"max_refresh_seconds"`
+	MaxLifetime        string            `json:"max_lifetime"` // never allows both modes; renew refuses never
 }
+
+// Lifetime modes. A version-1 payload is renew; new policies default to never.
+const (
+	LifetimeNever = "never"
+	LifetimeRenew = "renew"
+)
 
 type Policy struct {
 	Version             string   `json:"version"`
@@ -60,6 +68,9 @@ type Policy struct {
 	OfflineJobs         []string `json:"offline_jobs"`
 	RuntimeRestartUnits []string `json:"runtime_restart_units"`
 	RecoveryProfileID   string   `json:"recovery_profile_id"`
+	// Absent in Version, required in Version2. Decoded version-1 policies
+	// report renew.
+	Lifetime string `json:"lifetime,omitempty"`
 }
 
 type Unit struct {
@@ -96,7 +107,12 @@ type Document struct {
 	digest  string
 }
 
-func (d *Document) Policy() Policy { var p Policy; _ = json.Unmarshal(d.payload, &p); return p }
+func (d *Document) Policy() Policy {
+	var p Policy
+	_ = json.Unmarshal(d.payload, &p)
+	p.Lifetime = d.policy.Lifetime
+	return p
+}
 func (d *Document) Bytes() []byte  { return append([]byte(nil), d.raw...) }
 func (d *Document) Digest() string { return d.digest }
 
@@ -108,7 +124,11 @@ func bad() error { return fail.E("policy_bad_shape") }
 
 // DecodeStrict rejects missing/unknown/duplicate fields, nulls at any depth,
 // trailing values and invalid UTF-8. All wire fields are mandatory, including [].
-func DecodeStrict(raw []byte, dst any) error {
+func DecodeStrict(raw []byte, dst any) error { return decodeStrict(raw, dst, "") }
+
+// decodeStrict is DecodeStrict where the top-level field named absent must be
+// missing instead of present; it is used for older wire versions.
+func decodeStrict(raw []byte, dst any, absent string) error {
 	if !utf8.Valid(raw) {
 		return bad()
 	}
@@ -122,7 +142,7 @@ func DecodeStrict(raw []byte, dst any) error {
 		return bad()
 	}
 	typ := reflect.TypeOf(dst)
-	if typ == nil || typ.Kind() != reflect.Pointer || !shape(value, typ.Elem()) {
+	if typ == nil || typ.Kind() != reflect.Pointer || !shape(value, typ.Elem(), absent) {
 		return bad()
 	}
 	dec = json.NewDecoder(bytes.NewReader(raw))
@@ -188,17 +208,28 @@ func readValue(d *json.Decoder, depth int) (any, error) {
 	}
 	return nil, bad()
 }
-func shape(v any, t reflect.Type) bool {
+func shape(v any, t reflect.Type, absent string) bool {
 	switch t.Kind() {
 	case reflect.Struct:
 		obj, ok := v.(map[string]any)
-		if !ok || len(obj) != t.NumField() {
+		want := t.NumField()
+		if absent != "" {
+			want--
+		}
+		if !ok || len(obj) != want {
 			return false
 		}
 		for i := 0; i < t.NumField(); i++ {
 			f := t.Field(i)
-			x, ok := obj[f.Tag.Get("json")]
-			if !ok || !shape(x, f.Type) {
+			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			x, ok := obj[name]
+			if name == absent {
+				if ok {
+					return false
+				}
+				continue
+			}
+			if !ok || !shape(x, f.Type, "") {
 				return false
 			}
 		}
@@ -208,7 +239,7 @@ func shape(v any, t reflect.Type) bool {
 			return false
 		}
 		for _, x := range arr {
-			if !shape(x, t.Elem()) {
+			if !shape(x, t.Elem(), "") {
 				return false
 			}
 		}
@@ -218,7 +249,7 @@ func shape(v any, t reflect.Type) bool {
 			return false
 		}
 		for _, x := range obj {
-			if !shape(x, t.Elem()) {
+			if !shape(x, t.Elem(), "") {
 				return false
 			}
 		}
@@ -249,11 +280,29 @@ func (t Trust) Validate() error {
 		}
 		seen[v] = true
 	}
+	if t.MaxLifetime != LifetimeNever && t.MaxLifetime != LifetimeRenew {
+		return fail.E("policy_bad_trust")
+	}
 	if t.MaxValiditySeconds <= 0 || t.MaxValiditySeconds > 366*86400 || t.MaxGraceSeconds < 0 || t.MaxGraceSeconds > 366*86400 || t.MaxJobSeconds <= 0 || t.MaxJobSeconds > 86400 || t.MinRefreshSeconds < 30 || t.MaxRefreshSeconds < t.MinRefreshSeconds || t.MaxRefreshSeconds > t.MaxValiditySeconds {
 		return fail.E("policy_bad_trust")
 	}
 	return nil
 }
+
+// DecodeTrust strictly decodes a trust file. max_lifetime may be omitted, as in
+// trust files written before lifetimes existed, and then means never.
+func DecodeTrust(raw []byte) (Trust, error) {
+	var t Trust
+	if err := DecodeStrict(raw, &t); err != nil {
+		t = Trust{}
+		if err := decodeStrict(raw, &t, "max_lifetime"); err != nil {
+			return Trust{}, err
+		}
+		t.MaxLifetime = LifetimeNever
+	}
+	return t, t.Validate()
+}
+
 func decode64(s string) ([]byte, error) {
 	b, err := base64.StdEncoding.Strict().DecodeString(s)
 	if err != nil || base64.StdEncoding.EncodeToString(b) != s {
@@ -266,6 +315,35 @@ func decode64(s string) ([]byte, error) {
 // It deliberately does not evaluate current time: expired cache still carries
 // the anti-rollback sequence. Call State or CheckFresh separately.
 func Verify(raw []byte, t Trust) (*Document, error) {
+	payload, err := open(raw, t, Domain)
+	if err != nil {
+		return nil, err
+	}
+	// Threats: the version selects the shape, so a version-1 payload cannot
+	// carry lifetime and a version-2 payload cannot omit it.
+	var p Policy
+	if err := DecodeStrict(payload, &p); err == nil {
+		if p.Version != Version2 {
+			return nil, bad()
+		}
+	} else {
+		p = Policy{}
+		if err := decodeStrict(payload, &p, "lifetime"); err != nil || p.Version != Version {
+			return nil, bad()
+		}
+		p.Lifetime = LifetimeRenew
+	}
+	if err := p.validate(t); err != nil {
+		return nil, err
+	}
+	h := sha256.Sum256(payload)
+	return &Document{policy: p, payload: append([]byte(nil), payload...), raw: append([]byte(nil), raw...), digest: hex.EncodeToString(h[:])}, nil
+}
+
+// open checks local trust, the envelope, and the signature over domain and
+// the decoded payload, and returns the payload. Each document type has its
+// own domain so a signature over one can never verify as another.
+func open(raw []byte, t Trust, domain string) ([]byte, error) {
 	if err := t.Validate(); err != nil {
 		return nil, err
 	}
@@ -285,18 +363,10 @@ func Verify(raw []byte, t Trust) (*Document, error) {
 		return nil, fail.E("policy_bad_signature")
 	}
 	key, err := decode64(t.Keys[e.KeyID])
-	if err != nil || len(key) != ed25519.PublicKeySize || !ed25519.Verify(key, append([]byte(Domain), payload...), sig) {
+	if err != nil || len(key) != ed25519.PublicKeySize || !ed25519.Verify(key, append([]byte(domain), payload...), sig) {
 		return nil, fail.E("policy_bad_signature")
 	}
-	var p Policy
-	if err := DecodeStrict(payload, &p); err != nil {
-		return nil, err
-	}
-	if err := p.validate(t); err != nil {
-		return nil, err
-	}
-	h := sha256.Sum256(payload)
-	return &Document{policy: p, payload: append([]byte(nil), payload...), raw: append([]byte(nil), raw...), digest: hex.EncodeToString(h[:])}, nil
+	return payload, nil
 }
 
 func names(xs []string, limit int) (map[string]bool, bool) {
@@ -313,7 +383,7 @@ func names(xs []string, limit int) (map[string]bool, bool) {
 	return out, true
 }
 func (p Policy) validate(t Trust) error {
-	if p.Version != Version {
+	if (p.Version != Version || p.Lifetime != LifetimeRenew) && p.Version != Version2 {
 		return bad()
 	}
 	if p.TenantID != t.TenantID || p.HostID != t.HostID || p.EnrollmentID != t.EnrollmentID {
@@ -325,11 +395,26 @@ func (p Policy) validate(t Trust) error {
 	if !identifier.MatchString(p.PolicyID) || p.Sequence == 0 || p.Sequence > maxInteger || p.CatalogGeneration == 0 || p.CatalogGeneration > maxInteger || !digestRE.MatchString(p.CatalogSHA256) {
 		return bad()
 	}
-	if p.IssuedAt <= 0 || p.IssuedAt > p.NotBefore || p.NotBefore >= p.ExpiresAt || p.ExpiresAt > p.OfflineUntil || p.OfflineUntil > maxInteger {
+	switch p.Lifetime {
+	case LifetimeRenew:
+		if p.IssuedAt <= 0 || p.IssuedAt > p.NotBefore || p.NotBefore >= p.ExpiresAt || p.ExpiresAt > p.OfflineUntil || p.OfflineUntil > maxInteger {
+			return bad()
+		}
+		if p.ExpiresAt-p.IssuedAt > t.MaxValiditySeconds || p.OfflineUntil-p.ExpiresAt > t.MaxGraceSeconds || p.RefreshAfterSeconds < t.MinRefreshSeconds || p.RefreshAfterSeconds > t.MaxRefreshSeconds || p.RefreshAfterSeconds >= p.ExpiresAt-p.NotBefore {
+			return fail.E("policy_ceiling")
+		}
+	case LifetimeNever:
+		// Threats: a never-policy carries no deadline a host could misread, and
+		// no delayed start, so its validity never depends on the clock. Only a
+		// higher sequence or the revocation floor ends it.
+		if t.MaxLifetime != LifetimeNever {
+			return fail.E("policy_lifetime_cap")
+		}
+		if p.IssuedAt <= 0 || p.IssuedAt > maxInteger || p.NotBefore != p.IssuedAt || p.ExpiresAt != 0 || p.OfflineUntil != 0 || p.RefreshAfterSeconds != 0 {
+			return bad()
+		}
+	default:
 		return bad()
-	}
-	if p.ExpiresAt-p.IssuedAt > t.MaxValiditySeconds || p.OfflineUntil-p.ExpiresAt > t.MaxGraceSeconds || p.RefreshAfterSeconds < t.MinRefreshSeconds || p.RefreshAfterSeconds > t.MaxRefreshSeconds || p.RefreshAfterSeconds >= p.ExpiresAt-p.NotBefore {
-		return fail.E("policy_ceiling")
 	}
 	if p.Units == nil || p.Jobs == nil || len(p.Units) > 256 || len(p.Jobs) > 256 {
 		return bad()
@@ -465,9 +550,12 @@ func closedSubset(set map[string]bool, graph map[string][]string) bool {
 	return true
 }
 
-// renewalBody excludes only authorization lifetime/refresh and sequence fields.
+// renewalBody excludes only authorization lifetime/refresh and sequence fields,
+// and the wire version. The lifetime mode stays: changing it needs a new
+// generation.
 func (d *Document) renewalBody() []byte {
 	p := d.policy
+	p.Version = ""
 	p.Sequence = 0
 	p.IssuedAt = 0
 	p.NotBefore = 0
