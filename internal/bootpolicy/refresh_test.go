@@ -263,20 +263,30 @@ func TestRefreshCredentialAndCancellation(t *testing.T) {
 	if err := os.Chmod(good, 0600); err != nil {
 		t.Fatal(err)
 	}
+	// A refusal must come before any request; a bounded context keeps a
+	// regression from blocking on the handler.
+	refused := func(path string) {
+		t.Helper()
+		r.credentialFile = path
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := r.Once(ctx)
+		requireCode(t, err, "policy_refresh_credential")
+	}
+	// The symlink target is otherwise acceptable: only O_NOFOLLOW refuses it.
 	link := good + "-link"
 	if err := os.Symlink(good, link); err != nil {
 		t.Fatal(err)
 	}
+	refused(link)
 	hard := good + "-hard"
 	if err := os.Link(good, hard); err != nil {
 		t.Fatal(err)
 	}
 	fifo := filepath.Join(dir, "..", "fifo")
 	makeFIFO(t, fifo)
-	for _, path := range []string{link, hard, fifo, filepath.Dir(good), good + "-missing"} {
-		r.credentialFile = path
-		_, err := r.Once(context.Background())
-		requireCode(t, err, "policy_refresh_credential")
+	for _, path := range []string{hard, good, fifo, filepath.Dir(good), good + "-missing"} {
+		refused(path)
 	}
 	if calls.Load() != 0 {
 		t.Fatal("invalid credential sent")
