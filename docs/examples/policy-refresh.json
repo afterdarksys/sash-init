@@ -1,0 +1,35 @@
+{
+  "name": "policy-refresh",
+  "exec": [
+    "/usr/local/sbin/sahinit", "policy", "refresh",
+    "--trust", "/var/lib/sahinit-refresh/boot-trust.json",
+    "--cache", "/var/lib/sahinit-refresh/policy",
+    "--endpoint", "https://ISSUER.invalid/REPLACE-WITH-PROVISIONED-PATH",
+    "--credential", "/var/lib/sahinit-refresh/credential",
+    "--trust-system-clock"
+  ],
+  "type": "simple",
+  "ready": "exec",
+  "restart": "on-failure",
+  "boot": false,
+  "execution": {
+    "uid": 64990,
+    "gid": 64990,
+    "groups": [],
+    "directory": "/var/lib/sahinit-refresh",
+    "environment": []
+  },
+  "sandbox": {
+    "no_new_privs": true,
+    "read_only_paths": [
+      "/var/lib/sahinit-refresh/boot-trust.json",
+      "/var/lib/sahinit-refresh/credential",
+      "/etc/ssl/certs",
+      "/etc/resolv.conf",
+      "/etc/hosts",
+      "/etc/nsswitch.conf"
+    ],
+    "read_write_paths": ["/var/lib/sahinit-refresh/policy"],
+    "caps": []
+  }
+}

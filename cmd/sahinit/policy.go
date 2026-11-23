@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/afterdarksys/sahinit/internal/bootpolicy"
@@ -13,7 +16,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const policyUsage = "usage: sahinit policy verify|cache|status|floor-install|floor-show --trust FILE [--document FILE] [--cache DIR] [--trust-system-clock]\n"
+const policyUsage = "usage: sahinit policy verify|cache|status|floor-install|floor-show --trust FILE [--document FILE] [--cache DIR] [--trust-system-clock]\n" +
+	"usage: sahinit policy refresh --trust FILE --cache DIR --endpoint HTTPS_URL --credential FILE [--trust-system-clock] [--once]\n"
+
+// refreshContext is the worker's lifetime: SIGINT and SIGTERM stop it.
+var refreshContext = func() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+}
 
 type policyReport struct {
 	Verified          bool             `json:"verified"`
@@ -43,7 +52,7 @@ func runPolicy(args []string, stdout, stderr io.Writer) int {
 		return usage()
 	}
 	op := args[0]
-	if op != "verify" && op != "cache" && op != "status" && op != "floor-install" && op != "floor-show" {
+	if op != "verify" && op != "cache" && op != "status" && op != "floor-install" && op != "floor-show" && op != "refresh" {
 		return usage()
 	}
 	fs := flag.NewFlagSet("policy", flag.ContinueOnError)
@@ -51,12 +60,22 @@ func runPolicy(args []string, stdout, stderr io.Writer) int {
 	trustPath := fs.String("trust", "", "")
 	docPath := fs.String("document", "", "")
 	cache := fs.String("cache", "", "")
+	endpoint := fs.String("endpoint", "", "")
+	credential := fs.String("credential", "", "")
+	once := fs.Bool("once", false, "")
 	trustClock := fs.Bool("trust-system-clock", false, "assert the Linux system clock is already trustworthy")
 	if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 || *trustPath == "" {
 		return usage()
 	}
 	install := op == "cache" || op == "floor-install"
 	if (op == "verify" && (*docPath == "" || *cache != "")) || (install && (*docPath == "" || *cache == "")) || ((op == "status" || op == "floor-show") && (*docPath != "" || *cache == "")) {
+		return usage()
+	}
+	if op == "refresh" {
+		if *cache == "" || *endpoint == "" || *credential == "" || *docPath != "" {
+			return usage()
+		}
+	} else if *endpoint != "" || *credential != "" || *once {
 		return usage()
 	}
 	refuse := func(err error) int { fmt.Fprintln(stderr, fail.Token(err)); return 1 }
@@ -71,6 +90,9 @@ func runPolicy(args []string, stdout, stderr io.Writer) int {
 	var clock bootpolicy.Clock
 	if *trustClock {
 		clock = bootpolicy.NewClock(time.Now())
+	}
+	if op == "refresh" {
+		return runPolicyRefresh(trust, clock, *cache, *endpoint, *credential, *once, stdout, stderr)
 	}
 	var d *bootpolicy.Document
 	if op == "verify" || install {
@@ -158,4 +180,57 @@ func policyFile(path string, limit int64, trusted bool) ([]byte, error) {
 		return nil, fail.E("policy_read_failed")
 	}
 	return raw, nil
+}
+
+// runPolicyRefresh needs no clock, credential or network when the host's
+// policy does not renew: it prints not_renewing and exits 0. Cancellation is a
+// normal stop (exit 0); an output failure stops the worker with exit 1.
+func runPolicyRefresh(trust bootpolicy.Trust, clock bootpolicy.Clock, cache, endpoint, credential string, once bool, stdout, stderr io.Writer) int {
+	refuse := func(err error) int { fmt.Fprintln(stderr, fail.Token(err)); return 1 }
+	store, err := bootpolicy.OpenStore(cache, trust, clock)
+	if err != nil {
+		return refuse(err)
+	}
+	defer store.Close()
+	worker, err := bootpolicy.NewRefresher(store, endpoint, credential)
+	if err != nil {
+		return refuse(err)
+	}
+	defer worker.Close()
+	ctx, stop := refreshContext()
+	defer stop()
+	if once {
+		result := bootpolicy.RefreshResult{Event: bootpolicy.EventAttempt, OK: true, Enforcement: "metadata_only"}
+		d, err := worker.Once(ctx)
+		switch {
+		case bootpolicy.IsCanceled(err):
+			return 0
+		case fail.Token(err) == "policy_not_renewing":
+			result = bootpolicy.NotRenewing()
+		case err != nil:
+			return refuse(err)
+		default:
+			result.Sequence = d.Policy().Sequence
+			result.Lifetime = d.Policy().Lifetime
+		}
+		if json.NewEncoder(stdout).Encode(result) != nil {
+			return 1
+		}
+		return 0
+	}
+	var outputErr error
+	err = worker.Run(ctx, func(result bootpolicy.RefreshResult) {
+		if outputErr == nil {
+			if outputErr = json.NewEncoder(stdout).Encode(result); outputErr != nil {
+				stop()
+			}
+		}
+	})
+	if outputErr != nil {
+		return 1
+	}
+	if err != nil && !bootpolicy.IsCanceled(err) {
+		return refuse(err)
+	}
+	return 0
 }
