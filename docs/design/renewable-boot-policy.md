@@ -1,8 +1,9 @@
 # Renewable SystemAPI boot policy
 
-Status: design, 2026-11-22. Local metadata verification, caching, and time states
-are implemented; see [implementation scope](../boot-policy.md). Issuance, refresh,
-artifact verification, runtime admission, and sash boot execution are not wired.
+Status: design, 2026-11-22. Local metadata verification, caching, time states,
+and an optional host-side refresh worker are implemented; see
+[implementation scope](../boot-policy.md). Issuance, artifact verification,
+runtime admission, and sash boot execution are not wired.
 Scope: sahinit boot authorization, sash boot jobs, and SystemAPI renewal.
 
 ## Decision
