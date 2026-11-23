@@ -93,7 +93,7 @@ this field existed accepts `never` policies signed by its keys. A host that
 must always expire needs `max_lifetime: "renew"` written into its trust file.
 
 There must be 1–16 distinct public keys. The trust file must be a regular file,
-owned by the effective user and not writable by group/others; the command rejects
+owned by root or the effective user and not writable by group/others; the command rejects
 a symlink at its final component. Ancestor directories must be administrator
 controlled. The trust input is never loaded from an issuer response. Key rotation
 is not implemented: removing a key needed to verify the cache makes it unusable
@@ -369,26 +369,35 @@ has no capabilities and `boot: false`. Before use, provision as root:
 
 ```sh
 groupadd -g 64990 sahinit-refresh && useradd -u 64990 -g 64990 -M -s /usr/sbin/nologin sahinit-refresh
-install -d -o 64990 -g 64990 -m 700 /var/lib/sahinit-refresh /var/lib/sahinit-refresh/policy
-install -o 64990 -g 64990 -m 600 boot-trust.json /var/lib/sahinit-refresh/boot-trust.json
+install -d -o root -g root -m 755 /var/lib/sahinit-refresh
+install -o root -g root -m 644 boot-trust.json /var/lib/sahinit-refresh/boot-trust.json
+install -d -o 64990 -g 64990 -m 700 /var/lib/sahinit-refresh/policy
 install -o 64990 -g 64990 -m 600 credential /var/lib/sahinit-refresh/credential
 ```
 
-The trust file and cache must be owned by the uid that runs the command, so this
-worker owns its own copy of the trust file and its own cache; the sandbox grants
-the trust file and credential read-only and only the cache directory
-read-write. The sandbox paths for the system roots and name resolution are
-Debian's; adjust them to the distribution. The example is checked by a test to
-parse as a sandboxed, non-root unit; it has not been run against an issuer.
+A trust file may be owned by root or by the uid that runs the command, and must
+not be group- or other-writable. Here it is root-owned, so the worker can read
+but not change the keys it trusts. The cache must be owned by the worker uid;
+the sandbox grants the trust file and credential read-only and only the cache
+directory read-write. The sandbox paths for the system roots and name
+resolution are Debian's; adjust them to the distribution. If `/etc/resolv.conf`
+is a symlink (for example to systemd-resolved's stub file), list its real path
+in `read_only_paths`. The example is checked by a test to parse as a sandboxed,
+non-root unit; it has not been run against an issuer.
+
+Outside a unit, `SSL_CERT_FILE` and `SSL_CERT_DIR` in the environment can
+redirect the system roots, but a unit launch passes only the unit's own
+`environment`. The endpoint URL is visible in `/proc/<pid>/cmdline`, so never
+put a secret in it; the credential belongs only in the credential file.
 
 ### Not done
 
 - No SystemAPI issuer, endpoint or host credential exists; the contract above is
   what an issuer must implement.
 - The design's narrow local install interface is not built: the worker writes the
-  cache itself, and under the existing owner rule it owns its trust file. A
-  compromised worker could therefore rewrite that trust file outside the
-  sandbox. Separating the fetcher from the installer is future work.
+  cache itself. With a root-owned trust file it cannot change its trust keys,
+  but a compromised worker can still write any policy those keys signed, or
+  remove its cache. Separating the fetcher from the installer is future work.
 - The cache is still metadata only; nothing reads it to admit units or jobs.
 - No warning event before normal expiry, no durable record of the last attempt,
   and no floor delivery over the network.

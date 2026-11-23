@@ -40,4 +40,5 @@ The mode is part of the **signed** policy (`lifetime: "never"` or `"renew"`), so
 - **Stale.** A response identical to the cache is `policy_refresh_stale` and backs off like any failure.
 - **Clock.** Losing clock trust ends the worker (exit 1); it cannot recover in-process.
 - **Floors** are not fetched by the worker.
-- **Open.** No issuer; the worker writes the cache and owns its trust file instead of using a narrow install interface (see boot-policy.md, "Not done").
+- **Trust ownership.** A trust file may be owned by root as well as by the running uid (still not group- or other-writable), so an unprivileged worker reads trust it cannot change.
+- **Open.** No issuer; the worker writes the cache itself instead of using a narrow install interface (see boot-policy.md, "Not done").
