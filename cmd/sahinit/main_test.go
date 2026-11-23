@@ -180,7 +180,7 @@ func TestSuperviseCycleNoSocket(t *testing.T) {
 		}
 	})
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"supervise", "--dir", dir, "--socket", sock}, &stdout, &stderr)
+	code := run([]string{"supervise", "--dir", dir, "--socket", sock, "--no-cgroups"}, &stdout, &stderr)
 	if code != 2 || stdout.Len() != 0 || stderr.String() != "cycle\n" {
 		t.Fatalf("code %d out %q err %q", code, stdout.String(), stderr.String())
 	}
@@ -312,7 +312,7 @@ func TestBootSignalHelper(t *testing.T) {
 	if os.Getenv("SAHINIT_BOOT_SIGNAL_HELPER") != "1" {
 		return
 	}
-	os.Exit(run([]string{"supervise", "--dir", os.Getenv("SAHINIT_TEST_UNITS"), "--socket", os.Getenv("SAHINIT_TEST_SOCKET")}, os.Stdout, os.Stderr))
+	os.Exit(run([]string{"supervise", "--dir", os.Getenv("SAHINIT_TEST_UNITS"), "--socket", os.Getenv("SAHINIT_TEST_SOCKET"), "--no-cgroups"}, os.Stdout, os.Stderr))
 }
 
 func TestSignalDuringBoot(t *testing.T) {

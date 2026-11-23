@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/afterdarksys/sahinit/internal/cgroup"
 	"github.com/afterdarksys/sahinit/internal/fail"
 	"github.com/afterdarksys/sahinit/internal/graph"
 	"github.com/afterdarksys/sahinit/internal/sandbox"
@@ -22,7 +23,7 @@ import (
 const usageText = policyUsage +
 	"usage: sahinit ctl --socket PATH status|diagnostics|start|stop|restart [NAME]\n" +
 	"usage: sahinit plan --dir DIR\n" +
-	"usage: sahinit supervise --dir DIR --socket PATH [--uid UID]... [--gid GID]\n" +
+	"usage: sahinit supervise --dir DIR --socket PATH [--uid UID]... [--gid GID] [--no-cgroups]\n" +
 	"usage: sahinit migrate --from FORMAT --source DIR [--out NEW_DIR] [--boot]\n"
 
 func main() {
@@ -93,11 +94,57 @@ func loadUnits(dir string, stderr io.Writer) (map[string]*unit.Service, error) {
 	return svcs, err
 }
 
+// openCgroups opens the supervisor's own cgroup as the root for service
+// cgroups. Without a usable delegated cgroup v2 it is cgroup_unavailable,
+// unless noCgroups keeps process groups (mode disabled). Off Linux there
+// are no cgroups (mode unsupported). The mode is reported in status and
+// diagnostics.
+func openCgroups(noCgroups bool) (*cgroup.Root, string, error) {
+	if noCgroups {
+		return nil, supervise.CgroupsDisabled, nil
+	}
+	if !cgroup.Supported() {
+		return nil, supervise.CgroupsUnsupported, nil
+	}
+	root, err := cgroup.Open("")
+	if err != nil {
+		return nil, "", err
+	}
+	return root, supervise.CgroupsEnabled, nil
+}
+
+// refuseLimits leaves out each unit whose limits need a controller the root
+// does not offer, or any limit when there is no root, naming it on stderr
+// as "cgroup_controller FILE". It is empty when nothing is left.
+func refuseLimits(svcs map[string]*unit.Service, root *cgroup.Root, stderr io.Writer) error {
+	names := make([]string, 0, len(svcs))
+	for name := range svcs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		l := svcs[name].Limits
+		if !l.Any() {
+			continue
+		}
+		if root != nil && root.Supports(l) == nil {
+			continue
+		}
+		fmt.Fprintln(stderr, "cgroup_controller", name+".json")
+		delete(svcs, name)
+	}
+	if len(svcs) == 0 {
+		return fail.E("empty")
+	}
+	return nil
+}
+
 func runSupervise(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("supervise", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	dir := fs.String("dir", "", "")
 	sock := fs.String("socket", "", "")
+	noCgroups := fs.Bool("no-cgroups", false, "")
 	var uids []uint32
 	passed := false
 	fs.Func("uid", "", func(s string) error {
@@ -128,6 +175,15 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, fail.Token(err))
 		return 2
 	}
+	root, mode, err := openCgroups(*noCgroups)
+	if err != nil {
+		fmt.Fprintln(stderr, fail.Token(err))
+		return 2
+	}
+	if err := refuseLimits(svcs, root, stderr); err != nil {
+		fmt.Fprintln(stderr, fail.Token(err))
+		return 2
+	}
 	waves, err := graph.Plan(svcs)
 	if err != nil {
 		fmt.Fprintln(stderr, fail.Token(err))
@@ -144,6 +200,7 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	sup.SocketGID = gid
+	sup.Cgroups, sup.CgroupMode = root, mode
 	if passed {
 		sup.Allow = map[uint32]struct{}{}
 		for _, uid := range uids {
