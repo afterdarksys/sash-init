@@ -233,7 +233,7 @@ func TestChildStatusWaitsForExec(t *testing.T) {
 			defer w.Close()
 			result := make(chan error, 1)
 			go func() {
-				claim, err := readChildStatus(context.Background(), r, time.Second)
+				claim, err := readChildStatus(context.Background(), r, time.Second, true)
 				if err == nil && claim != SandboxClaim(3) {
 					err = fmt.Errorf("claim %q", claim)
 				}
@@ -320,7 +320,7 @@ func TestHelperRefusesRoot(t *testing.T) {
 	}
 	defer execF.Close()
 	sb := &unit.Sandbox{NoNewPrivs: true, ReadOnly: []string{"/"}}
-	cmd, claim, _, err := launchSandboxed(context.Background(), self, []string{"/bin/true"}, execF, sb, false, time.Second, Options{})
+	cmd, claim, _, err := launchHelper(context.Background(), self, []string{"/bin/true"}, execF, sb, false, time.Second, Options{}, false)
 	if cmd != nil || claim != "" || fail.Token(err) != "sandbox_root" {
 		t.Fatalf("cmd=%v claim=%q err=%v", cmd, claim, err)
 	}

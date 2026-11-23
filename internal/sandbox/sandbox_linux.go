@@ -30,6 +30,7 @@ const (
 	fdExec   = 4 // O_PATH fd of the checked target, run with execveat
 	fdSpec   = 5
 	fdStatus = 6
+	fdCgroup = 7 // cgroup.procs of the service cgroup, only when the spec says cgroup
 	maxSpec  = 64 * 1024
 	maxLine  = 1024
 
@@ -85,18 +86,22 @@ var errLines map[string][]byte
 
 var specKeys = map[string]struct{}{
 	"no_new_privs": {}, "read_only_paths": {}, "read_write_paths": {}, "caps": {},
-	"notify": {},
+	"notify": {}, "sandbox": {}, "cgroup": {},
 }
 
 var childTokens = map[string]struct{}{
 	"sandbox_cap": {}, "sandbox_path": {}, "sandbox_privs": {}, "sandbox_overlap": {},
 	"openat2_unavailable": {}, "landlock_unavailable": {}, "landlock_abi": {},
 	"exec_relative": {}, "exec_not_file": {}, "failed": {}, "sandbox_root": {},
+	"cgroup_join": {},
 }
 
 func okLine(abi int) []byte {
 	return []byte("{\"ok\":true,\"claim\":\"" + SandboxClaim(abi) + "\"}\n")
 }
+
+// noneLine is the success status of a helper that only joined a cgroup.
+var noneLine = []byte("{\"ok\":true,\"claim\":\"" + claimNone + "\"}\n")
 
 func init() {
 	errLines = make(map[string][]byte, len(childTokens)+1)
@@ -117,14 +122,19 @@ type held struct {
 }
 
 // ApplyCLI is the re-exec entry. It reads the spec on fd 5, writes one
-// setup status on fd 6, then execs the checked target held on fd 4.
+// setup status on fd 6, then execs the checked target held on fd 4. When the
+// spec says cgroup it first writes its own pid to the cgroup.procs on fd 7
+// (cgroup_join on failure); when it says no sandbox it applies none and
+// claims "none".
 // Successful exec closes fd 6; a failed exec appends an error status before
 // exiting. A missing handshake fd exits 2 and writes nothing.
 //
 // Threats: readiness is used only when the spec says notify, and fd 3 must
 // then be a pipe. Every other fd from 3 up is marked close-on-exec before
 // exec, so nothing the helper or the Go runtime opened reaches the target.
-// argv[0] is never looked up; the target is the fd the parent checked.
+// argv[0] is never looked up; the target is the fd the parent checked. The
+// cgroup is joined before anything else, so the target and all it forks
+// start inside it.
 func ApplyCLI(args []string) int {
 	runtime.LockOSThread()
 	argv, ok := splitApply(args)
@@ -141,14 +151,19 @@ func ApplyCLI(args []string) int {
 	if err != nil {
 		return writeStatus(fail.Token(err))
 	}
-	sb, notify, err := decodeSpec(raw)
+	sb, notify, join, err := decodeSpec(raw)
 	if err != nil {
 		return writeStatus(fail.Token(err))
 	}
 	if notify && !isFIFO(fdReady) {
 		return writeStatus("failed")
 	}
-	if unix.Geteuid() == 0 || unix.Getuid() == 0 {
+	if join {
+		if err := joinCgroup(); err != nil {
+			return writeStatus("cgroup_join")
+		}
+	}
+	if sb != nil && (unix.Geteuid() == 0 || unix.Getuid() == 0) {
 		return writeStatus("sandbox_root")
 	}
 	var st unix.Stat_t
@@ -163,21 +178,41 @@ func ApplyCLI(args []string) int {
 		env = append(env, "SAHINIT_READY_FD=3")
 	}
 	argv = append([]string{}, argv...)
-	h, abi, err := restrict(sb)
-	cerr := closeHeld(h)
-	if err != nil {
-		return writeStatus(fail.Token(err))
+	status := noneLine
+	if sb != nil {
+		h, abi, err := restrict(sb)
+		cerr := closeHeld(h)
+		if err != nil {
+			return writeStatus(fail.Token(err))
+		}
+		if cerr != nil {
+			return writeStatus("failed")
+		}
+		status = okLine(abi)
 	}
-	if cerr != nil {
-		return writeStatus("failed")
-	}
-	if err := writeFD(fdStatus, okLine(abi)); err != nil {
+	if err := writeFD(fdStatus, status); err != nil {
 		return 1
 	}
 	if err := execTarget(argv, env); err == errExec {
 		return writeStatus("failed")
 	}
 	return 1
+}
+
+// joinCgroup moves the helper into the cgroup whose cgroup.procs the parent
+// opened on fd 7. The fd must be on cgroup2; writing 0 moves the writer.
+func joinCgroup() error {
+	var sfs unix.Statfs_t
+	if err := unix.Fstatfs(fdCgroup, &sfs); err != nil || sfs.Type != unix.CGROUP2_SUPER_MAGIC {
+		return fail.E("cgroup_join")
+	}
+	if err := writeFD(fdCgroup, []byte("0")); err != nil {
+		return fail.E("cgroup_join")
+	}
+	if err := unix.Close(fdCgroup); err != nil {
+		return fail.E("cgroup_join")
+	}
+	return nil
 }
 
 func isFIFO(fd int) bool {
@@ -278,26 +313,32 @@ func readSpec() ([]byte, error) {
 	return buf[:n], nil
 }
 
-// decodeSpec returns the sandbox and whether the parent passed a readiness
-// pipe. notify is required; it is never inferred.
-func decodeSpec(raw []byte) (*unit.Sandbox, bool, error) {
+// decodeSpec returns the sandbox (nil when the spec says sandbox false),
+// whether the parent passed a readiness pipe, and whether the helper must
+// join a cgroup. notify, sandbox and cgroup are required; none is inferred.
+func decodeSpec(raw []byte) (*unit.Sandbox, bool, bool, error) {
 	obj, err := jsonobj.Decode(raw, specKeys)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
-	rawNotify, ok := obj["notify"]
-	if !ok {
-		return nil, false, fail.E("failed")
+	var notify, sandboxed, join bool
+	for key, dest := range map[string]*bool{"notify": &notify, "sandbox": &sandboxed, "cgroup": &join} {
+		rawBool, ok := obj[key]
+		if !ok {
+			return nil, false, false, fail.E("failed")
+		}
+		if err := jsonobj.Unmarshal(rawBool, dest); err != nil {
+			return nil, false, false, err
+		}
 	}
-	var notify bool
-	if err := jsonobj.Unmarshal(rawNotify, &notify); err != nil {
-		return nil, false, err
+	if !sandboxed {
+		return nil, notify, join, nil
 	}
 	sb, err := decodeSandbox(obj)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
-	return sb, notify, nil
+	return sb, notify, join, nil
 }
 
 func decodeSandbox(obj map[string]json.RawMessage) (*unit.Sandbox, error) {
@@ -613,15 +654,28 @@ func closeHeld(h *held) error {
 	return nil
 }
 
-func marshalSpec(sb *unit.Sandbox, notify bool) ([]byte, error) {
+// marshalSpec writes the helper's spec. A nil sb is a helper that only
+// joins the cgroup (join must then be set).
+func marshalSpec(sb *unit.Sandbox, notify, join bool) ([]byte, error) {
+	if sb == nil && !join {
+		return nil, fail.E("failed")
+	}
+	none := sb == nil
+	if none {
+		sb = &unit.Sandbox{NoNewPrivs: true}
+	}
 	body := struct {
 		NoNewPrivs bool     `json:"no_new_privs"`
 		ReadOnly   []string `json:"read_only_paths"`
 		ReadWrite  []string `json:"read_write_paths"`
 		Caps       []string `json:"caps"`
 		Notify     bool     `json:"notify"`
+		Sandbox    bool     `json:"sandbox"`
+		Cgroup     bool     `json:"cgroup"`
 	}{
 		Notify:     notify,
+		Sandbox:    !none,
+		Cgroup:     join,
 		NoNewPrivs: sb.NoNewPrivs,
 		ReadOnly:   emptyStr(sb.ReadOnly),
 		ReadWrite:  emptyStr(sb.ReadWrite),
@@ -641,7 +695,11 @@ func emptyStr(s []string) []string {
 	return s
 }
 
-func launchSandboxed(ctx context.Context, self string, argv []string, execF *os.File, sb *unit.Sandbox, notify bool, timeout time.Duration, opts Options) (*exec.Cmd, string, *os.File, error) {
+// launchHelper starts the target through a re-exec of self. sb nil means no
+// sandbox: the helper then only joins opts.Cgroup (join must be set). With
+// join the helper writes its pid to the cgroup's cgroup.procs (fd 7);
+// otherwise opts.Cgroup, if set, is joined through clone3.
+func launchHelper(ctx context.Context, self string, argv []string, execF *os.File, sb *unit.Sandbox, notify bool, timeout time.Duration, opts Options, join bool) (*exec.Cmd, string, *os.File, error) {
 	self, err := unit.ResolveExec(self)
 	if err != nil {
 		return nil, "", nil, err
@@ -649,7 +707,10 @@ func launchSandboxed(ctx context.Context, self string, argv []string, execF *os.
 	if execF == nil {
 		return nil, "", nil, fail.E("failed")
 	}
-	spec, err := marshalSpec(sb, notify)
+	if join && (opts.Cgroup == nil || opts.Cgroup.Procs == nil) {
+		return nil, "", nil, fail.E("failed")
+	}
+	spec, err := marshalSpec(sb, notify, join)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -678,8 +739,14 @@ func launchSandboxed(ctx context.Context, self string, argv []string, execF *os.
 		closePair(notifyR, notifyW)
 		return nil, "", nil, fail.E("failed")
 	}
-	// fdReady, fdExec, fdSpec, fdStatus. A nil entry is closed in the child.
+	// fdReady, fdExec, fdSpec, fdStatus, fdCgroup. A nil entry is closed in
+	// the child.
 	extra := []*os.File{notifyW, execF, specR, statusW}
+	clone := opts.Cgroup
+	if join {
+		extra = append(extra, opts.Cgroup.Procs)
+		clone = nil
+	}
 	cmd := &exec.Cmd{
 		Path:        self,
 		Args:        append([]string{self, "apply", "--"}, argv...),
@@ -689,7 +756,7 @@ func launchSandboxed(ctx context.Context, self string, argv []string, execF *os.
 		Stdout:      null,
 		Stderr:      null,
 		ExtraFiles:  extra,
-		SysProcAttr: procAttr(),
+		SysProcAttr: procAttr(clone),
 	}
 	opts.configure(cmd)
 	if err := cmd.Start(); err != nil {
@@ -697,7 +764,7 @@ func launchSandboxed(ctx context.Context, self string, argv []string, execF *os.
 		closePair(specR, specW)
 		closePair(statusR, statusW)
 		closePair(notifyR, notifyW)
-		return nil, "", nil, fail.E("failed")
+		return nil, "", nil, startErr(err, clone)
 	}
 	if err := closeChildEnds(null, specR, statusW, notifyW); err != nil {
 		closePair(specW, statusR)
@@ -716,7 +783,7 @@ func launchSandboxed(ctx context.Context, self string, argv []string, execF *os.
 		reap(cmd)
 		return nil, "", nil, fail.E("failed")
 	}
-	claim, err := readChildStatus(ctx, statusR, timeout)
+	claim, err := readChildStatus(ctx, statusR, timeout, sb != nil)
 	if cerr := statusR.Close(); cerr != nil && err == nil {
 		err = fail.E("failed")
 	}
@@ -762,7 +829,7 @@ func writeFull(f *os.File, buf []byte) error {
 	return nil
 }
 
-func readChildStatus(ctx context.Context, f *os.File, timeout time.Duration) (string, error) {
+func readChildStatus(ctx context.Context, f *os.File, timeout time.Duration, sandboxed bool) (string, error) {
 	if timeout <= 0 {
 		timeout = unit.DefaultTimeout
 	}
@@ -796,7 +863,7 @@ func readChildStatus(ctx context.Context, f *os.File, timeout time.Duration) (st
 		}
 		if err != nil {
 			if err == io.EOF {
-				return parseStatus(buf)
+				return parseStatus(buf, sandboxed)
 			}
 			if ctx.Err() != nil {
 				return "", fail.E("failed")
@@ -809,7 +876,9 @@ func readChildStatus(ctx context.Context, f *os.File, timeout time.Duration) (st
 	}
 }
 
-func parseStatus(line []byte) (string, error) {
+// parseStatus accepts a sandbox claim from a sandboxing helper and only
+// "none" from a helper that applied no sandbox.
+func parseStatus(line []byte, sandboxed bool) (string, error) {
 	if !bytes.Contains(line, []byte{'\n'}) {
 		return "", fail.E("failed")
 	}
@@ -827,7 +896,10 @@ func parseStatus(line []byte) (string, error) {
 		return "", fail.E("failed")
 	}
 	if st.OK {
-		if st.Error == "" && IsSandboxClaim(st.Claim) {
+		if st.Error == "" && sandboxed && IsSandboxClaim(st.Claim) {
+			return st.Claim, nil
+		}
+		if st.Error == "" && !sandboxed && st.Claim == claimNone {
 			return st.Claim, nil
 		}
 		return "", fail.E("failed")

@@ -124,17 +124,29 @@ func TestDirectScriptKeepsExecFD(t *testing.T) {
 // The helper refuses notify when fd 3 is not the readiness pipe, instead of
 // trusting whatever happens to be open there.
 func TestApplyNotifyNeedsPipe(t *testing.T) {
-	if _, notify, err := decodeSpec([]byte(`{"no_new_privs":true,"read_only_paths":[],"read_write_paths":[],"caps":[]}`)); err == nil {
-		t.Fatalf("spec without notify accepted: %v", notify)
+	const box = `"no_new_privs":true,"read_only_paths":[],"read_write_paths":[],"caps":[]`
+	// notify, sandbox and cgroup are each required, never inferred.
+	for _, raw := range []string{
+		`{` + box + `,"sandbox":true,"cgroup":false}`,
+		`{` + box + `,"notify":false,"cgroup":false}`,
+		`{` + box + `,"notify":false,"sandbox":true}`,
+	} {
+		if _, notify, _, err := decodeSpec([]byte(raw)); err == nil {
+			t.Fatalf("%s accepted: %v", raw, notify)
+		}
 	}
 	for _, raw := range []string{
-		`{"no_new_privs":true,"read_only_paths":[],"read_write_paths":[],"caps":[],"notify":false}`,
-		`{"no_new_privs":true,"read_only_paths":[],"read_write_paths":[],"caps":[],"notify":true}`,
+		`{` + box + `,"sandbox":true,"cgroup":false,"notify":false}`,
+		`{` + box + `,"sandbox":true,"cgroup":false,"notify":true}`,
 	} {
-		_, notify, err := decodeSpec([]byte(raw))
-		if err != nil || notify != strings.Contains(raw, "true}") {
+		sb, notify, join, err := decodeSpec([]byte(raw))
+		if err != nil || sb == nil || join || notify != strings.Contains(raw, "true}") {
 			t.Fatalf("%s: %v %v", raw, notify, err)
 		}
+	}
+	sb, _, join, err := decodeSpec([]byte(`{` + box + `,"sandbox":false,"cgroup":true,"notify":false}`))
+	if err != nil || sb != nil || !join {
+		t.Fatalf("join-only spec: %v %v %v", sb, join, err)
 	}
 }
 

@@ -11,15 +11,18 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/afterdarksys/sahinit/internal/cgroup"
 	"github.com/afterdarksys/sahinit/internal/fail"
 	"github.com/afterdarksys/sahinit/internal/unit"
 )
@@ -50,7 +53,8 @@ func IsSandboxClaim(claim string) bool {
 }
 
 // Launch starts argv[0]. A nil sandbox is a direct exec and claims "none".
-// A sandbox is applied in a re-exec of self. claim is empty when err != nil.
+// A sandbox is applied in a re-exec of self (the helper), which also joins
+// opts.Cgroup when clone3 cannot place the child there. claim is empty when err != nil.
 // notify places the ready write end on fd 3 and sets SAHINIT_READY_FD.
 // argv[0] is passed to the target as written; the file run is argv[0]
 // resolved once (or opts.Path) and checked by unit.CheckExec.
@@ -99,14 +103,52 @@ func Launch(ctx context.Context, self string, argv []string, sb *unit.Sandbox, n
 	if err != nil {
 		return nil, "", nil, err
 	}
-	if sb != nil {
-		return launchSandboxed(ctx, self, argv, execF, sb, notify, timeout, opts)
+	if opts.Cgroup != nil && !cgroup.Supported() {
+		return nil, "", nil, fail.E("cgroup_unavailable")
+	}
+	join := opts.Cgroup != nil && noClone.Load()
+	if sb != nil || join {
+		cmd, claim, notifyR, err := launchHelper(ctx, self, argv, execF, sb, notify, timeout, opts, join)
+		if err == errNoClone {
+			noClone.Store(true)
+			return launchHelper(ctx, self, argv, execF, sb, notify, timeout, opts, true)
+		}
+		return cmd, claim, notifyR, err
 	}
 	cmd, notifyR, err := direct(target, argv, execF, script, notify, opts)
+	if err == errNoClone {
+		noClone.Store(true)
+		return launchHelper(ctx, self, argv, execF, nil, notify, timeout, opts, true)
+	}
 	if err != nil {
 		return nil, "", nil, err
 	}
 	return cmd, claimNone, notifyR, nil
+}
+
+// noClone is set once clone3(CLONE_INTO_CGROUP) is found missing (Linux
+// before 5.7, or a seccomp filter that hides clone3). Every later launch
+// into a cgroup then goes through the helper, which joins the cgroup by
+// writing its own pid to cgroup.procs before exec.
+var noClone atomic.Bool
+
+// errNoClone is compared with == and never wrapped.
+var errNoClone = errors.New("no clone3 into cgroup")
+
+// startErr maps a failed Start. Into a cgroup, ENOSYS and E2BIG mean the
+// kernel cannot clone into a cgroup (errNoClone); EBUSY (not a leaf, or
+// controllers enabled below it), ENODEV (removed) and EOPNOTSUPP mean the
+// child cannot join it (cgroup_join).
+func startErr(err error, g *cgroup.Group) error {
+	if g != nil {
+		switch {
+		case errors.Is(err, syscall.ENOSYS), errors.Is(err, syscall.E2BIG):
+			return errNoClone
+		case errors.Is(err, syscall.EBUSY), errors.Is(err, syscall.ENODEV), errors.Is(err, syscall.EOPNOTSUPP):
+			return fail.E("cgroup_join")
+		}
+	}
+	return fail.E("failed")
 }
 
 // runsAsRoot reports whether the process would run as uid 0: an explicit
@@ -215,13 +257,13 @@ func direct(target string, argv []string, execF *os.File, script, notify bool, o
 		Stdout:      null,
 		Stderr:      null,
 		ExtraFiles:  extra,
-		SysProcAttr: procAttr(),
+		SysProcAttr: procAttr(opts.Cgroup),
 	}
 	opts.configure(cmd)
 	if err := cmd.Start(); err != nil {
 		null.Close()
 		closePair(notifyR, notifyW)
-		return nil, nil, fail.E("failed")
+		return nil, nil, startErr(err, opts.Cgroup)
 	}
 	if err := null.Close(); err != nil {
 		closePair(notifyR, notifyW)
@@ -289,6 +331,11 @@ type Options struct {
 	Execution unit.Execution
 	Stdout    io.Writer
 	Stderr    io.Writer
+	// Cgroup, when set, is the service cgroup the child joins before it
+	// execs: through clone3(CLONE_INTO_CGROUP), or by the helper writing
+	// its own pid to cgroup.procs where clone3 cannot. A child that cannot
+	// join is cgroup_join.
+	Cgroup *cgroup.Group
 }
 
 func (o Options) configure(cmd *exec.Cmd) {
