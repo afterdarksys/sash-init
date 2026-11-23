@@ -3,10 +3,10 @@
 package cgroup
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -40,6 +40,7 @@ func openRoot(t *testing.T, dir string) *Root {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { r.Close() })
 	return r
 }
 
@@ -240,24 +241,23 @@ func TestSupervised(t *testing.T) {
 	if !r.Supervised(in.Process.Pid) {
 		t.Fatal("process below a service cgroup accepted")
 	}
-	// A service that moved itself into the supervisor's leaf, or into the
-	// root itself, is still supervised.
+	// A service that moved itself into the supervisor's leaf is still
+	// supervised.
 	other := dir + "/" + leaf
 	if err := os.Mkdir(other, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	defer cgtest.Remove(other)
-	for _, into := range []string{other, dir} {
-		if err := writeFile(into+"/cgroup.procs", strconv.Itoa(in.Process.Pid)); err != nil {
-			// A root with controllers enabled below it takes no process.
-			if into == dir && errors.Is(err, syscall.EBUSY) {
-				continue
-			}
-			t.Fatal(err)
-		}
-		if !r.Supervised(in.Process.Pid) {
-			t.Fatalf("process in %s accepted", into)
-		}
+	if err := writeFile(other+"/cgroup.procs", strconv.Itoa(in.Process.Pid)); err != nil {
+		t.Fatal(err)
+	}
+	if !r.Supervised(in.Process.Pid) {
+		t.Fatal("process in the leaf accepted")
+	}
+	// A process in the root itself is not: the outer manager puts processes
+	// there, and only a trusted service could move there.
+	if r.supervisedPath(r.rel) || !r.supervisedPath(r.rel+"/hide") {
+		t.Fatal("root rule")
 	}
 	if err := writeFile(sub+"/cgroup.procs", strconv.Itoa(in.Process.Pid)); err != nil {
 		t.Fatal(err)
@@ -312,15 +312,20 @@ func TestKillMemberRechecks(t *testing.T) {
 	}
 }
 
-// A process that left its service cgroup for the supervisor's leaf, or for
-// the root, is found and killed. (With controllers enabled below it the
-// root takes no process at all, so this root offers none.)
-func TestKillStrays(t *testing.T) {
+// The sweep walks the whole tree: a process moved into an unknown cgroup
+// under the root, or below the supervisor's leaf, is killed with that cgroup,
+// which is removed; a process in the leaf itself is killed; a running
+// service's cgroup is left alone; a process in the root itself is reported
+// once and left running. (With controllers enabled below it the root takes
+// no process at all, so this root offers none.)
+func TestSweepStrays(t *testing.T) {
 	dir := cgtest.DirOffering(t)
 	r := openRoot(t, dir)
 	l := dir + "/" + leaf
-	if err := os.Mkdir(l, 0o755); err != nil {
-		t.Fatal(err)
+	for _, d := range []string{l, l + "/sub", dir + "/hide", dir + "/gone.service"} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	g, err := r.Prepare("svc", unit.Limits{}, time.Second)
 	if err != nil {
@@ -328,33 +333,53 @@ func TestKillStrays(t *testing.T) {
 	}
 	defer g.Close()
 	defer r.KillAll("svc", 2*time.Second)
-	a := startIn(t, g, "/bin/sleep", "60")
-	b := startIn(t, g, "/bin/sleep", "60")
+	move := func(into string) *exec.Cmd {
+		c := startIn(t, g, "/bin/sleep", "60")
+		if err := writeFile(into+"/cgroup.procs", strconv.Itoa(c.Process.Pid)); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	inLeaf, inSub, inHide, inGone, inRoot := move(l), move(l+"/sub"), move(dir+"/hide"), move(dir+"/gone.service"), move(dir)
 	keep := startIn(t, g, "/bin/sleep", "60")
-	if err := writeFile(l+"/cgroup.procs", strconv.Itoa(a.Process.Pid)); err != nil {
-		t.Fatal(err)
+	sw := r.SweepStrays(map[string]bool{"svc": true})
+	if len(sw.Killed) != 1 || sw.Killed[0] != inLeaf.Process.Pid {
+		t.Fatalf("killed %v", sw.Killed)
 	}
-	if err := writeFile(dir+"/cgroup.procs", strconv.Itoa(b.Process.Pid)); err != nil {
-		t.Fatal(err)
+	sort.Strings(sw.Cgroups)
+	want := []string{cgtest.Rel(dir + "/gone.service"), cgtest.Rel(dir + "/hide"), cgtest.Rel(l + "/sub")}
+	if strings.Join(sw.Cgroups, " ") != strings.Join(want, " ") {
+		t.Fatalf("cgroups %v want %v", sw.Cgroups, want)
 	}
-	killed := r.KillStrays()
-	if len(killed) != 2 {
-		t.Fatalf("killed %v", killed)
+	if len(sw.RootMembers) != 1 || sw.RootMembers[0] != inRoot.Process.Pid {
+		t.Fatalf("root members %v", sw.RootMembers)
 	}
 	deadline := time.Now().Add(2 * time.Second)
-	for !dead(a.Process.Pid) || !dead(b.Process.Pid) {
-		if time.Now().After(deadline) {
-			t.Fatal("strays alive")
+	for _, c := range []*exec.Cmd{inLeaf, inSub, inHide, inGone} {
+		for !dead(c.Process.Pid) {
+			if time.Now().After(deadline) {
+				t.Fatalf("stray %d alive", c.Process.Pid)
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
-	if dead(keep.Process.Pid) {
-		t.Fatal("service process killed")
+	for _, d := range []string{l + "/sub", dir + "/hide", dir + "/gone.service"} {
+		if _, err := os.Stat(d); !os.IsNotExist(err) {
+			t.Fatalf("%s left: %v", d, err)
+		}
 	}
+	if dead(keep.Process.Pid) || dead(inRoot.Process.Pid) {
+		t.Fatal("service process or root member killed")
+	}
+	if again := r.SweepStrays(map[string]bool{"svc": true}); len(again.RootMembers) != 0 || len(again.Killed) != 0 || len(again.Cgroups) != 0 {
+		t.Fatalf("second sweep %+v", again)
+	}
+	inRoot.Process.Kill()
 }
 
-// Service cgroups an earlier instance left are killed and removed by Open.
-func TestOpenKillsLeftovers(t *testing.T) {
+// Service cgroups an earlier instance left are killed and removed, once the
+// new instance holds the root.
+func TestCleanLeftovers(t *testing.T) {
 	dir := cgtest.Dir(t)
 	r := openRoot(t, dir)
 	g, err := r.Prepare("old", unit.Limits{}, time.Second)
@@ -363,9 +388,14 @@ func TestOpenKillsLeftovers(t *testing.T) {
 	}
 	in := startIn(t, g, "/bin/sleep", "60")
 	g.Close()
+	r.Close()
 	again := openRoot(t, dir)
-	if got := again.Leftovers(); len(got) != 1 || got[0] != "old.service" {
-		t.Fatal(got)
+	if dead(in.Process.Pid) {
+		t.Fatal("Open touched a leftover")
+	}
+	got, err := again.CleanLeftovers()
+	if err != nil || len(got) != 1 || got[0] != "old.service" {
+		t.Fatal(got, err)
 	}
 	if !dead(in.Process.Pid) {
 		t.Fatal("leftover alive")
@@ -373,6 +403,29 @@ func TestOpenKillsLeftovers(t *testing.T) {
 	if _, err := os.Stat(dir + "/old.service"); !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
+}
+
+// A second instance on the same root refuses before it changes anything.
+func TestOpenBusy(t *testing.T) {
+	dir := cgtest.Dir(t)
+	a := openRoot(t, dir)
+	g, err := a.Prepare("svc", unit.Limits{}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	defer a.KillAll("svc", 2*time.Second)
+	in := startIn(t, g, "/bin/sleep", "60")
+	if b, err := Open(dir); fail.Token(err) != "cgroup_busy" {
+		b.Close()
+		t.Fatal(err)
+	}
+	if dead(in.Process.Pid) {
+		t.Fatal("first instance's service killed")
+	}
+	a.Close()
+	b := openRoot(t, dir)
+	b.Close()
 }
 
 // With no directory named, the root is the supervisor's own cgroup: the

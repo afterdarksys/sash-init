@@ -35,10 +35,10 @@ type Root struct {
 	rel  string          // the same path as /proc/PID/cgroup shows it
 	ctrl map[string]bool // controllers enabled for service cgroups
 
-	// sweepRoot is set when the root held no process once the supervisor
-	// had moved into its leaf, so any process found there later escaped.
-	sweepRoot bool
-	leftovers []string
+	lock *os.File // the root directory, flocked while this instance uses it
+
+	// seenRoot holds the pids in the root itself already reported.
+	seenRoot map[int]bool
 
 	mu        sync.Mutex
 	hideKill  bool
@@ -53,10 +53,12 @@ var pidfdOpen = unix.PidfdOpen
 // the supervisor: otherwise cgroup_unavailable. When the supervisor is in
 // the root itself it moves into ROOT/supervisor first; when its own cgroup
 // is already a supervisor leaf (a restart in place), the root is the leaf's
-// parent. The cpu, memory and pids controllers are enabled for service
-// cgroups where the root offers them; a missing one only refuses units whose
-// limits need it. Service cgroups left by an earlier instance are killed
-// and removed (Leftovers names them; cgroup_stuck if one does not empty).
+// parent. Before anything is changed, an exclusive flock is taken on the
+// root directory and held until Close: a second supervisor on the same root
+// is cgroup_busy and touches nothing. The cpu, memory and pids controllers
+// are enabled for service cgroups where the root offers them; a missing one
+// only refuses units whose limits need it. Service cgroups an earlier
+// instance left are not touched here; see CleanLeftovers.
 func Open(dir string) (*Root, error) {
 	unavailable := fail.E("cgroup_unavailable")
 	var sfs unix.Statfs_t
@@ -89,6 +91,39 @@ func Open(dir string) (*Root, error) {
 			return nil, unavailable
 		}
 	}
+	lfd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, unavailable
+	}
+	if err := unix.Flock(lfd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		unix.Close(lfd)
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return nil, fail.E("cgroup_busy")
+		}
+		return nil, unavailable
+	}
+	lock := os.NewFile(uintptr(lfd), dir)
+	r, err := openLocked(dir, rel, own)
+	if err != nil {
+		lock.Close()
+		return nil, err
+	}
+	r.lock = lock
+	return r, nil
+}
+
+// Close releases the root's lock. The cgroups stay as they are.
+func (r *Root) Close() error {
+	if r == nil || r.lock == nil {
+		return nil
+	}
+	err := r.lock.Close()
+	r.lock = nil
+	return err
+}
+
+func openLocked(dir, rel, own string) (*Root, error) {
+	unavailable := fail.E("cgroup_unavailable")
 	switch {
 	case own == rel:
 		l := filepath.Join(dir, leaf)
@@ -118,71 +153,133 @@ func Open(dir string) (*Root, error) {
 	if err != nil {
 		return nil, unavailable
 	}
-	r := &Root{dir: dir, rel: rel, ctrl: map[string]bool{}}
+	r := &Root{dir: dir, rel: rel, ctrl: map[string]bool{}, seenRoot: map[int]bool{}}
 	for _, c := range controllers {
 		if hasWord(enabled, c) {
 			r.ctrl[c] = true
 		}
 	}
-	if procs, err := os.ReadFile(dir + "/cgroup.procs"); err == nil && len(bytes.TrimSpace(procs)) == 0 {
-		r.sweepRoot = true
-	}
-	entries, err := os.ReadDir(dir)
+	return r, nil
+}
+
+// CleanLeftovers kills and removes every service cgroup under the root,
+// which an earlier instance left, and names them; cgroup_stuck if one does
+// not empty. The caller runs it once, after it holds both the root's lock
+// (Open) and its control socket, before any service starts.
+func (r *Root) CleanLeftovers() ([]string, error) {
+	entries, err := os.ReadDir(r.dir)
 	if err != nil {
-		return nil, unavailable
+		return nil, fail.E("cgroup_unavailable")
 	}
+	var names []string
 	for _, e := range entries {
 		name, ok := strings.CutSuffix(e.Name(), suffix)
 		if !e.IsDir() || !ok {
 			continue
 		}
-		r.leftovers = append(r.leftovers, e.Name())
+		names = append(names, e.Name())
 		if !unit.NameOK(name) {
-			return nil, fail.E("cgroup_stuck")
+			return names, fail.E("cgroup_stuck")
 		}
 		if err := r.KillAll(name, unit.DefaultTimeout); err != nil {
-			return nil, err
+			return names, err
 		}
 	}
-	return r, nil
+	return names, nil
 }
 
-// Leftovers names the service cgroups an earlier instance left under the
-// root, which Open killed and removed.
-func (r *Root) Leftovers() []string {
-	return append([]string(nil), r.leftovers...)
+// Sweep is what one sweep found.
+type Sweep struct {
+	Killed      []int    // processes killed in the supervisor's leaf
+	Cgroups     []string // unknown cgroups killed and removed (paths as /proc shows them)
+	RootMembers []int    // processes in the root itself, each reported once
 }
 
-// KillStrays kills every process found in the supervisor's leaf other than
-// the supervisor itself, and every process in the root when the root was
-// empty at Open, and returns their pids. Such a process left its service
-// cgroup by writing cgroup.procs, which a service running as the
-// supervisor's uid can do. The caller must not have a child of its own
-// waiting there (a helper not yet moved into its service cgroup).
-func (r *Root) KillStrays() []int {
-	dirs := []string{filepath.Join(r.dir, leaf)}
-	if r.sweepRoot {
-		dirs = append(dirs, r.dir)
+// SweepStrays looks over the whole tree under the root. A cgroup directly
+// under it that is neither the supervisor's leaf nor ROOT/NAME.service for
+// a NAME in running is unknown: everything in it is killed and it is
+// removed, and so is any cgroup below the leaf. A process in the leaf other
+// than the supervisor is killed. A process in the root itself is left alone
+// and reported once: the outer manager (docker exec, ExecReload, ctl) puts
+// processes there. The caller must not have a child of its own waiting in
+// the leaf (a helper not yet moved into its service cgroup).
+//
+// Threats: an untrusted service (sandboxed, or a uid other than the
+// supervisor's and root) cannot write any cgroup.procs here, so whatever
+// this finds came from the outer manager or a trusted service. A trusted
+// service can move into another service's cgroup, which no sweep can tell.
+func (r *Root) SweepStrays(running map[string]bool) Sweep {
+	var sw Sweep
+	entries, err := os.ReadDir(r.dir)
+	if err != nil {
+		return sw
 	}
-	self := os.Getpid()
-	var killed []int
-	for _, d := range dirs {
-		raw, err := os.ReadFile(d + "/cgroup.procs")
-		if err != nil {
+	for _, e := range entries {
+		if !e.IsDir() {
 			continue
 		}
-		rel := "/" + strings.TrimPrefix(strings.TrimPrefix(d, Mount), "/")
-		for _, f := range strings.Fields(string(raw)) {
-			pid, err := strconv.Atoi(f)
-			if err != nil || pid <= 0 || pid == self {
-				continue
+		if name, ok := strings.CutSuffix(e.Name(), suffix); ok && running[name] {
+			continue
+		}
+		p := filepath.Join(r.dir, e.Name())
+		if e.Name() != leaf {
+			sw.Cgroups = append(sw.Cgroups, r.dropUnknown(p)...)
+			continue
+		}
+		subs, _ := os.ReadDir(p)
+		for _, sub := range subs {
+			if sub.IsDir() {
+				sw.Cgroups = append(sw.Cgroups, r.dropUnknown(filepath.Join(p, sub.Name()))...)
 			}
-			if killMember(pid, rel, true) {
-				killed = append(killed, pid)
+		}
+		self := os.Getpid()
+		for _, pid := range procsOf(p) {
+			if pid != self && killMember(pid, relOf(p), true) {
+				sw.Killed = append(sw.Killed, pid)
 			}
 		}
 	}
-	return killed
+	present := map[int]bool{}
+	for _, pid := range procsOf(r.dir) {
+		present[pid] = true
+		if !r.seenRoot[pid] {
+			r.seenRoot[pid] = true
+			sw.RootMembers = append(sw.RootMembers, pid)
+		}
+	}
+	for pid := range r.seenRoot {
+		if !present[pid] {
+			delete(r.seenRoot, pid)
+		}
+	}
+	return sw
+}
+
+// dropUnknown kills everything in an unknown cgroup and removes it, within
+// a second, and returns its path when that worked.
+func (r *Root) dropUnknown(dir string) []string {
+	if err := r.killAllDir(dir, time.Second); err != nil {
+		return nil
+	}
+	return []string{relOf(dir)}
+}
+
+func procsOf(dir string) []int {
+	raw, err := os.ReadFile(dir + "/cgroup.procs")
+	if err != nil {
+		return nil
+	}
+	var out []int
+	for _, f := range strings.Fields(string(raw)) {
+		if pid, err := strconv.Atoi(f); err == nil && pid > 0 {
+			out = append(out, pid)
+		}
+	}
+	return out
+}
+
+func relOf(dir string) string {
+	return "/" + strings.TrimPrefix(strings.TrimPrefix(dir, Mount), "/")
 }
 
 // TestHooks is for tests only: hideKill makes cgroup.kill look absent, so
@@ -305,6 +402,10 @@ func (r *Root) KillAll(name string, timeout time.Duration) error {
 	if err != nil {
 		return err
 	}
+	return r.killAllDir(dir, timeout)
+}
+
+func (r *Root) killAllDir(dir string, timeout time.Duration) error {
 	if timeout <= 0 {
 		timeout = unit.DefaultTimeout
 	}
@@ -443,11 +544,13 @@ func (r *Root) Usage(name string) (Usage, bool) {
 	return u, true
 }
 
-// Supervised reports whether pid is in the root or any cgroup below it: a
-// service cgroup, the supervisor's leaf (which a service running as the
-// supervisor's uid can move into), or the root itself. The supervisor never
-// asks about itself. A pid whose cgroup cannot be read, or whose cgroup has
-// been removed, counts as supervised.
+// Supervised reports whether pid is in any cgroup below the root: a service
+// cgroup, the supervisor's leaf, or an unknown cgroup. A process in the
+// root itself is not supervised: the outer manager puts processes there
+// (docker exec, ctl), and the only services that can move there are trusted
+// ones (cgroup_trusted), which can leave or stop sahinit anyway. The
+// supervisor never asks about itself. A pid whose cgroup cannot be read, or
+// whose cgroup has been removed, counts as supervised.
 //
 // Threats: this judges whatever process holds pid when it is called. The
 // control socket pins the peer with a pidfd when it accepts and checks that
@@ -467,7 +570,7 @@ func (r *Root) supervisedPath(cg string) bool {
 	if strings.HasSuffix(cg, " (deleted)") {
 		return true
 	}
-	return cg == r.rel || below(cg, r.rel)
+	return below(cg, r.rel)
 }
 
 // procCgroup returns the cgroup v2 path of a process ("self" or a pid).

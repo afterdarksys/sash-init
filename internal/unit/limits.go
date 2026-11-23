@@ -2,6 +2,7 @@ package unit
 
 import (
 	"encoding/json"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -35,6 +36,18 @@ var (
 	memoryRE = regexp.MustCompile(`^[1-9][0-9]{0,15}[KMG]?$`)
 	cpuRE    = regexp.MustCompile(`^[1-9][0-9]{0,12} [1-9][0-9]{0,6}$`)
 )
+
+// CgroupTrusted reports whether svc runs without a sandbox as root or as
+// the supervisor's own uid. Such a service can write any cgroup.procs under
+// the delegated root, so it can leave its cgroup (or stop the supervisor):
+// kill-all, limits and peer_supervised are promised only for the others.
+func CgroupTrusted(svc *Service) bool {
+	if svc == nil || svc.Sandbox != nil {
+		return false
+	}
+	uid := svc.Execution.UID
+	return uid == nil || *uid == 0 || *uid == uint32(os.Geteuid())
+}
 
 // Any reports whether some limit is set.
 func (l Limits) Any() bool {

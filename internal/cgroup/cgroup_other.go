@@ -35,6 +35,15 @@ func (*Root) Usage(string) (Usage, bool) { return Usage{}, false }
 
 func (*Root) Supervised(int) bool { return true }
 
-func (*Root) Leftovers() []string { return nil }
+func (*Root) Close() error { return nil }
 
-func (*Root) KillStrays() []int { return nil }
+func (*Root) CleanLeftovers() ([]string, error) { return nil, nil }
+
+// Sweep is what one sweep found.
+type Sweep struct {
+	Killed      []int
+	Cgroups     []string
+	RootMembers []int
+}
+
+func (*Root) SweepStrays(map[string]bool) Sweep { return Sweep{} }

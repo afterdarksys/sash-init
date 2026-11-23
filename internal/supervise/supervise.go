@@ -59,10 +59,14 @@ type Row struct {
 	Sandbox   string `json:"sandbox"`
 	LastError string `json:"last_error"`
 	// Cgroups is "enabled", "disabled" (--no-cgroups) or "unsupported".
-	Cgroups string        `json:"cgroups"`
-	Cgroup  string        `json:"cgroup"` // the service cgroup when enabled
-	Limits  RowLimits     `json:"limits"`
-	Usage   *cgroup.Usage `json:"usage,omitempty"`
+	Cgroups string `json:"cgroups"`
+	Cgroup  string `json:"cgroup"` // the service cgroup when enabled
+	// CgroupTrusted marks a service with no sandbox running as root or as
+	// the supervisor's uid: it can leave its cgroup, so kill-all, limits and
+	// peer_supervised are not promised for it.
+	CgroupTrusted bool          `json:"cgroup_trusted"`
+	Limits        RowLimits     `json:"limits"`
+	Usage         *cgroup.Usage `json:"usage,omitempty"`
 }
 
 // RowLimits are a unit's cgroup limits; zero or empty is no limit.
@@ -505,6 +509,8 @@ func (sup *Supervisor) row(s *runtime) Row {
 		LastError: s.lastError,
 		Cgroups:   sup.cgroupMode(),
 		Limits:    RowLimits{MemoryMax: l.MemoryMax, CPUMax: l.CPUMax(), PidsMax: l.PidsMax},
+
+		CgroupTrusted: unit.CgroupTrusted(s.svc),
 	}
 	s.mu.Unlock()
 	if sup.Cgroups != nil {
@@ -1074,11 +1080,43 @@ func (sup *Supervisor) sweepStrays() {
 	if sup.Cgroups == nil || !sup.launching.TryLock() {
 		return
 	}
-	killed := sup.Cgroups.KillStrays()
-	sup.launching.Unlock()
-	if sup.Log != nil {
-		for _, pid := range killed {
-			fmt.Fprintln(sup.Log, "cgroup_stray", pid)
+	defer sup.launching.Unlock()
+	running := make(map[string]bool, len(sup.rt))
+	for name, s := range sup.rt {
+		s.mu.Lock()
+		running[name] = s.pid > 0 || s.state == "starting" || s.state == "running" || s.state == "stopping"
+		s.mu.Unlock()
+	}
+	sw := sup.Cgroups.SweepStrays(running)
+	if sup.Log == nil {
+		return
+	}
+	for _, pid := range sw.Killed {
+		fmt.Fprintln(sup.Log, "cgroup_stray", pid)
+	}
+	for _, p := range sw.Cgroups {
+		fmt.Fprintln(sup.Log, "cgroup_stray_cgroup", p)
+	}
+	for _, pid := range sw.RootMembers {
+		fmt.Fprintln(sup.Log, "cgroup_root_member", pid)
+	}
+}
+
+// SweepEvery runs the stray sweep every d until ctx ends; d <= 0 is off.
+// The sweep also runs when a service ends, on each control request, and at
+// shutdown.
+func (sup *Supervisor) SweepEvery(ctx context.Context, d time.Duration) {
+	if d <= 0 || sup.Cgroups == nil {
+		return
+	}
+	t := time.NewTicker(d)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			sup.sweepStrays()
 		}
 	}
 }

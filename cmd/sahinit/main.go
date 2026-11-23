@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/afterdarksys/sahinit/internal/cgroup"
 	"github.com/afterdarksys/sahinit/internal/fail"
@@ -23,7 +24,7 @@ import (
 const usageText = policyUsage +
 	"usage: sahinit ctl --socket PATH status|diagnostics|start|stop|restart [NAME]\n" +
 	"usage: sahinit plan --dir DIR\n" +
-	"usage: sahinit supervise --dir DIR --socket PATH [--uid UID]... [--gid GID] [--no-cgroups]\n" +
+	"usage: sahinit supervise --dir DIR --socket PATH [--uid UID]... [--gid GID] [--no-cgroups] [--cgroup-sweep DURATION]\n" +
 	"usage: sahinit migrate --from FORMAT --source DIR [--out NEW_DIR] [--boot]\n"
 
 func main() {
@@ -76,7 +77,24 @@ func runPlan(args []string, stdout, stderr io.Writer) int {
 	for _, wave := range waves {
 		fmt.Fprintln(stdout, strings.Join(wave, " "))
 	}
+	flagTrusted(svcs, stderr)
 	return 0
+}
+
+// flagTrusted names, as "cgroup_trusted FILE", each unit that runs without a
+// sandbox as root or as the supervisor's uid: it can leave its cgroup, so
+// the cgroup guarantees are not promised for it.
+func flagTrusted(svcs map[string]*unit.Service, stderr io.Writer) {
+	names := make([]string, 0, len(svcs))
+	for name, svc := range svcs {
+		if unit.CgroupTrusted(svc) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		fmt.Fprintln(stderr, "cgroup_trusted", name+".json")
+	}
 }
 
 // loadUnits loads the catalog and names each refused unit file on stderr as
@@ -145,6 +163,7 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 	dir := fs.String("dir", "", "")
 	sock := fs.String("socket", "", "")
 	noCgroups := fs.Bool("no-cgroups", false, "")
+	sweep := fs.Duration("cgroup-sweep", 30*time.Second, "")
 	var uids []uint32
 	passed := false
 	fs.Func("uid", "", func(s string) error {
@@ -166,7 +185,7 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		gid = &g
 		return nil
 	})
-	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || *dir == "" || *sock == "" {
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || *dir == "" || *sock == "" || *sweep < 0 {
 		fmt.Fprint(stderr, usageText)
 		return 2
 	}
@@ -180,11 +199,7 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, fail.Token(err))
 		return 2
 	}
-	if root != nil {
-		for _, name := range root.Leftovers() {
-			fmt.Fprintln(stderr, "cgroup_leftover", name)
-		}
-	}
+	defer root.Close()
 	if err := refuseLimits(svcs, root, stderr); err != nil {
 		fmt.Fprintln(stderr, fail.Token(err))
 		return 2
@@ -217,11 +232,26 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, fail.Token(err))
 		return 2
 	}
+	// Leftover service cgroups are cleaned only with both the cgroup root's
+	// lock (openCgroups) and the socket's lock held, in that order, so a
+	// second supervisor that fails either one has touched nothing.
+	if root != nil {
+		names, err := root.CleanLeftovers()
+		for _, name := range names {
+			fmt.Fprintln(stderr, "cgroup_leftover", name)
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, fail.Token(err))
+			sup.Close()
+			return 2
+		}
+	}
 	signal.Ignore(syscall.SIGHUP)
 	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	go sup.SweepEvery(ctx, *sweep)
 	errc := make(chan error, 1)
 	go func() {
 		errc <- sup.Serve()

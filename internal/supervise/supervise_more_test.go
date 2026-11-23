@@ -87,7 +87,7 @@ func wantExact(t *testing.T, path, payload, exact string) {
 }
 
 func stoppedRow(name, sandbox string) string {
-	return `{"name":"` + name + `","state":"stopped","pid":0,"ready":false,"restarts":0,"sandbox":"` + sandbox + `","last_error":"","cgroups":"disabled","cgroup":"","limits":{"memory_max":0,"cpu_max":"","pids_max":0}}`
+	return `{"name":"` + name + `","state":"stopped","pid":0,"ready":false,"restarts":0,"sandbox":"` + sandbox + `","last_error":"","cgroups":"disabled","cgroup":"","cgroup_trusted":true,"limits":{"memory_max":0,"cpu_max":"","pids_max":0}}`
 }
 
 func exactErr(token string) string {

@@ -24,3 +24,17 @@ func TestCgroupModeReported(t *testing.T) {
 		}
 	}
 }
+
+// Status flags a service the cgroup guarantees are not promised for: no
+// sandbox, and root or the supervisor's uid.
+func TestCgroupTrustedReported(t *testing.T) {
+	own := newSvc("own", "simple", "exec", "no", false, time.Second, []string{"/bin/sleep", "30"})
+	boxed := newSvc("boxed", "simple", "exec", "no", false, time.Second, []string{"/bin/sleep", "30"})
+	uid := uint32(65534)
+	boxed.Execution = unit.Execution{UID: &uid, GID: &uid}
+	boxed.Sandbox = &unit.Sandbox{NoNewPrivs: true}
+	sup := mustSup(t, map[string]*unit.Service{"own": own, "boxed": boxed})
+	if !rowOf(t, sup, "own").CgroupTrusted || rowOf(t, sup, "boxed").CgroupTrusted {
+		t.Fatalf("%+v %+v", rowOf(t, sup, "own"), rowOf(t, sup, "boxed"))
+	}
+}

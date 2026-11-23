@@ -79,7 +79,7 @@ func TestPlanWaves(t *testing.T) {
 	putUnit(t, dir, simpleUnit("b", []string{"a"}))
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"plan", "--dir", dir}, &stdout, &stderr)
-	if code != 0 || stdout.String() != "a\nb\n" || stderr.Len() != 0 {
+	if code != 0 || stdout.String() != "a\nb\n" || stderr.String() != "cgroup_trusted a.json\ncgroup_trusted b.json\n" {
 		t.Fatalf("code %d out %q err %q", code, stdout.String(), stderr.String())
 	}
 }
@@ -90,7 +90,7 @@ func TestPlanSameWave(t *testing.T) {
 	putUnit(t, dir, simpleUnit("a", nil))
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"plan", "--dir", dir}, &stdout, &stderr)
-	if code != 0 || stdout.String() != "a b\n" || stderr.Len() != 0 {
+	if code != 0 || stdout.String() != "a b\n" || stderr.String() != "cgroup_trusted a.json\ncgroup_trusted b.json\n" {
 		t.Fatalf("code %d out %q err %q", code, stdout.String(), stderr.String())
 	}
 }
@@ -105,7 +105,7 @@ func TestPlanEmptyBoot(t *testing.T) {
 	})
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"plan", "--dir", dir}, &stdout, &stderr)
-	if code != 0 || stdout.Len() != 0 || stderr.Len() != 0 {
+	if code != 0 || stdout.Len() != 0 || stderr.String() != "cgroup_trusted job.json\n" {
 		t.Fatalf("code %d out %q err %q", code, stdout.String(), stderr.String())
 	}
 }
@@ -259,7 +259,7 @@ func TestPlanWantsMissing(t *testing.T) {
 	fields := simpleUnit("agent", nil)
 	fields["wants"] = []string{"gone"}
 	putUnit(t, dir, fields)
-	wantRun(t, []string{"plan", "--dir", dir}, 0, "agent\n", "")
+	wantRun(t, []string{"plan", "--dir", dir}, 0, "agent\n", "cgroup_trusted agent.json\n")
 }
 
 func TestPlanBogusFlag(t *testing.T) {
@@ -392,7 +392,7 @@ func TestPlanNamesRefusedUnit(t *testing.T) {
 	if err := os.Chmod(dir+"/other.json", 0o666); err != nil {
 		t.Fatal(err)
 	}
-	wantRun(t, []string{"plan", "--dir", dir}, 0, "agent\n", "unit_perm other.json\n")
+	wantRun(t, []string{"plan", "--dir", dir}, 0, "agent\n", "unit_perm other.json\ncgroup_trusted agent.json\n")
 }
 
 func TestSuperviseGIDFlag(t *testing.T) {

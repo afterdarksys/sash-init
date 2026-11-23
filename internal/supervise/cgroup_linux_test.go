@@ -3,7 +3,9 @@
 package supervise
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +26,7 @@ func cgSup(t *testing.T, svcs map[string]*unit.Service) (*Supervisor, *cgroup.Ro
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { r.Close() })
 	sup := mustSup(t, svcs)
 	sup.Cgroups = r
 	return sup, r
@@ -344,8 +347,8 @@ exec sleep 60
 	}
 	t.Cleanup(func() { cgtest.Remove(leafDir) })
 	svc.Exec = shExec(writeScript(t, script), leafDir, m)
-	var log strings.Builder
-	sup.Log = &logSink{b: &log}
+	log := &logSink{b: &strings.Builder{}}
+	sup.Log = log
 	if err := sup.Start(t.Context(), "esc"); err != nil {
 		t.Fatal(err)
 	}
@@ -367,8 +370,92 @@ type logSink struct {
 	b  *strings.Builder
 }
 
+func (l *logSink) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
 func (l *logSink) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.b.Write(p)
+}
+
+// The sweep also runs on a timer: a process hidden in an unknown cgroup
+// under the root is killed and the cgroup removed with no other trigger.
+func TestCgroupSweepTimer(t *testing.T) {
+	svc := newSvc("idle", "simple", "exec", "no", false, 2*time.Second, []string{"/bin/sleep", "60"})
+	sup, r := cgSup(t, map[string]*unit.Service{"idle": svc})
+	log := &logSink{b: &strings.Builder{}}
+	sup.Log = log
+	if err := sup.Start(t.Context(), "idle"); err != nil {
+		t.Fatal(err)
+	}
+	pid := rowOf(t, sup, "idle").Pid
+	hide := cgroup.Mount + strings.TrimSuffix(r.Path("idle"), "/idle.service") + "/hide"
+	if err := os.Mkdir(hide, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A second process of the service hides; the main process stays.
+	hider := writeScript(t, "echo 0 > \"$1/cgroup.procs\"; exec sleep 60\n")
+	cmd := exec.Command("/bin/sh", hider, hide)
+	cmd.SysProcAttr = &syscall.SysProcAttr{}
+	f, err := os.Open(cgroup.Mount + r.Path("idle"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	cmd.SysProcAttr.UseCgroupFD, cmd.SysProcAttr.CgroupFD = true, int(f.Fd())
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go cmd.Wait()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if cg, _ := cgtest.Cgroup(cmd.Process.Pid); cg == cgtest.Rel(hide) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("never hid")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go sup.SweepEvery(ctx, 50*time.Millisecond)
+	waitGone(t, cmd.Process.Pid)
+	deadline = time.Now().Add(2 * time.Second)
+	for !strings.Contains(log.String(), "cgroup_stray_cgroup "+cgtest.Rel(hide)) {
+		if time.Now().After(deadline) {
+			t.Fatalf("log %q", log.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(hide); !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if gone(pid) || rowOf(t, sup, "idle").State != "running" {
+		t.Fatal("running service touched")
+	}
+}
+
+// A second supervisor on the same cgroup root refuses, and the first one's
+// service keeps running.
+func TestCgroupSecondInstanceBusy(t *testing.T) {
+	svc := newSvc("idle", "simple", "exec", "no", false, 2*time.Second, []string{"/bin/sleep", "60"})
+	sup, r := cgSup(t, map[string]*unit.Service{"idle": svc})
+	if err := sup.Start(t.Context(), "idle"); err != nil {
+		t.Fatal(err)
+	}
+	pid := rowOf(t, sup, "idle").Pid
+	dir := cgroup.Mount + strings.TrimSuffix(r.Path("idle"), "/idle.service")
+	if b, err := cgroup.Open(dir); fail.Token(err) != "cgroup_busy" {
+		b.Close()
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if gone(pid) || rowOf(t, sup, "idle").State != "running" {
+		t.Fatal("first instance's service disturbed")
+	}
 }
