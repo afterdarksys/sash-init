@@ -2,12 +2,19 @@
 //
 // Threats: the control socket is local and uid-gated. A denied peer is
 // refused before the body is acted on, and a peer-cred failure denies the
-// caller. A peer inside a running service's process group is refused
-// (peer_supervised), so a service cannot drive the supervisor. The supervisor holds no keys, does not understand leases, and does
-// not log oneshot arguments. A sandbox claim is stored only when Launch
-// returns it. Stop signals the process group, under the service lock and
-// through a pidfd where the kernel allows (see runtime.signalGroup). This package does not confine
-// the network beyond the sandbox package and does not check leases.
+// caller. A peer inside a service's cgroup, or a process group a service
+// has led, is refused (peer_supervised), so a service cannot drive the
+// supervisor. The supervisor holds no keys, does not understand leases, and
+// does not log oneshot arguments. A sandbox claim is stored only when Launch
+// returns it. With cgroups, a service is its cgroup: when its main process
+// exits, for any reason, everything left in the cgroup is killed and the
+// service has ended only once the cgroup is empty (cgroup_stuck otherwise).
+// Stop sends SIGTERM to the process group, under the service lock and only
+// while the leader is unreaped or through a pidfd (see
+// runtime.signalGroup), and SIGKILL through cgroup.kill. Without cgroups
+// (--no-cgroups, or off Linux) process groups decide, as before. This
+// package does not confine the network beyond the sandbox package and does
+// not check leases.
 package supervise
 
 import (
@@ -23,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/afterdarksys/sahinit/internal/cgroup"
 	"github.com/afterdarksys/sahinit/internal/fail"
 	"github.com/afterdarksys/sahinit/internal/sandbox"
 	"github.com/afterdarksys/sahinit/internal/unit"
@@ -38,7 +46,8 @@ const (
 
 var argRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
-// Row is one status record. Fields are always encoded, including zeroes.
+// Row is one status record. Fields are always encoded, including zeroes,
+// except usage, which is present only while the service cgroup exists.
 type Row struct {
 	Name      string `json:"name"`
 	State     string `json:"state"`
@@ -47,7 +56,26 @@ type Row struct {
 	Restarts  int    `json:"restarts"`
 	Sandbox   string `json:"sandbox"`
 	LastError string `json:"last_error"`
+	// Cgroups is "enabled", "disabled" (--no-cgroups) or "unsupported".
+	Cgroups string        `json:"cgroups"`
+	Cgroup  string        `json:"cgroup"` // the service cgroup when enabled
+	Limits  RowLimits     `json:"limits"`
+	Usage   *cgroup.Usage `json:"usage,omitempty"`
 }
+
+// RowLimits are a unit's cgroup limits; zero or empty is no limit.
+type RowLimits struct {
+	MemoryMax uint64 `json:"memory_max"`
+	CPUMax    string `json:"cpu_max"`
+	PidsMax   uint64 `json:"pids_max"`
+}
+
+// Cgroup modes reported in status and diagnostics.
+const (
+	CgroupsEnabled     = "enabled"
+	CgroupsDisabled    = "disabled"
+	CgroupsUnsupported = "unsupported"
+)
 
 // Supervisor is the userspace service supervisor. It is not PID 1.
 type Supervisor struct {
@@ -67,6 +95,11 @@ type Supervisor struct {
 	SocketGID    *uint32
 	MaxHandlers  int
 	ReadDeadline time.Duration
+	// Cgroups is the delegated cgroup root. When nil, process groups decide
+	// as before, and CgroupMode (CgroupsDisabled by default, or
+	// CgroupsUnsupported) says why. Set both before Boot.
+	Cgroups    *cgroup.Root
+	CgroupMode string
 }
 
 type runtime struct {
@@ -102,6 +135,11 @@ type runtime struct {
 	// led holds the groups this service led before the current one, kept
 	// until each is empty, so their leftover members stay recognisable.
 	led []ledGroup
+	// cg is the cgroup root the last start used (nil without cgroups), and
+	// cgErr a failure to empty the service cgroup (cgroup_stuck), which
+	// makes the service failed whatever else happened.
+	cg    *cgroup.Root
+	cgErr string
 }
 
 type ledGroup struct {
@@ -298,19 +336,26 @@ func (sup *Supervisor) Stop(ctx context.Context, name string) error {
 			return fail.E("timeout")
 		}
 	}
-	s.finishStop(gen)
-	return nil
+	return s.finishStop(gen)
 }
 
-func (s *runtime) finishStop(gen uint64) {
+// finishStop marks the service stopped, or failed with the cgroup error
+// when its cgroup could not be emptied, which it returns.
+func (s *runtime) finishStop(gen uint64) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.state == "stopping" && s.gen == gen {
-		s.state = "stopped"
 		s.ready = false
 		s.pid = 0
 		s.stopReq = false
+		if s.cgErr != "" {
+			s.state = "failed"
+			s.lastError = s.cgErr
+			return fail.E(s.cgErr)
+		}
+		s.state = "stopped"
 	}
-	s.mu.Unlock()
+	return nil
 }
 
 // Restart stops and then starts. A user start clears the restart burst.
@@ -390,11 +435,24 @@ func (sup *Supervisor) Shutdown(ctx context.Context) error {
 				s.ready = false
 				s.pid = 0
 				s.stopReq = false
+				if s.cgErr != "" {
+					s.state = "failed"
+					s.lastError = s.cgErr
+					note(fail.E(s.cgErr))
+				}
 			}
 			s.mu.Unlock()
 		}(s, pid, procDone)
 	}
 	wg.Wait()
+	// Whatever a service left behind is killed with its cgroup.
+	if sup.Cgroups != nil {
+		for name, s := range sup.rt {
+			if err := sup.Cgroups.KillAll(name, timeoutOf(s.svc)); err != nil {
+				note(err)
+			}
+		}
+	}
 	if first != nil {
 		return fail.E("failed")
 	}
@@ -406,7 +464,7 @@ func (sup *Supervisor) Status(name string) ([]Row, error) {
 	if name == "" {
 		rows := make([]Row, 0, len(sup.rt))
 		for _, s := range sup.rt {
-			rows = append(rows, s.row())
+			rows = append(rows, sup.row(s))
 		}
 		sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 		return rows, nil
@@ -415,19 +473,20 @@ func (sup *Supervisor) Status(name string) ([]Row, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []Row{s.row()}, nil
+	return []Row{sup.row(s)}, nil
 }
 
 // row reports the sandbox claim only while a process holds it: a stopped,
-// exited, or failed service has no sandbox, whatever it had before.
-func (s *runtime) row() Row {
+// exited, or failed service has no sandbox, whatever it had before. Usage
+// is read while the service cgroup exists.
+func (sup *Supervisor) row(s *runtime) Row {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	sandbox := s.sandbox
 	if s.pid <= 0 {
 		sandbox = ""
 	}
-	return Row{
+	l := s.svc.Limits
+	r := Row{
 		Name:      s.svc.Name,
 		State:     s.state,
 		Pid:       s.pid,
@@ -435,7 +494,27 @@ func (s *runtime) row() Row {
 		Restarts:  s.restarts,
 		Sandbox:   sandbox,
 		LastError: s.lastError,
+		Cgroups:   sup.cgroupMode(),
+		Limits:    RowLimits{MemoryMax: l.MemoryMax, CPUMax: l.CPUMax(), PidsMax: l.PidsMax},
 	}
+	s.mu.Unlock()
+	if sup.Cgroups != nil {
+		r.Cgroup = sup.Cgroups.Path(s.svc.Name)
+		if u, ok := sup.Cgroups.Usage(s.svc.Name); ok {
+			r.Usage = &u
+		}
+	}
+	return r
+}
+
+func (sup *Supervisor) cgroupMode() string {
+	if sup.Cgroups != nil {
+		return CgroupsEnabled
+	}
+	if sup.CgroupMode == "" {
+		return CgroupsDisabled
+	}
+	return sup.CgroupMode
 }
 
 func (sup *Supervisor) lookup(name string) (*runtime, error) {
@@ -525,6 +604,7 @@ func (sup *Supervisor) startLocked(ctx context.Context, s *runtime, arg string, 
 	s.timedOut = false
 	s.lastError = ""
 	s.sandbox = ""
+	s.cgErr = ""
 	s.mu.Unlock()
 	return sup.launch(ctx, s, argv, gen)
 }
@@ -571,11 +651,30 @@ func (sup *Supervisor) launch(ctx context.Context, s *runtime, argv []string, ge
 		s.mu.Unlock()
 		return fail.E("failed")
 	}
+	s.cg = sup.Cgroups
 	s.mu.Unlock()
 
+	// The service cgroup is made fresh, with its limits, before the child
+	// starts; whatever an earlier start left in it is killed first. Limits
+	// without cgroups are never ignored.
+	var grp *cgroup.Group
+	if sup.Cgroups != nil {
+		g, err := sup.Cgroups.Prepare(s.svc.Name, s.svc.Limits, timeoutOf(s.svc))
+		if err != nil {
+			sup.failLaunch(s, gen, err)
+			return err
+		}
+		grp = g
+		defer grp.Close()
+	} else if s.svc.Limits.Any() {
+		err := fail.E("cgroup_controller")
+		sup.failLaunch(s, gen, err)
+		return err
+	}
 	notify := s.svc.Ready == "notify"
-	cmd, claim, notifyR, err := sandbox.Launch(ctx, sup.self, argv, s.svc.Sandbox, notify, timeoutOf(s.svc), sandbox.Options{Path: s.svc.Path, Execution: s.svc.Execution, Stdout: &s.stdout, Stderr: &s.stderr})
+	cmd, claim, notifyR, err := sandbox.Launch(ctx, sup.self, argv, s.svc.Sandbox, notify, timeoutOf(s.svc), sandbox.Options{Path: s.svc.Path, Execution: s.svc.Execution, Stdout: &s.stdout, Stderr: &s.stderr, Cgroup: grp})
 	if err != nil {
+		sup.dropCgroup(s)
 		if notifyR != nil {
 			if cerr := notifyR.Close(); cerr != nil {
 				sup.failLaunch(s, gen, fail.E("failed"))
@@ -590,7 +689,9 @@ func (sup *Supervisor) launch(ctx context.Context, s *runtime, argv []string, ge
 		claimOK = sandbox.IsSandboxClaim(claim)
 	}
 	if !claimOK || cmd == nil || cmd.Process == nil {
-		if cerr := killCollected(cmd, notifyR); cerr != nil {
+		cerr := killCollected(cmd, notifyR)
+		sup.dropCgroup(s)
+		if cerr != nil {
 			sup.failLaunch(s, gen, fail.E("failed"))
 			return fail.E("failed")
 		}
@@ -615,7 +716,9 @@ func (sup *Supervisor) launch(ctx context.Context, s *runtime, argv []string, ge
 		}
 		s.mu.Unlock()
 		closePidfd(pidfd)
-		if cerr := killCollected(cmd, notifyR); cerr != nil {
+		cerr := killCollected(cmd, notifyR)
+		sup.dropCgroup(s)
+		if cerr != nil {
 			return fail.E("failed")
 		}
 		return fail.E("failed")
@@ -674,6 +777,7 @@ func (sup *Supervisor) lifetime(s *runtime, cmd *exec.Cmd, notifyR *os.File, pro
 		}
 	}
 	s.markExiting(cmd.Process.Pid)
+	sup.drainCgroup(s)
 	waitErr := cmd.Wait()
 	s.mu.Lock()
 	exit := &Exit{Code: -1, Time: time.Now().UTC()}
@@ -702,6 +806,15 @@ func (sup *Supervisor) lifetime(s *runtime, cmd *exec.Cmd, notifyR *os.File, pro
 func (sup *Supervisor) onExit(s *runtime, procDone chan struct{}, gen uint64, exitedOK bool) {
 	s.mu.Lock()
 	if s.gen != gen {
+		s.mu.Unlock()
+		close(procDone)
+		return
+	}
+	if s.cgErr != "" && !s.stopReq && !sup.shuttingDown.Load() {
+		s.state = "failed"
+		s.ready = false
+		s.pid = 0
+		s.lastError = s.cgErr
 		s.mu.Unlock()
 		close(procDone)
 		return
@@ -923,6 +1036,32 @@ func (sup *Supervisor) failLaunch(s *runtime, gen uint64, err error) {
 	}
 }
 
+// drainCgroup runs once the main process has exited, before it is reaped:
+// everything left in the service cgroup is killed, and the service has
+// ended only when cgroup.events says populated 0. A cgroup that does not
+// empty within the timeout leaves cgErr set (cgroup_stuck).
+func (sup *Supervisor) drainCgroup(s *runtime) {
+	s.mu.Lock()
+	cg := s.cg
+	s.mu.Unlock()
+	if cg == nil {
+		return
+	}
+	if err := cg.KillAll(s.svc.Name, timeoutOf(s.svc)); err != nil {
+		s.mu.Lock()
+		s.cgErr = fail.Token(err)
+		s.eventLocked("cgroup_stuck", s.cgErr, nil)
+		s.mu.Unlock()
+	}
+}
+
+// dropCgroup empties and removes the service cgroup after a failed launch.
+func (sup *Supervisor) dropCgroup(s *runtime) {
+	if sup.Cgroups != nil {
+		sup.Cgroups.KillAll(s.svc.Name, timeoutOf(s.svc))
+	}
+}
+
 // markExiting waits until the leader can be reaped, then sets exiting under
 // mu. The caller reaps only after this returns, so a signal sent under mu
 // while exiting is false reaches a process that has not been reaped.
@@ -942,10 +1081,16 @@ func (s *runtime) markExiting(pid int) {
 // pid cannot be reused; after, the group id stays reserved while any member
 // lives.
 //
-// Threats: without the pidfd path, a group that empties just before a
-// signal sent after the leader was reaped could have its id reused by an
-// unrelated group. Cgroups (batch 2) remove this. The single-pid fallback is
-// used only before the leader is reaped.
+// With cgroups, SIGKILL goes to the whole service cgroup (cgroup.kill),
+// and any other signal reaches the process group only through the pidfd or
+// while the leader is unreaped, since the cgroup, not the group, is killed
+// once the leader has exited.
+//
+// Threats: without cgroups and without the pidfd path, a group that
+// empties just before a signal sent after the leader was reaped could have
+// its id reused by an unrelated group; with cgroups kill(-pid) is never
+// sent after the leader is reaped. The single-pid fallback is used only
+// before the leader is reaped.
 func (s *runtime) signalGroup(pid int, sig syscall.Signal) error {
 	if pid <= 0 {
 		return nil
@@ -955,6 +1100,9 @@ func (s *runtime) signalGroup(pid int, sig syscall.Signal) error {
 	if s.group != pid {
 		return nil
 	}
+	if s.cg != nil && sig == syscall.SIGKILL {
+		return s.cg.Kill(s.svc.Name)
+	}
 	if s.pidfd >= 0 {
 		err := pidfdSignalGroup(s.pidfd, sig)
 		if err == nil || err == syscall.ESRCH {
@@ -963,6 +1111,9 @@ func (s *runtime) signalGroup(pid int, sig syscall.Signal) error {
 		if err != syscall.EINVAL && err != syscall.ENOSYS {
 			return err
 		}
+	}
+	if s.cg != nil && s.exiting {
+		return nil
 	}
 	err := syscall.Kill(-pid, sig)
 	if err == nil || err == syscall.ESRCH {
@@ -1034,8 +1185,13 @@ func killCollected(cmd *exec.Cmd, notifyR *os.File) error {
 	return nil
 }
 
-// A collected leader does not imply that its process group is empty.
+// A collected leader does not imply that its process group is empty. With
+// cgroups done is closed only after the service cgroup is empty, and the
+// process group is not consulted.
 func (s *runtime) waitGroup(ctx context.Context, pid int, done chan struct{}, d time.Duration) error {
+	s.mu.Lock()
+	cg := s.cg
+	s.mu.Unlock()
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	tick := time.NewTicker(10 * time.Millisecond)
@@ -1043,7 +1199,7 @@ func (s *runtime) waitGroup(ctx context.Context, pid int, done chan struct{}, d 
 	for {
 		select {
 		case <-done:
-			if pid <= 0 || s.groupGone(pid) {
+			if pid <= 0 || cg != nil || s.groupGone(pid) {
 				return nil
 			}
 		default:

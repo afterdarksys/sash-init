@@ -369,18 +369,22 @@ func (sup *Supervisor) mutResp(name string, err error) response {
 	return resp
 }
 
-// supervisedPeer reports whether pid is in a process group that a service
-// has led, now or in an earlier start, while that group has members. Each
-// service leads its own group, so a leader's leftover children are still
-// recognised after it exits. An unknown pid (0, or a process that is gone)
-// counts as supervised.
+// supervisedPeer reports whether pid is in a service cgroup or below one
+// (with cgroups), or in a process group that a service has led, now or in
+// an earlier start, while that group has members. An unknown pid (0, or a
+// process that is gone) counts as supervised.
 //
 // Threats: a service with an allowed uid could otherwise stop or restart
-// other services. Not caught here, until cgroups (batch 2): a service that
-// leaves its group with setsid or setpgid, and a peer that exits after
-// sending its request whose pid is reused before this check.
+// other services. With cgroups a service cannot leave by setsid or setpgid,
+// and a peer whose pid is reused between its request and this check is
+// judged by the new process, which is accepted only outside every service
+// cgroup: the race can refuse, never accept, a service. Without cgroups
+// (--no-cgroups, or off Linux) those two residuals remain.
 func (sup *Supervisor) supervisedPeer(pid int) bool {
 	if pid <= 0 {
+		return true
+	}
+	if sup.Cgroups != nil && sup.Cgroups.Supervised(pid) {
 		return true
 	}
 	pgid, err := syscall.Getpgid(pid)

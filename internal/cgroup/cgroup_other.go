@@ -29,6 +29,8 @@ func (*Root) Prepare(string, unit.Limits, time.Duration) (*Group, error) {
 
 func (*Root) KillAll(string, time.Duration) error { return fail.E("cgroup_unavailable") }
 
+func (*Root) Kill(string) error { return fail.E("cgroup_unavailable") }
+
 func (*Root) Usage(string) (Usage, bool) { return Usage{}, false }
 
 func (*Root) Supervised(int) bool { return true }

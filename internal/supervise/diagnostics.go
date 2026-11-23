@@ -67,6 +67,7 @@ type Exit struct {
 type Diagnostics struct {
 	LastExit *Exit   `json:"last_exit,omitempty"`
 	Name     string  `json:"name"`
+	Cgroups  string  `json:"cgroups"`
 	Stdout   LogTail `json:"stdout"`
 	Stderr   LogTail `json:"stderr"`
 	Events   []Event `json:"events"`
@@ -93,5 +94,5 @@ func (sup *Supervisor) Diagnostics(name string) (*Diagnostics, error) {
 	events := append([]Event{}, s.events...)
 	lastExit := s.lastExit
 	s.mu.Unlock()
-	return &Diagnostics{Name: name, Stdout: s.stdout.snapshot(), Stderr: s.stderr.snapshot(), Events: events, LastExit: lastExit}, nil
+	return &Diagnostics{Name: name, Cgroups: sup.cgroupMode(), Stdout: s.stdout.snapshot(), Stderr: s.stderr.snapshot(), Events: events, LastExit: lastExit}, nil
 }

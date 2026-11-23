@@ -262,6 +262,20 @@ func (r *Root) KillAll(name string, timeout time.Duration) error {
 	}
 }
 
+// Kill sends SIGKILL to everything in the service cgroup once, without
+// waiting; KillAll waits for it to empty.
+func (r *Root) Kill(name string) error {
+	dir, err := r.svcDir(name)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(dir); err != nil {
+		return nil
+	}
+	r.kill(dir)
+	return nil
+}
+
 func (r *Root) isPopulated(dir string) (bool, error) {
 	r.mu.Lock()
 	hook := r.populated

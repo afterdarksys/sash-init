@@ -29,6 +29,9 @@ func TestMain(m *testing.M) {
 	if sock := os.Getenv("SAHT_CLIENT_SOCK"); sock != "" {
 		os.Exit(socketClient(sock, os.Getenv("SAHT_CLIENT_OUT")))
 	}
+	if mb := os.Getenv("SAHT_ALLOC_MB"); mb != "" {
+		os.Exit(allocate(mb))
+	}
 	code := m.Run()
 	if dir := tmpDirMade.Load(); dir != nil {
 		os.RemoveAll(*dir)
@@ -63,6 +66,24 @@ func socketClient(sock, out string) int {
 		return 3
 	}
 	return 0
+}
+
+// allocate touches mb MiB, then exits 0: a service over memory_max is
+// killed before it gets there.
+func allocate(mb string) int {
+	n, err := strconv.Atoi(mb)
+	if err != nil || n <= 0 {
+		return 3
+	}
+	var keep [][]byte
+	for i := 0; i < n; i++ {
+		b := make([]byte, 1<<20)
+		for j := 0; j < len(b); j += 4096 {
+			b[j] = 1
+		}
+		keep = append(keep, b)
+	}
+	return len(keep) - n
 }
 
 var pathSeq atomic.Uint64
