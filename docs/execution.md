@@ -79,16 +79,31 @@ When sahinit is restarted from inside such a leaf, the leaf's parent is
 the root again. Service cgroups left by an earlier instance are killed,
 removed and named on stderr as `cgroup_leftover NAME.service`.
 
-A service that runs as the supervisor's uid, or as root without a
-sandbox, can write `cgroup.procs` anywhere in the root and move itself
-out of its own cgroup. The kernel refuses a move into the root itself
-while controllers are enabled below it. A process found in
-`ROOT/supervisor`, other than sahinit, is killed and logged as
-`cgroup_stray PID`. The check runs when a service ends, on each control
-request, and at shutdown. A process in the root or anywhere below it is
-always `peer_supervised`. So run `ctl` from outside the root; with
-`docker exec` into a container whose root is the namespace root, that is
-not possible.
+**Trust boundary.** A service with no sandbox that runs as root or as the
+supervisor's uid is *cgroup-trusted*. It can write `cgroup.procs` anywhere
+in the root, so it can leave its cgroup, and it could kill sahinit anyway.
+Kill-all, limits and `peer_supervised` are promised only for sandboxed
+services and for services running as another uid. `plan` names each
+trusted unit on stderr as `cgroup_trusted FILE`; status rows carry
+`cgroup_trusted`.
+
+To limit what a trusted service can do, sahinit sweeps the root. It runs
+when a service ends, on each control request, at shutdown, and every
+`--cgroup-sweep` (default `30s`; `0` turns the timer off).
+- A cgroup under the root that is neither `ROOT/supervisor` nor a running
+  service's cgroup is killed and removed (`cgroup_stray_cgroup PATH`). So
+  is any cgroup below `ROOT/supervisor`.
+- Any process in `ROOT/supervisor` other than sahinit is killed
+  (`cgroup_stray PID`).
+- A process in the root itself is left alone and logged once
+  (`cgroup_root_member PID`). The outer manager puts processes there.
+- A trusted service that moves into another service's cgroup cannot be
+  detected.
+
+sahinit takes a lock on the root directory before it changes anything, so a
+second supervisor on the same root refuses with `cgroup_busy`. Leftover
+service cgroups are cleaned only after both this lock and the control
+socket's lock are held.
 Without a usable delegated cgroup, `supervise` refuses to start with
 `cgroup_unavailable`. `--no-cgroups` keeps the process-group behaviour
 instead. Off Linux there are no cgroups, which behaves like
@@ -167,8 +182,11 @@ allows an omitted service name. It prints the JSON response and exits 0 for succ
 mode and peer UID authorization apply to every operation, including diagnostics.
 The socket is 0600 when only the supervisor's uid may connect; when `--uid`
 names another uid it is 0660 and `--gid GID` names its group (`socket_group`
-otherwise). A request from a process in the cgroup root or below it (any
-service cgroup, or the supervisor's leaf) is refused with `peer_supervised`.
+otherwise). A request from a process below the cgroup root (a service
+cgroup, the supervisor's leaf, or an unknown cgroup) is refused with
+`peer_supervised`. Run `ctl` from outside the root or from the root itself
+(for example with `docker exec`). A process in the root itself is accepted:
+only the outer manager or a cgroup-trusted service can put one there.
 So is a request from a process group a service has led. The peer is pinned
 when it is accepted:
 - through `SO_PEERPIDFD` (Linux 6.5, amd64 and arm64);

@@ -15,7 +15,9 @@ go build -o /tmp/sahinit ./cmd/sahinit
 On Linux `supervise` needs a delegated cgroup v2, for example systemd's
 `Delegate=yes`, and refuses to start without one (`cgroup_unavailable`).
 `--no-cgroups` keeps plain process groups; status reports that, and units with
-limits are refused. See [cgroups](docs/execution.md#cgroups).
+limits are refused. Units without a sandbox that run as root or as the
+supervisor's uid are `cgroup_trusted`: the cgroup guarantees are not promised
+for them. See [cgroups](docs/execution.md#cgroups).
 
 Preview migration from systemd, daemontools, or OpenRC:
 

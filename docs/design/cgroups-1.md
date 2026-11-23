@@ -47,7 +47,7 @@ Each new check needs a test that fails when the check is reverted. Plus `./build
 4. **The SIGTERM race before 6.9 is closed with cgroups:** `kill(-pid)` is sent only while the leader is unreaped. After that, only the pidfd path, or the cgroup, reaches the service. SIGKILL always goes through `cgroup.kill`.
 5. **clone3 fallback.** clone3 into the cgroup is always tried first. A Start that fails with ENOSYS or E2BIG is followed by a probe: the supervisor starts itself (`apply` with no handshake, which exits at once) into the cgroup with tiny arguments. Only if the probe fails the same way (Linux before 5.7, or a seccomp filter) does every later launch into a cgroup switch to the helper. An execve E2BIG never switches it. An unsandboxed launch then also goes through the helper: it applies no sandbox and claims `none`. The helper's first act is to wait on a sync pipe, fd 7. Meanwhile the supervisor writes the helper's pid into `cgroup.procs` with its own credentials and then sends one byte; end of file instead is `cgroup_join`. The helper never holds a `cgroup.procs` fd, so another process that ptraces it or calls `pidfd_getfd` on it gains nothing. On clone3, `cgroup_join` covers EBUSY (not a leaf), ENODEV (a removed cgroup) and EOPNOTSUPP. On the helper path it covers a failed write.
 6. **The freeze-and-kill fallback** walks the frozen subtree, opens a pidfd for each pid, checks the pid is still in the subtree, and signals through the pidfd.
-7. **`peer_supervised`** is the cgroup check, ORed with the old process-group check. Any cgroup at or below the root counts as supervised: the service cgroups, the supervisor's leaf and the root itself. The supervisor never connects to its own socket. A pid whose `/proc/PID/cgroup` cannot be read, or reads ` (deleted)`, is supervised. Consequence: `ctl` must run outside the root, which `docker exec` into a container whose root is the namespace root cannot do.
+7. **`peer_supervised`** is the cgroup check, ORed with the old process-group check. Every cgroup below the root counts as supervised: the service cgroups, the supervisor's leaf, and any unknown cgroup. The supervisor never connects to its own socket. A pid whose `/proc/PID/cgroup` cannot be read, or reads ` (deleted)`, is supervised. The root itself does not count (decision 16), so `ctl` runs either outside the root or in the root itself.
 8. **Limit formats.**
    - `memory_max`: a string of bytes, with an optional `K`, `M` or `G`, at least `1M`. It also writes `memory.swap.max=0` where that file exists, or a service over the limit would swap instead of being killed.
    - `pids_max`: an integer from 1 to 4194304.
@@ -62,11 +62,23 @@ Each new check needs a test that fails when the check is reverted. Plus `./build
 
 13. **Escapes through `cgroup.procs`.** A service running as the supervisor's uid, or as root without a sandbox, can write `cgroup.procs` anywhere in the root, since the root is delegated to that uid. Making the files read-only would not stop the owner, who can chmod them back. A root-only file would also break clone3 for a non-root supervisor, which needs write access on the common ancestor. So escapes are detected instead.
     - Moving into the root itself is refused by the kernel while controllers are enabled below it.
-    - Any process in `ROOT/supervisor` other than sahinit is killed through a pidfd after a membership recheck, and logged as `cgroup_stray PID`. So is any process in the root itself, when the root was empty after sahinit moved into its leaf.
-    - The check runs when a service ends, on each control request, and at shutdown. It is skipped while a launch may have a helper waiting in the leaf.
+    - Superseded by decisions 17 and 18.
     - A process that escapes to a cgroup outside the root is not detected. Reaching one needs write access to `cgroup.procs` above the root, which delegation does not give.
-14. **A restart in place.** When the supervisor's own cgroup is named `supervisor`, the root is its parent. A cgroup the operator happened to name `supervisor` is read the same way. Open kills and removes every `*.service` cgroup left under the root, names them (`cgroup_leftover`), and is `cgroup_stuck` if one does not empty.
+14. **A restart in place.** When the supervisor's own cgroup is named `supervisor`, the root is its parent. A cgroup the operator happened to name `supervisor` is read the same way. Every `*.service` cgroup left under the root is killed and removed, named (`cgroup_leftover`), and is `cgroup_stuck` if one does not empty. This happens only once both locks are held (decision 19).
 15. **Tests that inject what Docker cannot produce.**
     - Pid reuse: the pin's pid is pointed at another live process after the pinned one is reaped.
     - No pidfd: `pidfdOpen` returns ENOSYS.
     - An execve E2BIG: a synthetic error is handed to the probe.
+
+## After the re-review (2026-11-23)
+
+16. **Trust boundary (reviewer's decision).** A service with no sandbox, running as root or as the supervisor's uid, is **trusted with respect to its cgroup membership**. Root, or the same uid, can always leave its cgroup or kill sahinit. Kill-all, the limits, and `peer_supervised` are promised only for the other services: sandboxed ones, or ones running as another uid. Those cannot write any `cgroup.procs` under the root. `plan` names each trusted unit on stderr as `cgroup_trusted FILE`, and each status row carries `cgroup_trusted`. As a consequence, a process in the root itself is not `peer_supervised`. Only the outer manager (`docker exec`, systemd's ExecReload/ExecStartPost, an operator's `ctl`) or a trusted service can put a process there.
+17. **The sweep walks the whole root.**
+    - A cgroup directly under the root that is neither the leaf nor `NAME.service` of a running service is unknown. Everything in it is killed (`cgroup.kill`, or the freeze fallback), it is removed within one second, and it is logged as `cgroup_stray_cgroup PATH`.
+    - Every cgroup below the leaf is handled the same way.
+    - A process in the leaf other than sahinit is killed (`cgroup_stray PID`).
+    - A process in the root itself is not killed, and is logged once per pid as `cgroup_root_member PID`.
+    - The sweep runs when a service ends, on each control request, at shutdown, and every `--cgroup-sweep` (default 30s; 0 turns the timer off). It is skipped while a launch may have a helper waiting in the leaf.
+    - A trusted service that moves into a sibling service's cgroup cannot be detected (decision 16).
+18. **The root's flock.** Open takes `LOCK_EX|LOCK_NB` on the root directory before it changes anything: before moving into the leaf, before enabling controllers, before any sweep. A second supervisor on the same root is `cgroup_busy` and touches nothing. The lock is held until exit.
+19. **Lock order.** The cgroup root's lock (Open) comes first, then the control socket's lock (Listen), then the leftover cleanup. A supervisor that fails either lock exits before any cleanup, so two supervisors on one root or one socket cannot kill each other's services.
