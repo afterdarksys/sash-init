@@ -33,5 +33,7 @@ Execution context, local control commands, and lifecycle diagnostics are documen
 in [execution and diagnostics](docs/execution.md).
 
 Signed boot-policy metadata can be verified, cached, and inspected with
-`sahinit policy`. See [boot-policy metadata](docs/boot-policy.md) for the wire
-contract and scope; policy enforcement and network renewal are not wired yet.
+`sahinit policy`, and `sahinit policy refresh` can renew `renew`-mode policies
+from a provisioned HTTPS endpoint. See [boot-policy metadata](docs/boot-policy.md)
+for the wire contract and scope; there is no issuer yet, and policy is not
+enforced (metadata only).

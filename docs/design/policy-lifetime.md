@@ -21,7 +21,7 @@ The mode is part of the **signed** policy (`lifetime: "never"` or `"renew"`), so
 
 1. Batch 1 hardening (`hardening-1.md`). It is independent of this decision.
 2. **Done** (`feat/policy-lifetime`). The `lifetime` field, the revocation floor, the trust cap, and the `never` default, with tests both ways.
-3. Finish the renewal slice behind `renew`.
+3. **Done** (`feat/policy-renew`). The renewal worker behind `renew`.
 
 ## Step 2 decisions (2026-11-22)
 
@@ -32,3 +32,12 @@ The mode is part of the **signed** policy (`lifetime: "never"` or `"renew"`), so
 - **Trust cap.** `max_lifetime` is optional in the trust file and defaults to `never` (both allowed). In code, `Trust.Validate` requires it to be set explicitly; only `DecodeTrust` applies the default.
 - **CLI.** `sahinit policy floor-install|floor-show`. `status` reports `lifetime` and `floor_min_sequence`, and reports a revoked cache as `state: revoked`, exit 1.
 - **Open.** The floor shares the anti-rollback limits of the policy cache: deleting the cache directory or restoring a snapshot removes it. Key rotation (audit item 10) is still not documented.
+
+## Step 3 decisions (2026-11-23)
+
+- **Mode.** The worker renews when the trust cap is `renew`, or the cached policy (read for ordering, so revoked or capped still counts) is `renew`. Otherwise, including an empty cache under a `never` cap, it prints `not_renewing` and exits 0 with no clock, credential or connection. It exits rather than idles, so `never` hosts carry no long-running network client; restart it after moving a host to `renew`.
+- **never response.** Handled by the install rules: refused under a `renew` cap (`policy_lifetime_cap`), refused at the same generation (`policy_generation_conflict`), and otherwise installed, after which the worker exits as above.
+- **Stale.** A response identical to the cache is `policy_refresh_stale` and backs off like any failure.
+- **Clock.** Losing clock trust ends the worker (exit 1); it cannot recover in-process.
+- **Floors** are not fetched by the worker.
+- **Open.** No issuer; the worker writes the cache and owns its trust file instead of using a narrow install interface (see boot-policy.md, "Not done").

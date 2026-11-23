@@ -4,8 +4,10 @@ Implemented: strict Ed25519 verification, local trust ceilings, validity states,
 renewal ordering, a signed lifetime mode (`never` or `renew`), a signed
 revocation floor, and a durable metadata cache. **This does not enforce boot policy
 in the supervisor, validate catalog artifacts, start recovery, or run sash jobs.**
-Every CLI report says `"enforcement":"metadata_only"`. SystemAPI issuance and
-network refresh are the next integration slice.
+Every CLI report says `"enforcement":"metadata_only"`. An optional renewal
+worker (`sahinit policy refresh`) fetches `renew` policies from one provisioned
+HTTPS endpoint; see [renewal worker](#renewal-worker-renew-mode-only). No
+SystemAPI issuer for that endpoint exists yet.
 
 ## Commands
 
@@ -248,6 +250,149 @@ is outside this file-based anti-rollback guarantee. A missing cache is initial
 provisioning, not proof that an earlier sequence never existed. Protected monotonic
 state and a verified boot chain remain future work.
 
+## Renewal worker (`renew` mode only)
+
+```sh
+sahinit policy refresh --trust FILE --cache DIR --endpoint HTTPS_URL \
+  --credential FILE [--trust-system-clock] [--once]
+```
+
+The worker is optional and off the boot path. It does only one thing: fetch a
+signed policy document and hand it to the same install path as `cache`. It
+never activates configuration, restarts services or runs scripts, and every
+event says `"enforcement":"metadata_only"`.
+
+### Which hosts renew
+
+The worker decides the host's mode before it reads a clock or a credential:
+
+| Trust `max_lifetime` | Cached policy | Mode |
+| --- | --- | --- |
+| `renew` | anything or none | `renew` |
+| `never` (or omitted) | `renew` (version 1, or version 2 `renew`) | `renew` |
+| `never` (or omitted) | `never` | `never` |
+| `never` (or omitted) | none | `never` |
+
+The cached policy is read as `cache` reads it to order a replacement, so a
+policy below the revocation floor, or a `never` policy after the cap was
+tightened to `renew`, still renews; a new policy is how such a host recovers.
+A corrupt or unsafe cache or floor fails closed before any request.
+
+**`never` mode.** The worker prints one event,
+`{"event":"not_renewing","ok":true,"error":"","enforcement":"metadata_only","lifetime":"never"}`,
+and exits 0, in both run and `--once` modes. It needs no clock, reads no
+credential and opens no connection. With an empty cache and a `never` cap the
+first policy must be installed by other means (`policy cache`), or the cap set
+to `renew`. If a refresh installs a `never` policy (allowed only by a `never` cap
+and a higher catalog generation), the worker prints the attempt and
+`not_renewing` and exits 0. Use `"restart": "on-failure"` so that a clean exit is
+not restarted; start the worker again after the host moves to `renew`.
+
+**`renew` mode.** `--trust-system-clock` is required in practice: without a
+trusted clock the worker reports `policy_clock_uncertain` and exits 1, without
+any request. A clock that loses trust while running ends the worker the same
+way, since an anchored clock cannot regain trust in the same process.
+
+### Transport and credential
+
+The endpoint is provisioned locally, never discovered from a response. It must
+be `https://` with a host and no user info, query or fragment
+(`policy_refresh_config`, without echoing the URL). The client uses TLS 1.3
+only, the system certificate roots, no environment proxy, no redirects (a 3xx
+is a failure, and the credential is not resent), no compression, a 10-second
+connect and handshake limit, a 20-second header limit, a 30-second overall
+limit, 16 KiB of response headers and a body of at most 384 KiB
+(`policy_refresh_size`).
+
+The credential file is reread on every attempt, so it can be rotated in place.
+It must be a regular file owned by the worker's effective uid, mode 0600 or
+stricter, with one link, and not a symlink at its final component. Its content
+is 32 to 4096 printable ASCII characters with no spaces, and at most one trailing
+newline. Anything else is `policy_refresh_credential`, before any connection.
+The credential is never printed, logged or put in an error.
+
+### Request and response
+
+```
+POST <endpoint>
+Authorization: Bearer <credential>
+Content-Type: application/json
+Accept: application/json
+
+{"tenant_id":"...","host_id":"...","enrollment_id":"...",
+ "sequence":N,"catalog_generation":N,"policy_sha256":"<payload sha256 hex>"}
+```
+
+The body comes from the trust file and the cached policy (zeros and `""` with no
+cache). It is advisory: the issuer must authenticate the host from the
+credential, select its assigned policy itself, and never take tenant, host,
+permissions or scopes from the body.
+
+Only `200` with a signed policy envelope as the body (no `Content-Encoding`
+other than `identity`) can renew. `401` and `403` are `policy_refresh_denied`;
+any other status, including `204` and `304`, is `policy_refresh_http`. The body is
+passed to the same install as `cache`: signature, host binding, trust ceilings,
+the lifetime cap, normal validity now, ordering and the floor. A response
+identical to the cache is `policy_refresh_stale`; extending validity needs a new
+sequence and signature. A failed or stale response never changes the cache or
+extends its validity.
+
+The worker does not accept floors. A floor arrives by other means
+(`policy floor-install`).
+
+### Schedule and events
+
+Each line on stdout is one JSON event: `event` (`scheduled`, `attempt`,
+`not_renewing`), `ok`, `error` (a token), `enforcement`, and when known
+`lifetime`, `sequence` and `next_attempt_seconds`.
+
+- At start, a valid cached `renew` policy that is not yet due
+  (`issued_at + refresh_after_seconds`) is reported as `scheduled` with the wait,
+  which is 80 to 100 percent of the time left, never later than the due time.
+  Otherwise the first attempt is immediate, including in grace or after expiry.
+- After a success the next attempt is the signed refresh interval with plus or
+  minus 20 percent jitter, kept before normal expiry.
+- After a failure the retry is 30 seconds, doubling to at most 5 minutes, with
+  the same jitter and capped at 5 minutes.
+
+`--once` makes one attempt and prints one `attempt` event (or `not_renewing`),
+exit 0; a refusal prints its token on stderr and exits 1. SIGINT and SIGTERM stop
+either mode with exit 0. A failure writing stdout stops the worker with exit 1.
+
+### Example unit
+
+[`examples/policy-refresh.json`](examples/policy-refresh.json) is a native
+sahinit unit for the worker. Its endpoint (`ISSUER.invalid`) and uid/gid
+(`64990`) are placeholders to replace; there is no default issuer, credential or
+identity. It is sandboxed, so it must run as a non-root uid (`sandbox_root`), and
+has no capabilities and `boot: false`. Before use, provision as root:
+
+```sh
+groupadd -g 64990 sahinit-refresh && useradd -u 64990 -g 64990 -M -s /usr/sbin/nologin sahinit-refresh
+install -d -o 64990 -g 64990 -m 700 /var/lib/sahinit-refresh /var/lib/sahinit-refresh/policy
+install -o 64990 -g 64990 -m 600 boot-trust.json /var/lib/sahinit-refresh/boot-trust.json
+install -o 64990 -g 64990 -m 600 credential /var/lib/sahinit-refresh/credential
+```
+
+The trust file and cache must be owned by the uid that runs the command, so this
+worker owns its own copy of the trust file and its own cache; the sandbox grants
+the trust file and credential read-only and only the cache directory
+read-write. The sandbox paths for the system roots and name resolution are
+Debian's; adjust them to the distribution. The example is checked by a test to
+parse as a sandboxed, non-root unit; it has not been run against an issuer.
+
+### Not done
+
+- No SystemAPI issuer, endpoint or host credential exists; the contract above is
+  what an issuer must implement.
+- The design's narrow local install interface is not built: the worker writes the
+  cache itself, and under the existing owner rule it owns its trust file. A
+  compromised worker could therefore rewrite that trust file outside the
+  sandbox. Separating the fetcher from the installer is future work.
+- The cache is still metadata only; nothing reads it to admit units or jobs.
+- No warning event before normal expiry, no durable record of the last attempt,
+  and no floor delivery over the network.
+
 ## Verification
 
 ```sh
@@ -267,7 +412,15 @@ files, corruption, expired-cache reload, and process interruption at commit stag
 lifetime shapes and version pairing, a `never` policy across clock jumps, the
 trust cap, and floor tampering, wrong key, wrong domain, host binding, lower
 floor, conflict, revocation of cached and new policies, unsafe or corrupt floor
-files, and interrupted floor commits.
+files, and interrupted floor commits. Renewal tests use a local TLS 1.3 server:
+success, denied and failing statuses, oversized and malformed bodies, large
+headers, compression, rollback and stale responses, redirects and proxy
+settings, untrusted certificates and TLS 1.2, credential shape, mode, symlink,
+hard link, FIFO and rotation, cancellation, backoff and recovery, scheduling in
+validity, grace and expiry, clock loss, `never` mode with no connection, a
+`never` response under each cap rule, a revoked cache renewing, and a corrupt
+cache or floor stopping before any request. CLI tests cover arguments, `--once`,
+cancellation, output failure, and on Linux a trusted-clock run.
 
 The design for subsequent issuance, sash sessions, catalog activation, and VM boot
 remains in [renewable boot policy](design/renewable-boot-policy.md).

@@ -28,5 +28,6 @@ the execution identity and environment support now available. See [migration.md]
 Design proposal: [renewable SystemAPI boot policy](design/renewable-boot-policy.md)
 specifies cached boot authorization, periodic renewal, offline grace, sash job
 scoping, and recovery behavior. Local metadata verification, durable caching, time states, and CLI inspection are
-implemented; see [boot-policy metadata](boot-policy.md). Network renewal, artifact
-verification, and runtime enforcement remain pending.
+implemented, with an optional renewal worker for `renew`-mode policies against a
+provisioned HTTPS endpoint; see [boot-policy metadata](boot-policy.md). The
+SystemAPI issuer, artifact verification, and runtime enforcement remain pending.
