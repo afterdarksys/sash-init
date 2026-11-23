@@ -180,6 +180,11 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, fail.Token(err))
 		return 2
 	}
+	if root != nil {
+		for _, name := range root.Leftovers() {
+			fmt.Fprintln(stderr, "cgroup_leftover", name)
+		}
+	}
 	if err := refuseLimits(svcs, root, stderr); err != nil {
 		fmt.Fprintln(stderr, fail.Token(err))
 		return 2
@@ -201,6 +206,7 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 	}
 	sup.SocketGID = gid
 	sup.Cgroups, sup.CgroupMode = root, mode
+	sup.Log = stderr
 	if passed {
 		sup.Allow = map[uint32]struct{}{}
 		for _, uid := range uids {

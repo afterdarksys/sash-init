@@ -266,11 +266,13 @@ func (sup *Supervisor) Serve() error {
 func (sup *Supervisor) rejectFull(conn *net.UnixConn) {
 	defer conn.Close()
 	uid, pid, err := peerCred(conn)
+	pin := pinPeer(conn, pid)
+	defer pin.close()
 	if err != nil || !sup.allowed(uid) {
 		sup.writeResp(conn, response{OK: false, Error: "uid_denied"})
 		return
 	}
-	if sup.supervisedPeer(pid) {
+	if sup.peerRefused(pin) {
 		sup.writeResp(conn, response{OK: false, Error: "peer_supervised"})
 		return
 	}
@@ -286,15 +288,20 @@ func (sup *Supervisor) handle(conn *net.UnixConn) {
 	if err := conn.SetReadDeadline(time.Now().Add(dl)); err != nil {
 		return
 	}
+	// The peer is pinned before the request, which it controls the timing
+	// of, is read.
 	uid, pid, uidErr := peerCred(conn)
+	pin := pinPeer(conn, pid)
+	defer pin.close()
 	payload, readErr := frame.Read(conn)
 	if uidErr != nil || !sup.allowed(uid) {
 		sup.writeResp(conn, response{OK: false, Error: "uid_denied"})
 		return
 	}
+	sup.sweepStrays()
 	// Checked when the request is acted on, after the frame is read, so a
 	// service started after the peer connected is still caught.
-	if sup.supervisedPeer(pid) {
+	if sup.peerRefused(pin) {
 		sup.writeResp(conn, response{OK: false, Error: "peer_supervised"})
 		return
 	}
@@ -369,17 +376,25 @@ func (sup *Supervisor) mutResp(name string, err error) response {
 	return resp
 }
 
-// supervisedPeer reports whether pid is in a service cgroup or below one
+// peerRefused judges the pinned peer: refused when its pid is supervised,
+// or when the pinned process is gone, so that the pid judged was not
+// necessarily the peer's.
+func (sup *Supervisor) peerRefused(pin peerPin) bool {
+	return sup.supervisedPeer(pin.pid) || !pin.same()
+}
+
+// supervisedPeer reports whether pid is in the cgroup root or below it
 // (with cgroups), or in a process group that a service has led, now or in
 // an earlier start, while that group has members. An unknown pid (0, or a
 // process that is gone) counts as supervised.
 //
 // Threats: a service with an allowed uid could otherwise stop or restart
 // other services. With cgroups a service cannot leave by setsid or setpgid,
-// and a peer whose pid is reused between its request and this check is
-// judged by the new process, which is accepted only outside every service
-// cgroup: the race can refuse, never accept, a service. Without cgroups
-// (--no-cgroups, or off Linux) those two residuals remain.
+// nor by moving into the supervisor's leaf. The caller pinned the peer at
+// accept (peerRefused), so a pid reused while the request is read is
+// refused. Residuals: before SO_PEERPIDFD (Linux 6.5), a reuse between
+// connect and accept; without cgroups (--no-cgroups, or off Linux), setsid
+// escapes, and off Linux the reuse race itself.
 func (sup *Supervisor) supervisedPeer(pid int) bool {
 	if pid <= 0 {
 		return true

@@ -19,6 +19,8 @@ package supervise
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -100,6 +102,12 @@ type Supervisor struct {
 	// CgroupsUnsupported) says why. Set both before Boot.
 	Cgroups    *cgroup.Root
 	CgroupMode string
+	// Log, when set, receives one line per stray process killed
+	// ("cgroup_stray PID").
+	Log io.Writer
+	// launching is held (read) while a child may sit in the supervisor's
+	// leaf before joining its cgroup, so the stray sweep skips that time.
+	launching sync.RWMutex
 }
 
 type runtime struct {
@@ -446,6 +454,7 @@ func (sup *Supervisor) Shutdown(ctx context.Context) error {
 	}
 	wg.Wait()
 	// Whatever a service left behind is killed with its cgroup.
+	sup.sweepStrays()
 	if sup.Cgroups != nil {
 		for name, s := range sup.rt {
 			if err := sup.Cgroups.KillAll(name, timeoutOf(s.svc)); err != nil {
@@ -657,6 +666,8 @@ func (sup *Supervisor) launch(ctx context.Context, s *runtime, argv []string, ge
 	// The service cgroup is made fresh, with its limits, before the child
 	// starts; whatever an earlier start left in it is killed first. Limits
 	// without cgroups are never ignored.
+	sup.launching.RLock()
+	defer sup.launching.RUnlock()
 	var grp *cgroup.Group
 	if sup.Cgroups != nil {
 		g, err := sup.Cgroups.Prepare(s.svc.Name, s.svc.Limits, timeoutOf(s.svc))
@@ -1052,6 +1063,23 @@ func (sup *Supervisor) drainCgroup(s *runtime) {
 		s.cgErr = fail.Token(err)
 		s.eventLocked("cgroup_stuck", s.cgErr, nil)
 		s.mu.Unlock()
+	}
+	sup.sweepStrays()
+}
+
+// sweepStrays kills processes that left their service cgroup for the
+// supervisor's leaf or the root, unless a launch may have a child waiting
+// there.
+func (sup *Supervisor) sweepStrays() {
+	if sup.Cgroups == nil || !sup.launching.TryLock() {
+		return
+	}
+	killed := sup.Cgroups.KillStrays()
+	sup.launching.Unlock()
+	if sup.Log != nil {
+		for _, pid := range killed {
+			fmt.Fprintln(sup.Log, "cgroup_stray", pid)
+		}
 	}
 }
 

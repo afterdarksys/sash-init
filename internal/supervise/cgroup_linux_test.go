@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -325,4 +326,49 @@ func TestNoCgroupsAsBefore(t *testing.T) {
 	if gone(grand) {
 		t.Fatal("setsid grandchild killed without cgroups")
 	}
+}
+
+// A service process that moves itself into the supervisor's leaf (which a
+// service running as the supervisor's uid can) is found and killed when the
+// service ends, and named on the log.
+func TestCgroupStrayInLeafKilled(t *testing.T) {
+	m := marker(t)
+	script := `/bin/sh -c 'echo 0 > "$1/cgroup.procs" || exit 1; echo $$ > "$2"; trap "" TERM; while :; do sleep 1; done' x "$1" "$2" &
+exec sleep 60
+`
+	svc := newSvc("esc", "simple", "exec", "no", false, 2*time.Second, nil)
+	sup, r := cgSup(t, map[string]*unit.Service{"esc": svc})
+	leafDir := cgroup.Mount + strings.TrimSuffix(r.Path("x"), "/x.service") + "/supervisor"
+	if err := os.Mkdir(leafDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cgtest.Remove(leafDir) })
+	svc.Exec = shExec(writeScript(t, script), leafDir, m)
+	var log strings.Builder
+	sup.Log = &logSink{b: &log}
+	if err := sup.Start(t.Context(), "esc"); err != nil {
+		t.Fatal(err)
+	}
+	stray := readPIDFile(t, m)
+	if cg, _ := cgtest.Cgroup(stray); cg != cgtest.Rel(leafDir) {
+		t.Fatalf("stray in %q", cg)
+	}
+	if err := sup.Stop(t.Context(), "esc"); err != nil {
+		t.Fatal(err)
+	}
+	waitGone(t, stray)
+	if !strings.Contains(log.String(), "cgroup_stray "+strconv.Itoa(stray)) {
+		t.Fatalf("log %q", log.String())
+	}
+}
+
+type logSink struct {
+	mu sync.Mutex
+	b  *strings.Builder
+}
+
+func (l *logSink) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
 }
