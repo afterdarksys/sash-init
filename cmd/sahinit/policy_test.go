@@ -272,6 +272,17 @@ func TestPolicyRefreshUnitExample(t *testing.T) {
 	if svc.Sandbox == nil || svc.Execution.UID == nil || *svc.Execution.UID == 0 || svc.Boot || len(svc.Sandbox.Caps) != 0 {
 		t.Fatal("example must be sandboxed, non-root, off the boot path, without capabilities")
 	}
+	ro, rw := svc.Sandbox.ReadOnly, svc.Sandbox.ReadWrite
+	if len(rw) != 1 || rw[0] != "/var/lib/sahinit-refresh/policy" {
+		t.Fatal("only the cache may be writable", rw)
+	}
+	readOnly := map[string]bool{}
+	for _, p := range ro {
+		readOnly[p] = true
+	}
+	if svc.Exec[3] != "--trust" || svc.Exec[5] != "--cache" || svc.Exec[9] != "--credential" || svc.Exec[6] != rw[0] || !readOnly[svc.Exec[4]] || !readOnly[svc.Exec[10]] || readOnly[rw[0]] {
+		t.Fatal("trust and credential must be read-only, the cache read-write", svc.Exec, ro)
+	}
 	if !strings.Contains(string(raw), ".invalid/") {
 		t.Fatal("example endpoint must stay a placeholder")
 	}

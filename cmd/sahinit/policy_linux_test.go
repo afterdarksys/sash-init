@@ -9,7 +9,10 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -149,5 +152,71 @@ func TestLinuxPolicyRefreshCLI(t *testing.T) {
 	}
 	if err := json.Unmarshal(w.Bytes(), &event); err != nil || event.Event != "scheduled" || !event.OK || event.Sequence != 1 || event.NextAttemptSeconds < 2800 || event.NextAttemptSeconds > 3600 || conns.Load() != before {
 		t.Fatal(w.String())
+	}
+}
+
+// TestRefreshUnprivilegedHelper runs as the worker uid in a child process.
+func TestRefreshUnprivilegedHelper(t *testing.T) {
+	args := os.Getenv("SAHINIT_REFRESH_HELPER")
+	if args == "" {
+		t.Skip("helper")
+	}
+	var out, stderr bytes.Buffer
+	code := run(strings.Split(args, "\t"), &out, &stderr)
+	os.Stdout.WriteString(out.String() + stderr.String())
+	os.Exit(code)
+}
+
+// An unprivileged worker reads a root-owned 0644 trust file it cannot change;
+// a trust file owned by another non-root uid is still refused.
+func TestLinuxRefreshRootOwnedTrust(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to switch uid")
+	}
+	const worker = 65534
+	dir := t.TempDir()
+	for _, d := range []string{filepath.Dir(dir), dir} {
+		if err := os.Chmod(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	self, err := os.ReadFile("/proc/self/exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "sahinit.test")
+	if err := os.WriteFile(bin, self, 0755); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile("../../internal/bootpolicy/testdata/trust.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trust := filepath.Join(dir, "boot-trust.json")
+	if err := os.WriteFile(trust, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(dir, "policy")
+	if err := os.Mkdir(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(cache, worker, worker); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"policy", "refresh", "--trust", trust, "--cache", cache, "--endpoint", "https://issuer.invalid/renew", "--credential", filepath.Join(dir, "credential")}
+	cmd := exec.Command(bin, "-test.run=^TestRefreshUnprivilegedHelper$")
+	cmd.Env = []string{"SAHINIT_REFRESH_HELPER=" + strings.Join(args, "\t")}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: worker, Gid: worker}}
+	out, err := cmd.CombinedOutput()
+	if err != nil || !bytes.Contains(out, []byte(`"event":"not_renewing"`)) {
+		t.Fatal(err, string(out))
+	}
+	// Owned by a non-root uid other than the caller (root here): refused.
+	if err := os.Chown(trust, worker, worker); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run(args, &stdout, &stderr); code != 1 || stderr.String() != "policy_bad_trust\n" {
+		t.Fatal(code, stderr.String())
 	}
 }

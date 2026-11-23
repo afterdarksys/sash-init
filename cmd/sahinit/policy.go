@@ -166,8 +166,11 @@ func policyFile(path string, limit int64, trusted bool) ([]byte, error) {
 	}
 	defer f.Close()
 	if trusted {
+		// Threats: a trust file decides which keys sign policy, so only root
+		// or the running uid may own it, and nobody else may write it. Root
+		// ownership lets an unprivileged worker read trust it cannot change.
 		var st unix.Stat_t
-		if unix.Fstat(int(f.Fd()), &st) != nil || st.Uid != uint32(os.Geteuid()) || st.Mode&0022 != 0 {
+		if unix.Fstat(int(f.Fd()), &st) != nil || (st.Uid != 0 && st.Uid != uint32(os.Geteuid())) || st.Mode&0022 != 0 {
 			return nil, fail.E("policy_bad_trust")
 		}
 	}
