@@ -3,6 +3,7 @@
 package cgroup
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,6 +31,8 @@ func TestMain(m *testing.M) {
 	}
 	os.Exit(m.Run())
 }
+
+var unixPidfdOpen = pidfdOpen
 
 func openRoot(t *testing.T, dir string) *Root {
 	t.Helper()
@@ -95,10 +98,16 @@ func TestOpenRejects(t *testing.T) {
 }
 
 // A setsid double fork leaves the process group and the session, and is
-// still killed with its cgroup; the cgroup is then removed.
+// still killed with its cgroup; the cgroup is then removed. Without
+// cgroup.kill the freeze fallback does it, with or without pidfds.
 func TestKillAllSetsidDoubleFork(t *testing.T) {
-	for _, hide := range []bool{false, true} {
-		t.Run(fmt.Sprintf("hideKill=%v", hide), func(t *testing.T) {
+	for _, mode := range []string{"kill", "freeze", "freeze-nopidfd"} {
+		hide := mode != "kill"
+		t.Run(mode, func(t *testing.T) {
+			if mode == "freeze-nopidfd" {
+				pidfdOpen = func(int, int) (int, error) { return -1, syscall.ENOSYS }
+				defer func() { pidfdOpen = unixPidfdOpen }()
+			}
 			r := openRoot(t, cgtest.Dir(t))
 			r.TestHooks(hide, nil)
 			g, err := r.Prepare("svc", unit.Limits{}, 2*time.Second)
@@ -156,7 +165,13 @@ func TestPrepareWritesLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer g.Close()
-	for file, want := range map[string]string{"memory.max": "67108864", "pids.max": "7", "cpu.max": "50000 100000"} {
+	want := map[string]string{"memory.max": "67108864", "pids.max": "7", "cpu.max": "50000 100000"}
+	if _, err := os.Stat(g.Dir.Name() + "/memory.swap.max"); err == nil {
+		want["memory.swap.max"] = "0"
+	} else {
+		t.Log("no swap accounting: memory.swap.max not checked")
+	}
+	for file, want := range want {
 		raw, err := os.ReadFile(g.Dir.Name() + "/" + file)
 		if err != nil || strings.TrimSpace(string(raw)) != want {
 			t.Errorf("%s: %q %v", file, raw, err)
@@ -225,20 +240,137 @@ func TestSupervised(t *testing.T) {
 	if !r.Supervised(in.Process.Pid) {
 		t.Fatal("process below a service cgroup accepted")
 	}
-	// A cgroup under the root that is not a service, such as the
-	// supervisor's own leaf, is not supervised.
+	// A service that moved itself into the supervisor's leaf, or into the
+	// root itself, is still supervised.
 	other := dir + "/" + leaf
 	if err := os.Mkdir(other, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	defer cgtest.Remove(other)
-	if err := writeFile(other+"/cgroup.procs", strconv.Itoa(in.Process.Pid)); err != nil {
-		t.Fatal(err)
-	}
-	if r.Supervised(in.Process.Pid) {
-		t.Fatal("non-service cgroup refused")
+	for _, into := range []string{other, dir} {
+		if err := writeFile(into+"/cgroup.procs", strconv.Itoa(in.Process.Pid)); err != nil {
+			// A root with controllers enabled below it takes no process.
+			if into == dir && errors.Is(err, syscall.EBUSY) {
+				continue
+			}
+			t.Fatal(err)
+		}
+		if !r.Supervised(in.Process.Pid) {
+			t.Fatalf("process in %s accepted", into)
+		}
 	}
 	if err := writeFile(sub+"/cgroup.procs", strconv.Itoa(in.Process.Pid)); err != nil {
+		t.Fatal(err)
+	}
+	// A cgroup removed under a zombie reads as deleted, and is refused.
+	if !r.supervisedPath("/elsewhere (deleted)") || r.supervisedPath("/elsewhere") || r.supervisedPath(r.rel+"x") {
+		t.Fatal("path rule")
+	}
+}
+
+// startOutside starts a process in the test's own cgroup, outside any root.
+func startOutside(t *testing.T) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command("/bin/sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+	return cmd
+}
+
+// killMember signals only a member of the cgroup, through a pidfd or, where
+// there is none, directly; a pid outside it is left alone.
+func TestKillMemberRechecks(t *testing.T) {
+	for _, nopidfd := range []bool{false, true} {
+		t.Run(fmt.Sprintf("nopidfd=%v", nopidfd), func(t *testing.T) {
+			if nopidfd {
+				pidfdOpen = func(int, int) (int, error) { return -1, syscall.ENOSYS }
+				defer func() { pidfdOpen = unixPidfdOpen }()
+			}
+			r := openRoot(t, cgtest.Dir(t))
+			g, err := r.Prepare("svc", unit.Limits{}, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer g.Close()
+			defer r.KillAll("svc", 2*time.Second)
+			in := startIn(t, g, "/bin/sleep", "60")
+			out := startOutside(t)
+			rel := r.Path("svc")
+			if killMember(out.Process.Pid, rel, false) {
+				t.Fatal("non-member signalled")
+			}
+			time.Sleep(50 * time.Millisecond)
+			if dead(out.Process.Pid) {
+				t.Fatal("non-member killed")
+			}
+			if !killMember(in.Process.Pid, rel, false) {
+				t.Fatal("member not signalled")
+			}
+		})
+	}
+}
+
+// A process that left its service cgroup for the supervisor's leaf, or for
+// the root, is found and killed. (With controllers enabled below it the
+// root takes no process at all, so this root offers none.)
+func TestKillStrays(t *testing.T) {
+	dir := cgtest.DirOffering(t)
+	r := openRoot(t, dir)
+	l := dir + "/" + leaf
+	if err := os.Mkdir(l, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	g, err := r.Prepare("svc", unit.Limits{}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	defer r.KillAll("svc", 2*time.Second)
+	a := startIn(t, g, "/bin/sleep", "60")
+	b := startIn(t, g, "/bin/sleep", "60")
+	keep := startIn(t, g, "/bin/sleep", "60")
+	if err := writeFile(l+"/cgroup.procs", strconv.Itoa(a.Process.Pid)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(dir+"/cgroup.procs", strconv.Itoa(b.Process.Pid)); err != nil {
+		t.Fatal(err)
+	}
+	killed := r.KillStrays()
+	if len(killed) != 2 {
+		t.Fatalf("killed %v", killed)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for !dead(a.Process.Pid) || !dead(b.Process.Pid) {
+		if time.Now().After(deadline) {
+			t.Fatal("strays alive")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if dead(keep.Process.Pid) {
+		t.Fatal("service process killed")
+	}
+}
+
+// Service cgroups an earlier instance left are killed and removed by Open.
+func TestOpenKillsLeftovers(t *testing.T) {
+	dir := cgtest.Dir(t)
+	r := openRoot(t, dir)
+	g, err := r.Prepare("old", unit.Limits{}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := startIn(t, g, "/bin/sleep", "60")
+	g.Close()
+	again := openRoot(t, dir)
+	if got := again.Leftovers(); len(got) != 1 || got[0] != "old.service" {
+		t.Fatal(got)
+	}
+	if !dead(in.Process.Pid) {
+		t.Fatal("leftover alive")
+	}
+	if _, err := os.Stat(dir + "/old.service"); !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
 }
@@ -264,6 +396,18 @@ func TestOpenOwnCgroupMovesIntoLeaf(t *testing.T) {
 	host := cgtest.Rel(g.Dir.Name())
 	if string(out) != host+"/supervisor "+host {
 		t.Fatalf("%q", out)
+	}
+	// Restarted from inside that leaf, the root is still its parent.
+	lf, err := os.Open(g.Dir.Name() + "/supervisor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lf.Close()
+	cmd = exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), "SAHT_CG_OPEN=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(lf.Fd())}
+	if out, err = cmd.Output(); err != nil || string(out) != host+"/supervisor "+host {
+		t.Fatalf("%q %v", out, err)
 	}
 	raw, err := os.ReadFile(g.Dir.Name() + "/cgroup.subtree_control")
 	if err != nil || !strings.Contains(string(raw), "memory") || !strings.Contains(string(raw), "pids") {

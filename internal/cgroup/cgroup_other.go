@@ -34,3 +34,7 @@ func (*Root) Kill(string) error { return fail.E("cgroup_unavailable") }
 func (*Root) Usage(string) (Usage, bool) { return Usage{}, false }
 
 func (*Root) Supervised(int) bool { return true }
+
+func (*Root) Leftovers() []string { return nil }
+
+func (*Root) KillStrays() []int { return nil }

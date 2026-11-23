@@ -35,17 +35,28 @@ type Root struct {
 	rel  string          // the same path as /proc/PID/cgroup shows it
 	ctrl map[string]bool // controllers enabled for service cgroups
 
+	// sweepRoot is set when the root held no process once the supervisor
+	// had moved into its leaf, so any process found there later escaped.
+	sweepRoot bool
+	leftovers []string
+
 	mu        sync.Mutex
 	hideKill  bool
 	populated func(dir string) (bool, error)
 }
 
+// pidfdOpen is unix.PidfdOpen; tests make it ENOSYS to run the fallback.
+var pidfdOpen = unix.PidfdOpen
+
 // Open checks and prepares the root. An empty dir is the supervisor's own
 // cgroup. The hierarchy must be cgroup2 at Mount and the root writable by
 // the supervisor: otherwise cgroup_unavailable. When the supervisor is in
-// the root itself it moves into ROOT/supervisor first. The cpu, memory and
-// pids controllers are enabled for service cgroups where the root offers
-// them; a missing one only refuses units whose limits need it.
+// the root itself it moves into ROOT/supervisor first; when its own cgroup
+// is already a supervisor leaf (a restart in place), the root is the leaf's
+// parent. The cpu, memory and pids controllers are enabled for service
+// cgroups where the root offers them; a missing one only refuses units whose
+// limits need it. Service cgroups left by an earlier instance are killed
+// and removed (Leftovers names them; cgroup_stuck if one does not empty).
 func Open(dir string) (*Root, error) {
 	unavailable := fail.E("cgroup_unavailable")
 	var sfs unix.Statfs_t
@@ -58,6 +69,9 @@ func Open(dir string) (*Root, error) {
 	}
 	if dir == "" {
 		dir = filepath.Join(Mount, own)
+		if own != "/" && filepath.Base(own) == leaf {
+			dir = filepath.Dir(dir)
+		}
 	}
 	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir || (dir != Mount && !strings.HasPrefix(dir, Mount+"/")) {
 		return nil, unavailable
@@ -110,7 +124,65 @@ func Open(dir string) (*Root, error) {
 			r.ctrl[c] = true
 		}
 	}
+	if procs, err := os.ReadFile(dir + "/cgroup.procs"); err == nil && len(bytes.TrimSpace(procs)) == 0 {
+		r.sweepRoot = true
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, unavailable
+	}
+	for _, e := range entries {
+		name, ok := strings.CutSuffix(e.Name(), suffix)
+		if !e.IsDir() || !ok {
+			continue
+		}
+		r.leftovers = append(r.leftovers, e.Name())
+		if !unit.NameOK(name) {
+			return nil, fail.E("cgroup_stuck")
+		}
+		if err := r.KillAll(name, unit.DefaultTimeout); err != nil {
+			return nil, err
+		}
+	}
 	return r, nil
+}
+
+// Leftovers names the service cgroups an earlier instance left under the
+// root, which Open killed and removed.
+func (r *Root) Leftovers() []string {
+	return append([]string(nil), r.leftovers...)
+}
+
+// KillStrays kills every process found in the supervisor's leaf other than
+// the supervisor itself, and every process in the root when the root was
+// empty at Open, and returns their pids. Such a process left its service
+// cgroup by writing cgroup.procs, which a service running as the
+// supervisor's uid can do. The caller must not have a child of its own
+// waiting there (a helper not yet moved into its service cgroup).
+func (r *Root) KillStrays() []int {
+	dirs := []string{filepath.Join(r.dir, leaf)}
+	if r.sweepRoot {
+		dirs = append(dirs, r.dir)
+	}
+	self := os.Getpid()
+	var killed []int
+	for _, d := range dirs {
+		raw, err := os.ReadFile(d + "/cgroup.procs")
+		if err != nil {
+			continue
+		}
+		rel := "/" + strings.TrimPrefix(strings.TrimPrefix(d, Mount), "/")
+		for _, f := range strings.Fields(string(raw)) {
+			pid, err := strconv.Atoi(f)
+			if err != nil || pid <= 0 || pid == self {
+				continue
+			}
+			if killMember(pid, rel, true) {
+				killed = append(killed, pid)
+			}
+		}
+	}
+	return killed
 }
 
 // TestHooks is for tests only: hideKill makes cgroup.kill look absent, so
@@ -322,29 +394,30 @@ func freezeKill(dir string) {
 		}
 		for _, f := range strings.Fields(string(raw)) {
 			if pid, err := strconv.Atoi(f); err == nil && pid > 0 {
-				killMember(pid, rel)
+				killMember(pid, rel, false)
 			}
 		}
 		return nil
 	})
 }
 
-func killMember(pid int, rel string) {
-	fd, err := unix.PidfdOpen(pid, 0)
+// killMember sends SIGKILL to pid if it is in the cgroup rel (or below it,
+// unless exact), checked through /proc after a pidfd for it is open. It
+// reports whether the signal was sent.
+func killMember(pid int, rel string, exact bool) bool {
+	member := func() bool {
+		cg, err := procCgroup(strconv.Itoa(pid))
+		return err == nil && (cg == rel || !exact && below(cg, rel))
+	}
+	fd, err := pidfdOpen(pid, 0)
 	if errors.Is(err, unix.ENOSYS) {
-		if cg, err := procCgroup(strconv.Itoa(pid)); err == nil && (cg == rel || below(cg, rel)) {
-			unix.Kill(pid, unix.SIGKILL)
-		}
-		return
+		return member() && unix.Kill(pid, unix.SIGKILL) == nil
 	}
 	if err != nil {
-		return
+		return false
 	}
 	defer unix.Close(fd)
-	if cg, err := procCgroup(strconv.Itoa(pid)); err != nil || (cg != rel && !below(cg, rel)) {
-		return
-	}
-	unix.PidfdSendSignal(fd, unix.SIGKILL, nil, 0)
+	return member() && unix.PidfdSendSignal(fd, unix.SIGKILL, nil, 0) == nil
 }
 
 // Usage reads the service cgroup's memory.current, pids.current and the
@@ -370,13 +443,15 @@ func (r *Root) Usage(name string) (Usage, bool) {
 	return u, true
 }
 
-// Supervised reports whether pid is in a service cgroup of this root, or
-// below one. A pid whose cgroup cannot be read counts as supervised.
+// Supervised reports whether pid is in the root or any cgroup below it: a
+// service cgroup, the supervisor's leaf (which a service running as the
+// supervisor's uid can move into), or the root itself. The supervisor never
+// asks about itself. A pid whose cgroup cannot be read, or whose cgroup has
+// been removed, counts as supervised.
 //
-// Threats: the cgroup is read from /proc/PID/cgroup after the request, so a
-// peer that exited and whose pid was reused is judged by the new process: it
-// is accepted only if that process is outside every service cgroup, which a
-// supervised service cannot arrange for itself.
+// Threats: this judges whatever process holds pid when it is called. The
+// control socket pins the peer with a pidfd when it accepts and checks that
+// pidfd after this read, so a reused pid is refused; see supervisedPeer.
 func (r *Root) Supervised(pid int) bool {
 	if pid <= 0 {
 		return true
@@ -385,13 +460,14 @@ func (r *Root) Supervised(pid int) bool {
 	if err != nil {
 		return true
 	}
-	if !below(cg, r.rel) {
-		return false
+	return r.supervisedPath(cg)
+}
+
+func (r *Root) supervisedPath(cg string) bool {
+	if strings.HasSuffix(cg, " (deleted)") {
+		return true
 	}
-	rest := strings.TrimPrefix(cg, r.rel)
-	rest = strings.TrimPrefix(rest, "/")
-	first, _, _ := strings.Cut(rest, "/")
-	return strings.HasSuffix(first, suffix)
+	return cg == r.rel || below(cg, r.rel)
 }
 
 // procCgroup returns the cgroup v2 path of a process ("self" or a pid).
