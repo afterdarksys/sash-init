@@ -46,6 +46,7 @@ var unitKeys = map[string]struct{}{
 	"name": {}, "exec": {}, "type": {}, "restart": {}, "ready": {},
 	"after": {}, "needs": {}, "wants": {}, "timeout": {}, "boot": {},
 	"sandbox": {}, "execution": {},
+	"memory_max": {}, "cpu_max": {}, "pids_max": {},
 }
 
 var sandboxKeys = map[string]struct{}{
@@ -79,6 +80,7 @@ type Service struct {
 	Boot      bool
 	Sandbox   *Sandbox
 	Execution Execution
+	Limits    Limits
 	// Path is Exec[0] resolved and checked by Load. It is empty when that
 	// failed at load; the launch then resolves and checks Exec[0] itself.
 	Path string
@@ -525,10 +527,14 @@ func Parse(raw []byte, stem string) (*Service, error) {
 	if sb != nil && (execution.UID == nil || *execution.UID == 0) {
 		return nil, fail.E("sandbox_root")
 	}
+	limits, err := parseLimits(obj)
+	if err != nil {
+		return nil, err
+	}
 	return &Service{
 		Name: name, Exec: exec, Type: typ, Restart: restart, Ready: ready,
 		After: after, Needs: needs, Wants: wants, Timeout: timeout, Boot: boot,
-		Sandbox: sb, Execution: execution,
+		Sandbox: sb, Execution: execution, Limits: limits,
 	}, nil
 }
 

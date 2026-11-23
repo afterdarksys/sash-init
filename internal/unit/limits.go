@@ -1,0 +1,116 @@
+package unit
+
+import (
+	"encoding/json"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/afterdarksys/sahinit/internal/fail"
+	"github.com/afterdarksys/sahinit/internal/jsonobj"
+)
+
+// Limits are the optional cgroup limits of a unit. A zero field is no limit.
+// They are written to the service's cgroup before the child starts; a
+// controller the supervisor cannot use refuses the unit (cgroup_controller)
+// and is never ignored.
+type Limits struct {
+	MemoryMax uint64 // bytes, memory.max
+	PidsMax   uint64 // pids.max
+	CPUQuota  uint64 // microseconds per period, cpu.max
+	CPUPeriod uint64
+}
+
+const (
+	minMemory    = 1 << 20
+	maxMemory    = 1 << 50
+	maxPids      = 4194304 // PID_MAX_LIMIT
+	minCPUPeriod = 1000
+	maxCPUPeriod = 1000000
+	minCPUQuota  = 1000
+	maxCPUs      = 1024
+)
+
+var (
+	memoryRE = regexp.MustCompile(`^[1-9][0-9]{0,15}[KMG]?$`)
+	cpuRE    = regexp.MustCompile(`^[1-9][0-9]{0,12} [1-9][0-9]{0,6}$`)
+)
+
+// Any reports whether some limit is set.
+func (l Limits) Any() bool {
+	return l.MemoryMax != 0 || l.PidsMax != 0 || l.CPUQuota != 0
+}
+
+// Controllers names the cgroup v2 controllers the limits need.
+func (l Limits) Controllers() []string {
+	var out []string
+	if l.CPUQuota != 0 {
+		out = append(out, "cpu")
+	}
+	if l.MemoryMax != 0 {
+		out = append(out, "memory")
+	}
+	if l.PidsMax != 0 {
+		out = append(out, "pids")
+	}
+	return out
+}
+
+// CPUMax is the cpu.max line ("QUOTA PERIOD"), or "" without a CPU limit.
+func (l Limits) CPUMax() string {
+	if l.CPUQuota == 0 {
+		return ""
+	}
+	return strconv.FormatUint(l.CPUQuota, 10) + " " + strconv.FormatUint(l.CPUPeriod, 10)
+}
+
+// parseLimits reads memory_max ("64M": bytes with an optional K, M or G
+// binary suffix, at least 1M), pids_max (an integer from 1 to 4194304) and
+// cpu_max ("QUOTA PERIOD" in microseconds: period 1000 to 1000000, quota at
+// least 1000 and at most 1024 periods). Anything else is limit_invalid.
+func parseLimits(obj map[string]json.RawMessage) (Limits, error) {
+	var l Limits
+	bad := fail.E("limit_invalid")
+	if raw, ok := obj["memory_max"]; ok {
+		var s string
+		if err := jsonobj.Unmarshal(raw, &s); err != nil || !memoryRE.MatchString(s) {
+			return l, bad
+		}
+		mult := uint64(1)
+		switch s[len(s)-1] {
+		case 'K':
+			mult = 1 << 10
+		case 'M':
+			mult = 1 << 20
+		case 'G':
+			mult = 1 << 30
+		}
+		n, err := strconv.ParseUint(strings.TrimRight(s, "KMG"), 10, 64)
+		if err != nil || n > maxMemory/mult || n*mult < minMemory {
+			return l, bad
+		}
+		l.MemoryMax = n * mult
+	}
+	if raw, ok := obj["pids_max"]; ok {
+		var v uint64
+		if err := jsonobj.Unmarshal(raw, &v); err != nil || v < 1 || v > maxPids {
+			return l, bad
+		}
+		l.PidsMax = v
+	}
+	if raw, ok := obj["cpu_max"]; ok {
+		var s string
+		if err := jsonobj.Unmarshal(raw, &s); err != nil || !cpuRE.MatchString(s) {
+			return l, bad
+		}
+		q, p, _ := strings.Cut(s, " ")
+		quota, err1 := strconv.ParseUint(q, 10, 64)
+		period, err2 := strconv.ParseUint(p, 10, 64)
+		if err1 != nil || err2 != nil || period < minCPUPeriod || period > maxCPUPeriod ||
+			quota < minCPUQuota || quota > period*maxCPUs {
+			return l, bad
+		}
+		l.CPUQuota, l.CPUPeriod = quota, period
+	}
+	return l, nil
+}
