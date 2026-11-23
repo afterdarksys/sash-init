@@ -58,7 +58,8 @@ detected and only the rights it knows are handled; a kernel without Landlock is
 Each service runs in its own cgroup v2, `ROOT/NAME.service`. A child that
 calls `setsid`, double-forks, or leaves its process group stays in it.
 The child joins the cgroup before exec, through `clone3(CLONE_INTO_CGROUP)`.
-On kernels without it, the helper writes its own pid to `cgroup.procs`.
+On kernels without it, the child is the helper: the supervisor writes its
+pid to `cgroup.procs` and only then lets it continue.
 A child that cannot join does not start (`cgroup_join`).
 
 Whenever a service's main process exits (stop, restart, crash, or a clean
@@ -74,6 +75,20 @@ first; SIGKILL goes to the whole cgroup.
 hierarchy at `/sys/fs/cgroup` and delegated to sahinit, which means
 writable by its uid. sahinit moves itself into `ROOT/supervisor` and enables
 `cpu`, `memory` and `pids` for the services where the root offers them.
+When sahinit is restarted from inside such a leaf, the leaf's parent is
+the root again. Service cgroups left by an earlier instance are killed,
+removed and named on stderr as `cgroup_leftover NAME.service`.
+
+A service that runs as the supervisor's uid, or as root without a
+sandbox, can write `cgroup.procs` anywhere in the root and move itself
+out of its own cgroup. The kernel refuses a move into the root itself
+while controllers are enabled below it. A process found in
+`ROOT/supervisor`, other than sahinit, is killed and logged as
+`cgroup_stray PID`. The check runs when a service ends, on each control
+request, and at shutdown. A process in the root or anywhere below it is
+always `peer_supervised`. So run `ctl` from outside the root; with
+`docker exec` into a container whose root is the namespace root, that is
+not possible.
 Without a usable delegated cgroup, `supervise` refuses to start with
 `cgroup_unavailable`. `--no-cgroups` keeps the process-group behaviour
 instead. Off Linux there are no cgroups, which behaves like
@@ -152,11 +167,19 @@ allows an omitted service name. It prints the JSON response and exits 0 for succ
 mode and peer UID authorization apply to every operation, including diagnostics.
 The socket is 0600 when only the supervisor's uid may connect; when `--uid`
 names another uid it is 0660 and `--gid GID` names its group (`socket_group`
-otherwise). A request from a process in a service's cgroup, or below one, is
-refused with `peer_supervised`. So is a request from a process group a service
-has led. The peer's cgroup is read after its request, so a reused pid can only
-cause a refusal. Without cgroups only the process-group check applies: a
-service that called `setsid` is not recognised, and pid reuse remains a race. A leftover socket from a crash is replaced only when it
+otherwise). A request from a process in the cgroup root or below it (any
+service cgroup, or the supervisor's leaf) is refused with `peer_supervised`.
+So is a request from a process group a service has led. The peer is pinned
+when it is accepted:
+- through `SO_PEERPIDFD` (Linux 6.5, amd64 and arm64);
+- otherwise through `pidfd_open` on its pid;
+- otherwise (before Linux 5.3) through its start time.
+
+After the request is read, the peer's cgroup is checked. The request is
+refused unless the pinned process still exists, so a pid reused while the
+request is read cannot be accepted. Without `SO_PEERPIDFD`, a reuse between
+connect and accept remains possible. Without cgroups only the process-group
+check applies: a service that called `setsid` is not recognised. A leftover socket from a crash is replaced only when it
 is a socket, owned by the supervisor's uid, and refuses a connect. The socket's
 directory must pass the owner and mode rule (`socket_perm`), and `PATH.lock`
 is held for the supervisor's life (`socket_busy` for a second one).
