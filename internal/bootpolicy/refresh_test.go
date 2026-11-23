@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -633,5 +634,149 @@ func TestRefreshRevokedAndCorrupt(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatal(calls.Load())
+	}
+}
+
+// An untrusted clock stops a renew host before the credential is read or any
+// connection is made. Install would refuse the result anyway, so only the
+// absence of a connection shows the guard.
+func TestRefreshUntrustedClockBeforeRequest(t *testing.T) {
+	trust, p, _, _ := renewTrust()
+	s, _ := newStore(t, trust, ClockFunc(func() (time.Time, bool) { return time.Unix(p.IssuedAt, 0), false }))
+	r, rs := testRefresher(t, s, func(w http.ResponseWriter, req *http.Request) {})
+	_, err := r.Once(context.Background())
+	requireCode(t, err, "policy_clock_uncertain")
+	// A missing credential would be policy_refresh_credential if it were read first.
+	r.credentialFile = filepath.Join(t.TempDir(), "missing")
+	_, err = r.Once(context.Background())
+	requireCode(t, err, "policy_clock_uncertain")
+	if rs.conns.Load() != 0 {
+		t.Fatal("connected with an untrusted clock")
+	}
+}
+
+// The transport limits are part of the contract: the values are pinned, and
+// shortened copies show each one ends a stalled attempt.
+func TestRefreshTransportLimits(t *testing.T) {
+	trust, p, _, _ := renewTrust()
+	s, _ := newStore(t, trust, fixed(p.IssuedAt))
+	release := make(chan struct{})
+	mode := atomic.Int32{}
+	r, _ := testRefresher(t, s, func(w http.ResponseWriter, req *http.Request) {
+		_, _ = io.Copy(io.Discard, req.Body)
+		if mode.Load() == 1 { // Slow-drip body after prompt headers.
+			w.WriteHeader(200)
+			for {
+				if _, err := w.Write([]byte(" ")); err != nil {
+					return
+				}
+				w.(http.Flusher).Flush()
+				select {
+				case <-req.Context().Done():
+					return
+				case <-release:
+					return
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+		}
+		select { // Headers never arrive.
+		case <-req.Context().Done():
+		case <-release:
+		}
+	})
+	t.Cleanup(func() { close(release) })
+	transport := r.client.Transport.(*http.Transport)
+	if r.client.Timeout != 30*time.Second || transport.ResponseHeaderTimeout != 20*time.Second || transport.TLSHandshakeTimeout != 10*time.Second || transport.MaxConnsPerHost != 1 || transport.MaxIdleConnsPerHost != 1 || transport.MaxResponseHeaderBytes != 16*1024 || !transport.DisableCompression {
+		t.Fatal("transport limits changed")
+	}
+	transport.ResponseHeaderTimeout = 100 * time.Millisecond
+	start := time.Now()
+	_, err := r.Once(context.Background())
+	requireCode(t, err, "policy_refresh_transport")
+	transport.ResponseHeaderTimeout = 0
+	mode.Store(1)
+	r.client.Timeout = 200 * time.Millisecond
+	_, err = r.Once(context.Background())
+	requireCode(t, err, "policy_refresh_transport")
+	if time.Since(start) > 10*time.Second {
+		t.Fatal("stalled attempt not ended")
+	}
+	if _, err := s.Load(); fmt.Sprint(err) != "policy_missing" {
+		t.Fatal("cache changed", err)
+	}
+}
+
+// Retries cap at 5 minutes even when jitter would exceed it, and a success
+// resets the backoff to 30 seconds.
+func TestRefreshRetryCapAndReset(t *testing.T) {
+	trust, p, _, sign := renewTrust()
+	var now atomic.Int64
+	now.Store(p.IssuedAt)
+	s, _ := newStore(t, trust, ClockFunc(func() (time.Time, bool) { return time.Unix(now.Load(), 0), true }))
+	var calls atomic.Int32
+	r, _ := testRefresher(t, s, func(w http.ResponseWriter, req *http.Request) {
+		n := calls.Add(1)
+		if n != 7 {
+			w.WriteHeader(503)
+			return
+		}
+		next := p
+		next.IssuedAt = now.Load()
+		next.NotBefore = next.IssuedAt
+		next.ExpiresAt = next.IssuedAt + 600
+		next.OfflineUntil = next.ExpiresAt
+		next.RefreshAfterSeconds = 60
+		w.Write(sign(next))
+	})
+	r.jitter = func(d time.Duration) time.Duration { return d * 12 / 10 }
+	var waits []time.Duration
+	r.wait = func(ctx context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		now.Add(int64(d / time.Second))
+		return ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := 0
+	if err := r.Run(ctx, func(RefreshResult) {
+		if events++; events == 8 {
+			cancel()
+		}
+	}); !IsCanceled(err) {
+		t.Fatal(err)
+	}
+	sec := time.Second
+	want := []time.Duration{0, 36 * sec, 72 * sec, 144 * sec, 288 * sec, 300 * sec, 300 * sec, 72 * sec, 36 * sec}
+	if len(waits) != len(want) {
+		t.Fatal(waits)
+	}
+	for i := range want {
+		if waits[i] != want[i] {
+			t.Fatal(i, waits)
+		}
+	}
+}
+
+// When the jittered interval would reach normal expiry, the next attempt is
+// halfway to expiry instead.
+func TestRefreshNextDelayBeforeExpiry(t *testing.T) {
+	trust, p, key := fixture()
+	p.ExpiresAt = p.IssuedAt + 110
+	p.OfflineUntil = p.ExpiresAt
+	p.RefreshAfterSeconds = 100
+	s, _ := newStore(t, trust, fixed(p.IssuedAt))
+	d, err := s.Install(signed(p, key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewRefresher(s, "https://issuer.example/renew", "/unused")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	r.jitter = func(d time.Duration) time.Duration { return d * 12 / 10 }
+	if got := r.nextDelay(d); got != 55*time.Second {
+		t.Fatal(got)
 	}
 }
