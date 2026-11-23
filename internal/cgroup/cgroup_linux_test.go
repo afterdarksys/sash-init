@@ -368,6 +368,8 @@ func TestSweepStrays(t *testing.T) {
 			t.Fatalf("%s left: %v", d, err)
 		}
 	}
+	// A SIGKILL takes effect at once; give it time to show.
+	time.Sleep(200 * time.Millisecond)
 	if dead(keep.Process.Pid) || dead(inRoot.Process.Pid) {
 		t.Fatal("service process or root member killed")
 	}
