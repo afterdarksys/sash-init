@@ -79,13 +79,20 @@ When sahinit is restarted from inside such a leaf, the leaf's parent is
 the root again. Service cgroups left by an earlier instance are killed,
 removed and named on stderr as `cgroup_leftover NAME.service`.
 
-**Trust boundary.** A service with no sandbox that runs as root or as the
-supervisor's uid is *cgroup-trusted*. It can write `cgroup.procs` anywhere
-in the root, so it can leave its cgroup, and it could kill sahinit anyway.
-Kill-all, limits and `peer_supervised` are promised only for sandboxed
-services and for services running as another uid. `plan` names each
-trusted unit on stderr as `cgroup_trusted FILE`; status rows carry
-`cgroup_trusted`.
+**Trust boundary.** A service is *cgroup-trusted* when it may be able to
+write `cgroup.procs` under the root, and so leave its cgroup (it could also
+kill sahinit). That is:
+- a service with no sandbox that runs as root or as the supervisor's uid;
+- a sandboxed service whose `read_write_paths` include `/`, `/sys`,
+  `/sys/fs`, `/sys/fs/cgroup`, or a path inside it;
+- a sandboxed service that keeps `dac_override`, `fowner`, `chown`,
+  `setuid` or `sys_admin`. These bypass file permissions on cgroupfs,
+  take a file over, become the supervisor's uid, or mount a cgroupfs of
+  their own. `dac_read_search` only bypasses reads and does not count.
+
+Kill-all, limits and `peer_supervised` are promised only for the other
+services. Trusted units are allowed, not refused. `plan` names each one on
+stderr as `cgroup_trusted FILE`, and status rows carry `cgroup_trusted`.
 
 To limit what a trusted service can do, sahinit sweeps the root. It runs
 when a service ends, on each control request, at shutdown, and every
@@ -95,8 +102,10 @@ when a service ends, on each control request, at shutdown, and every
   is any cgroup below `ROOT/supervisor`.
 - Any process in `ROOT/supervisor` other than sahinit is killed
   (`cgroup_stray PID`).
-- A process in the root itself is left alone and logged once
-  (`cgroup_root_member PID`). The outer manager puts processes there.
+- A process in the root itself, or in a top-level `ROOT/.control`, is left
+  alone and logged once (`cgroup_root_member PID`). The outer manager puts
+  processes there. `.control` is never removed: with `Delegate=yes`,
+  systemd runs `ExecReload` and similar commands in it.
 - A trusted service that moves into another service's cgroup cannot be
   detected.
 
@@ -184,9 +193,16 @@ The socket is 0600 when only the supervisor's uid may connect; when `--uid`
 names another uid it is 0660 and `--gid GID` names its group (`socket_group`
 otherwise). A request from a process below the cgroup root (a service
 cgroup, the supervisor's leaf, or an unknown cgroup) is refused with
-`peer_supervised`. Run `ctl` from outside the root or from the root itself
-(for example with `docker exec`). A process in the root itself is accepted:
-only the outer manager or a cgroup-trusted service can put one there.
+`peer_supervised`. A process in the root itself, or in `ROOT/.control`, is
+accepted while the root has a controller enabled below it. In that state the
+kernel refuses moves into the root, and only the outer manager or a
+cgroup-trusted service can write cgroupfs. So `ctl` can run from outside the
+root, from the root itself (`docker exec`), or from systemd's `.control`
+(`ExecReload=sahinit ctl ...`). When no controller is enabled below the root
+(for example, other processes kept it from enabling any), root and
+`.control` members are refused as well. sahinit then logs
+`cgroup_root_unprotected ROOT` at startup, and `ctl` must run from outside
+the root.
 So is a request from a process group a service has led. The peer is pinned
 when it is accepted:
 - through `SO_PEERPIDFD` (Linux 6.5, amd64 and arm64);
