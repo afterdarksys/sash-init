@@ -4,7 +4,9 @@ A Go userspace service supervisor with strict JSON units, dependency boot waves,
 readiness checks, restart limits, explicit execution identities, bounded output tails,
 a Unix control socket, optional Linux sandboxing, and a cgroup v2 cgroup per
 service with kill-all and memory, CPU and PID limits.
-It is not yet a PID 1 replacement.
+An experimental Linux PID 1 parent adds early mounts, orphan reaping, recovery
+and host power operations. See [host init](docs/host-init.md) for boot assumptions,
+VM tests and remaining limitations.
 
 ```sh
 go build -o /tmp/sahinit ./cmd/sahinit

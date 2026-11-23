@@ -9,6 +9,25 @@ import (
 	"github.com/afterdarksys/sahinit/internal/unit"
 )
 
+// ShutdownPlan reverses the full catalog's dependency waves, including units
+// started manually after boot. Dependents finish stopping before providers.
+func ShutdownPlan(svcs map[string]*unit.Service) ([][]string, error) {
+	all := make(map[string]*unit.Service, len(svcs))
+	for name, svc := range svcs {
+		copy := *svc
+		copy.Boot = true
+		all[name] = &copy
+	}
+	waves, err := Plan(all)
+	if err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(waves)-1; i < j; i, j = i+1, j-1 {
+		waves[i], waves[j] = waves[j], waves[i]
+	}
+	return waves, nil
+}
+
 // Plan returns boot waves. Names inside a wave are sorted.
 // The full catalog is cycle-checked, including services that are not booted.
 // A wants edge whose target is absent is ignored. needs and after must resolve.

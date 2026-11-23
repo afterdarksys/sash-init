@@ -16,18 +16,30 @@ import (
 	"github.com/afterdarksys/sahinit/internal/cgroup"
 	"github.com/afterdarksys/sahinit/internal/fail"
 	"github.com/afterdarksys/sahinit/internal/graph"
+	"github.com/afterdarksys/sahinit/internal/hostinit"
 	"github.com/afterdarksys/sahinit/internal/sandbox"
 	"github.com/afterdarksys/sahinit/internal/supervise"
 	"github.com/afterdarksys/sahinit/internal/unit"
 )
 
 const usageText = policyUsage +
+	"usage: sahinit init [--dir DIR] [--socket PATH] [--recovery EXECUTABLE] [--shutdown-timeout DURATION]\n" +
 	"usage: sahinit ctl --socket PATH status|diagnostics|start|stop|restart [NAME]\n" +
 	"usage: sahinit plan --dir DIR\n" +
-	"usage: sahinit supervise --dir DIR --socket PATH [--uid UID]... [--gid GID] [--no-cgroups] [--cgroup-sweep DURATION]\n" +
+	"usage: sahinit supervise --dir DIR --socket PATH [--uid UID]... [--gid GID] [--no-cgroups] [--cgroup-sweep DURATION] [--boot-strict]\n" +
 	"usage: sahinit migrate --from FORMAT --source DIR [--out NEW_DIR] [--boot]\n"
 
 func main() {
+	if os.Getpid() == 1 {
+		args := os.Args[1:]
+		if len(args) > 0 && args[0] == "init" {
+			args = args[1:]
+		}
+		if err := hostinit.Run(args); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		return
+	}
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
@@ -40,6 +52,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return sandbox.ApplyCLI(args)
 	}
 	switch args[0] {
+	case "init":
+		if err := hostinit.Run(args[1:]); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
 	case "policy":
 		return runPolicy(args[1:], stdout, stderr)
 	case "ctl":
@@ -163,6 +181,7 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 	dir := fs.String("dir", "", "")
 	sock := fs.String("socket", "", "")
 	noCgroups := fs.Bool("no-cgroups", false, "")
+	strict := fs.Bool("boot-strict", false, "exit to the PID 1 recovery loop if boot fails")
 	sweep := fs.Duration("cgroup-sweep", 30*time.Second, "")
 	var uids []uint32
 	passed := false
@@ -189,7 +208,17 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usageText)
 		return 2
 	}
-	svcs, err := loadUnits(*dir, stderr)
+	var svcs map[string]*unit.Service
+	var err error
+	if *strict {
+		var refused map[string]string
+		svcs, refused, err = unit.Load(*dir)
+		if len(refused) > 0 && err == nil {
+			err = fail.E("boot_refused")
+		}
+	} else {
+		svcs, err = loadUnits(*dir, stderr)
+	}
 	if err != nil {
 		fmt.Fprintln(stderr, fail.Token(err))
 		return 2
@@ -200,8 +229,13 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	defer root.Close()
+	beforeLimits := len(svcs)
 	if err := refuseLimits(svcs, root, stderr); err != nil {
 		fmt.Fprintln(stderr, fail.Token(err))
+		return 2
+	}
+	if *strict && len(svcs) != beforeLimits {
+		fmt.Fprintln(stderr, "boot_refused")
 		return 2
 	}
 	waves, err := graph.Plan(svcs)
@@ -262,10 +296,40 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		errc <- sup.Serve()
 		cancel()
 	}()
+	bootFailed := false
 	if err := sup.Boot(ctx, waves); err != nil && ctx.Err() == nil {
 		fmt.Fprintln(stderr, fail.Token(err))
+		if *strict {
+			bootFailed = true
+			cancel()
+		}
 	}
-	<-ctx.Done()
+	if *strict && !bootFailed {
+		// In host boot mode every boot unit is essential. A failed unit or
+		// an unexpectedly exited long-running unit returns control to PID 1.
+		tick := time.NewTicker(200 * time.Millisecond)
+	monitor:
+		for {
+			select {
+			case <-ctx.Done():
+				break monitor
+			case <-tick.C:
+				rows, _ := sup.Status("")
+				for _, row := range rows {
+					svc := svcs[row.Name]
+					if svc != nil && svc.Boot && (row.State == "failed" || (row.State == "exited" && svc.Type != "oneshot")) {
+						fmt.Fprintln(stderr, "boot_service_failed", row.Name)
+						bootFailed = true
+						cancel()
+						break monitor
+					}
+				}
+			}
+		}
+		tick.Stop()
+	} else {
+		<-ctx.Done()
+	}
 	var serveErr error
 	select {
 	case serveErr = <-errc:
@@ -279,6 +343,9 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 	}
 	if err := sup.Close(); err != nil {
 		fmt.Fprintln(stderr, fail.Token(err))
+	}
+	if bootFailed || serveErr != nil {
+		return 1
 	}
 	return 0
 }

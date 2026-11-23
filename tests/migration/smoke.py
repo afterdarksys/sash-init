@@ -61,7 +61,7 @@ for source in ("systemd", "daemontools", "openrc"):
         assert run("plan", "--dir", str(catalog)).strip() == "demo"
         sock = root / "control.sock"
         process = subprocess.Popen(["sahinit", "supervise", "--dir", str(catalog),
-                                    "--socket", str(sock)], stderr=subprocess.PIPE, text=True)
+                                    "--socket", str(sock), "--no-cgroups"], stderr=subprocess.PIPE, text=True)
         try:
             deadline = time.monotonic() + 5
             while True:

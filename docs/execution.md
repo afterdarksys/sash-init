@@ -1,6 +1,7 @@
 # Execution context and diagnostics
 
-SAHINIT is still a userspace supervisor. These features do not make it a host PID 1.
+These features belong to the userspace supervisor. The optional Linux
+[PID 1 parent](host-init.md) runs it as a child and supplies host boot/recovery.
 
 ## Unit execution context
 

@@ -34,6 +34,7 @@ import (
 
 	"github.com/afterdarksys/sahinit/internal/cgroup"
 	"github.com/afterdarksys/sahinit/internal/fail"
+	"github.com/afterdarksys/sahinit/internal/graph"
 	"github.com/afterdarksys/sahinit/internal/sandbox"
 	"github.com/afterdarksys/sahinit/internal/unit"
 )
@@ -378,7 +379,7 @@ func (sup *Supervisor) Restart(ctx context.Context, name string) error {
 	return sup.Start(ctx, name)
 }
 
-// Shutdown bumps every generation and signals live process groups.
+// Shutdown stops dependents before their providers, concurrently within waves.
 // It does not take the per-service operation lock.
 func (sup *Supervisor) Shutdown(ctx context.Context) error {
 	if ctx == nil {
@@ -398,65 +399,82 @@ func (sup *Supervisor) Shutdown(ctx context.Context) error {
 		}
 		errMu.Unlock()
 	}
-	for _, s := range sup.rt {
-		s.mu.Lock()
-		s.gen++
-		s.stopReq = true
-		state := s.state
-		pid := s.pid
-		procDone := s.procDone
-		if state == "starting" && pid <= 0 {
-			s.state = "stopped"
-			s.ready = false
-			s.pid = 0
-			s.mu.Unlock()
-			continue
+	catalog := make(map[string]*unit.Service, len(sup.rt))
+	for name, s := range sup.rt {
+		catalog[name] = s.svc
+	}
+	waves, err := graph.ShutdownPlan(catalog)
+	if err != nil {
+		// Even a malformed programmatically constructed catalog must stop.
+		note(err)
+		var names []string
+		for name := range sup.rt {
+			names = append(names, name)
 		}
-		if state != "running" && state != "starting" && state != "stopping" {
-			s.mu.Unlock()
-			continue
-		}
-		if pid <= 0 {
-			s.state = "stopped"
-			s.ready = false
-			s.mu.Unlock()
-			continue
-		}
-		s.eventLocked("stopping", "", nil)
-		s.state = "stopping"
-		s.mu.Unlock()
-		wg.Add(1)
-		go func(s *runtime, pid int, procDone chan struct{}) {
-			defer wg.Done()
-			if err := s.signalGroup(pid, syscall.SIGTERM); err != nil {
-				note(err)
-			}
-			waitCtx := ctx
-			if waitCtx.Err() != nil {
-				waitCtx = context.Background()
-			}
-			if err := s.waitGroup(waitCtx, pid, procDone, timeoutOf(s.svc)); err != nil {
-				if killErr := s.signalGroup(pid, syscall.SIGKILL); killErr != nil {
-					note(killErr)
-				}
-				<-procDone
-			}
+		waves = [][]string{names}
+	}
+	for _, wave := range waves {
+		for _, name := range wave {
+			s := sup.rt[name]
 			s.mu.Lock()
-			if s.state == "stopping" {
+			s.gen++
+			s.stopReq = true
+			state := s.state
+			pid := s.pid
+			procDone := s.procDone
+			if state == "starting" && pid <= 0 {
 				s.state = "stopped"
 				s.ready = false
 				s.pid = 0
-				s.stopReq = false
-				if s.cgErr != "" {
-					s.state = "failed"
-					s.lastError = s.cgErr
-					note(fail.E(s.cgErr))
-				}
+				s.mu.Unlock()
+				continue
 			}
+			if state != "running" && state != "starting" && state != "stopping" {
+				s.mu.Unlock()
+				continue
+			}
+			if pid <= 0 {
+				s.state = "stopped"
+				s.ready = false
+				s.mu.Unlock()
+				continue
+			}
+			s.eventLocked("stopping", "", nil)
+			s.state = "stopping"
 			s.mu.Unlock()
-		}(s, pid, procDone)
+			wg.Add(1)
+			go func(s *runtime, pid int, procDone chan struct{}) {
+				defer wg.Done()
+				if err := s.signalGroup(pid, syscall.SIGTERM); err != nil {
+					note(err)
+				}
+				waitCtx := ctx
+				if waitCtx.Err() != nil {
+					waitCtx = context.Background()
+				}
+				if err := s.waitGroup(waitCtx, pid, procDone, timeoutOf(s.svc)); err != nil {
+					if killErr := s.signalGroup(pid, syscall.SIGKILL); killErr != nil {
+						note(killErr)
+					}
+					<-procDone
+				}
+				s.mu.Lock()
+				if s.state == "stopping" {
+					s.state = "stopped"
+					s.ready = false
+					s.pid = 0
+					s.stopReq = false
+					if s.cgErr != "" {
+						s.state = "failed"
+						s.lastError = s.cgErr
+						note(fail.E(s.cgErr))
+					}
+				}
+				s.mu.Unlock()
+			}(s, pid, procDone)
+		}
+		wg.Wait()
 	}
-	wg.Wait()
 	// Whatever a service left behind is killed with its cgroup.
 	sup.sweepStrays()
 	if sup.Cgroups != nil {

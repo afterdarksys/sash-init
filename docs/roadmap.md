@@ -1,7 +1,8 @@
 # Service-manager roadmap
 
-The current implementation is a userspace supervisor, not a bootable PID 1.
-Prioritize operational correctness and migration coverage before machine boot.
+The userspace supervisor now has an experimental Linux PID 1 parent for an
+already available local root. See [host init](host-init.md) for scope and VM tests.
+Broader machine/storage integration and production qualification remain.
 
 Delivered: numeric UID/GID and supplementary groups, explicit working directory
 and environment, bounded in-memory output tails, exit diagnostics, recent lifecycle
@@ -18,7 +19,7 @@ fallback. See [cgroups](execution.md#cgroups) and
 | --- | --- | --- |
 | 1 | Persistent stdout/stderr retention, bounded rotation, follow/search | In-memory tails and exit diagnostics now exist; durable history is still needed. |
 | 1 | Environment files, account-name resolution, execution-context migration | Numeric identities and explicit context now exist; converters still reject unsupported source directives. |
-| 1 | Dependency-aware reverse shutdown, required-service failure propagation, targeted restart transactions | Startup ordering alone does not preserve application lifecycle contracts. |
+| 1 | Targeted required-service failure propagation and restart transactions | Reverse shutdown is implemented; strict host boot currently recovers the whole supervisor on an essential service failure. |
 | 2 | Config validation/diff, atomic reload and rollback, stable desired/observed state | Change live configuration without interrupting unrelated services. |
 | 2 | Readiness adapters (including sd_notify), health checks, watchdogs, restart backoff/jitter | Handle stuck or unhealthy processes and prevent restart storms. |
 | 2 | Event subscription and explain/why-not-running command | Make routine diagnosis easier than interpreting generic failure tokens. |
@@ -26,7 +27,7 @@ fallback. See [cgroups](execution.md#cgroups) and
 | 2 | Per-user supervision and scoped control permissions | Delegate administration without giving every client total control. |
 | 3 | Versioned migration IR, source exports, drop-in resolution, mapping overrides and native source-vs-target Docker tests | Expand conversion coverage with explicit semantic differences and reproducible evidence. |
 | 2 | I/O limits and weights, slices, per-service cgroup delegation | Batch 1 covers memory, CPU and PIDs only. |
-| 3 | PID 1 reaping/signals, mounts/devices, cgroup2 mount and root controller setup, emergency recovery, reboot/poweroff and VM boot tests | Required before offering host init replacement; Docker tests alone cannot prove this. |
+| 3 | Persistent-root boot/teardown tests, storage discovery, device hotplug, login/PTY setup and watchdogs | Minimal PID 1 reaping/signals, pseudo mounts, cgroup root setup, recovery and power operations are implemented with an initramfs QEMU harness. |
 
 Migration v1 supports a small static subset and emits blockers rather than silently
 dropping unsupported directives. Expand it alongside runtime capabilities, using
