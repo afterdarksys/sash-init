@@ -30,7 +30,7 @@ const (
 	fdExec   = 4 // O_PATH fd of the checked target, run with execveat
 	fdSpec   = 5
 	fdStatus = 6
-	fdCgroup = 7 // cgroup.procs of the service cgroup, only when the spec says cgroup
+	fdCgroup = 7 // sync pipe: one byte once the parent moved the helper into its cgroup
 	maxSpec  = 64 * 1024
 	maxLine  = 1024
 
@@ -199,15 +199,26 @@ func ApplyCLI(args []string) int {
 	return 1
 }
 
-// joinCgroup moves the helper into the cgroup whose cgroup.procs the parent
-// opened on fd 7. The fd must be on cgroup2; writing 0 moves the writer.
+// joinCgroup waits on the sync pipe (fd 7) until the parent has written the
+// helper's pid into the service cgroup's cgroup.procs and sends one byte.
+// End of file means the parent could not move it.
+//
+// Threats: the helper never holds a cgroup.procs fd, so a process that can
+// ptrace it or take its fds (pidfd_getfd) gains nothing to move itself with.
 func joinCgroup() error {
-	var sfs unix.Statfs_t
-	if err := unix.Fstatfs(fdCgroup, &sfs); err != nil || sfs.Type != unix.CGROUP2_SUPER_MAGIC {
+	if !isFIFO(fdCgroup) {
 		return fail.E("cgroup_join")
 	}
-	if err := writeFD(fdCgroup, []byte("0")); err != nil {
-		return fail.E("cgroup_join")
+	var b [1]byte
+	for {
+		n, err := unix.Read(fdCgroup, b[:])
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil || n != 1 || b[0] != 1 {
+			return fail.E("cgroup_join")
+		}
+		break
 	}
 	if err := unix.Close(fdCgroup); err != nil {
 		return fail.E("cgroup_join")
@@ -697,8 +708,9 @@ func emptyStr(s []string) []string {
 
 // launchHelper starts the target through a re-exec of self. sb nil means no
 // sandbox: the helper then only joins opts.Cgroup (join must be set). With
-// join the helper writes its pid to the cgroup's cgroup.procs (fd 7);
-// otherwise opts.Cgroup, if set, is joined through clone3.
+// join the parent writes the helper's pid to the cgroup's cgroup.procs as
+// soon as it starts, then releases it through a sync pipe (fd 7); otherwise
+// opts.Cgroup, if set, is joined through clone3.
 func launchHelper(ctx context.Context, self string, argv []string, execF *os.File, sb *unit.Sandbox, notify bool, timeout time.Duration, opts Options, join bool) (*exec.Cmd, string, *os.File, error) {
 	self, err := unit.ResolveExec(self)
 	if err != nil {
@@ -732,11 +744,22 @@ func launchHelper(ctx context.Context, self string, argv []string, execF *os.Fil
 			return nil, "", nil, fail.E("failed")
 		}
 	}
+	var syncR, syncW *os.File
+	if join {
+		syncR, syncW, err = os.Pipe()
+		if err != nil {
+			closePair(specR, specW)
+			closePair(statusR, statusW)
+			closePair(notifyR, notifyW)
+			return nil, "", nil, fail.E("failed")
+		}
+	}
 	null, err := os.OpenFile("/dev/null", os.O_RDWR, 0)
 	if err != nil {
 		closePair(specR, specW)
 		closePair(statusR, statusW)
 		closePair(notifyR, notifyW)
+		closePair(syncR, syncW)
 		return nil, "", nil, fail.E("failed")
 	}
 	// fdReady, fdExec, fdSpec, fdStatus, fdCgroup. A nil entry is closed in
@@ -744,7 +767,7 @@ func launchHelper(ctx context.Context, self string, argv []string, execF *os.Fil
 	extra := []*os.File{notifyW, execF, specR, statusW}
 	clone := opts.Cgroup
 	if join {
-		extra = append(extra, opts.Cgroup.Procs)
+		extra = append(extra, syncR)
 		clone = nil
 	}
 	cmd := &exec.Cmd{
@@ -764,13 +787,31 @@ func launchHelper(ctx context.Context, self string, argv []string, execF *os.Fil
 		closePair(specR, specW)
 		closePair(statusR, statusW)
 		closePair(notifyR, notifyW)
-		return nil, "", nil, startErr(err, clone)
+		closePair(syncR, syncW)
+		return nil, "", nil, startErr(err, self, clone)
 	}
-	if err := closeChildEnds(null, specR, statusW, notifyW); err != nil {
+	if err := closeChildEnds(null, specR, statusW, notifyW, syncR); err != nil {
 		closePair(specW, statusR)
-		closePair(notifyR, nil)
+		closePair(notifyR, syncW)
 		reap(cmd)
 		return nil, "", nil, fail.E("failed")
+	}
+	if join {
+		// The helper waits on the sync pipe, before anything else, until it
+		// is in the cgroup; on failure it reads end of file.
+		_, werr := opts.Cgroup.Procs.Write([]byte(strconv.Itoa(cmd.Process.Pid)))
+		if werr == nil {
+			_, werr = syncW.Write([]byte{1})
+		}
+		if cerr := syncW.Close(); werr == nil {
+			werr = cerr
+		}
+		if werr != nil {
+			closePair(specW, statusR)
+			closePair(notifyR, nil)
+			reap(cmd)
+			return nil, "", nil, fail.E("cgroup_join")
+		}
 	}
 	if err := writeFull(specW, spec); err != nil {
 		specW.Close()

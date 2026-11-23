@@ -115,7 +115,7 @@ func Launch(ctx context.Context, self string, argv []string, sb *unit.Sandbox, n
 		}
 		return cmd, claim, notifyR, err
 	}
-	cmd, notifyR, err := direct(target, argv, execF, script, notify, opts)
+	cmd, notifyR, err := direct(self, target, argv, execF, script, notify, opts)
 	if err == errNoClone {
 		noClone.Store(true)
 		return launchHelper(ctx, self, argv, execF, nil, notify, timeout, opts, true)
@@ -128,21 +128,23 @@ func Launch(ctx context.Context, self string, argv []string, sb *unit.Sandbox, n
 
 // noClone is set once clone3(CLONE_INTO_CGROUP) is found missing (Linux
 // before 5.7, or a seccomp filter that hides clone3). Every later launch
-// into a cgroup then goes through the helper, which joins the cgroup by
-// writing its own pid to cgroup.procs before exec.
+// into a cgroup then goes through the helper, which the supervisor moves
+// into the cgroup before the helper may exec.
 var noClone atomic.Bool
 
 // errNoClone is compared with == and never wrapped.
 var errNoClone = errors.New("no clone3 into cgroup")
 
-// startErr maps a failed Start. Into a cgroup, ENOSYS and E2BIG mean the
-// kernel cannot clone into a cgroup (errNoClone); EBUSY (not a leaf, or
+// startErr maps a failed Start. Into a cgroup, EBUSY (not a leaf, or
 // controllers enabled below it), ENODEV (removed) and EOPNOTSUPP mean the
-// child cannot join it (cgroup_join).
-func startErr(err error, g *cgroup.Group) error {
+// child cannot join it (cgroup_join). ENOSYS and E2BIG mean the kernel
+// cannot clone into a cgroup (errNoClone) only if a probe confirms it: an
+// execve E2BIG (argument list too long) must not switch every later launch
+// to the helper.
+func startErr(err error, self string, g *cgroup.Group) error {
 	if g != nil {
 		switch {
-		case errors.Is(err, syscall.ENOSYS), errors.Is(err, syscall.E2BIG):
+		case cloneMissing(err, self, g):
 			return errNoClone
 		case errors.Is(err, syscall.EBUSY), errors.Is(err, syscall.ENODEV), errors.Is(err, syscall.EOPNOTSUPP):
 			return fail.E("cgroup_join")
@@ -221,7 +223,7 @@ func checkArgv(argv []string) error {
 // direct starts the target without the helper. On Linux the kernel runs the
 // checked file through its fd (see directTarget); elsewhere the resolved path
 // is run.
-func direct(target string, argv []string, execF *os.File, script, notify bool, opts Options) (*exec.Cmd, *os.File, error) {
+func direct(self, target string, argv []string, execF *os.File, script, notify bool, opts Options) (*exec.Cmd, *os.File, error) {
 	var notifyR, notifyW *os.File
 	if notify {
 		var err error
@@ -263,7 +265,7 @@ func direct(target string, argv []string, execF *os.File, script, notify bool, o
 	if err := cmd.Start(); err != nil {
 		null.Close()
 		closePair(notifyR, notifyW)
-		return nil, nil, startErr(err, opts.Cgroup)
+		return nil, nil, startErr(err, self, opts.Cgroup)
 	}
 	if err := null.Close(); err != nil {
 		closePair(notifyR, notifyW)
@@ -321,6 +323,22 @@ func reap(cmd *exec.Cmd) error {
 		return killErr
 	}
 	return fail.E("failed")
+}
+
+// cloneMissing reports whether err, from a Start into g, means clone3 cannot
+// place a child in a cgroup here. Only ENOSYS and E2BIG can mean that, and
+// both can also come from execve; a probe that starts self ("apply" with no
+// handshake, which exits 2 at once) into g with tiny arguments decides.
+func cloneMissing(err error, self string, g *cgroup.Group) bool {
+	if g == nil || !errors.Is(err, syscall.ENOSYS) && !errors.Is(err, syscall.E2BIG) {
+		return false
+	}
+	probe := &exec.Cmd{Path: self, Args: []string{self, "apply"}, Dir: "/", SysProcAttr: procAttr(g)}
+	if perr := probe.Start(); perr != nil {
+		return errors.Is(perr, syscall.ENOSYS) || errors.Is(perr, syscall.E2BIG)
+	}
+	probe.Wait()
+	return false
 }
 
 // Options supplies execution identity and bounded output sinks. Callers own sinks.

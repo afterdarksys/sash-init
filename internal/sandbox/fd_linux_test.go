@@ -175,7 +175,7 @@ func TestLaunchRunsCheckedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	cmd, _, err := direct(target, []string{target}, execF, true, false, Options{Stdout: &out})
+	cmd, _, err := direct("", target, []string{target}, execF, true, false, Options{Stdout: &out})
 	if err != nil {
 		t.Fatal(err)
 	}

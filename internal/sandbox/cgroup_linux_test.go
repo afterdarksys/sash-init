@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -134,5 +135,26 @@ func TestHelperStatusMatchesRequest(t *testing.T) {
 	}
 	if claim, err := parseStatus(noneLine, false); err != nil || claim != claimNone {
 		t.Fatal(claim, err)
+	}
+}
+
+// An ENOSYS or E2BIG from a Start into a cgroup flips launches to the helper
+// only when clone3 into the cgroup really fails; an execve E2BIG (argument
+// list too long) does not.
+func TestCloneMissingProbes(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, g := prepared(t)
+	execE2BIG := &os.PathError{Op: "fork/exec", Path: "/bin/sleep", Err: syscall.E2BIG}
+	if cloneMissing(execE2BIG, self, g) {
+		t.Fatal("execve E2BIG taken for missing clone3")
+	}
+	if cloneMissing(execE2BIG, self, nil) || cloneMissing(&os.PathError{Err: syscall.EACCES}, self, g) {
+		t.Fatal("unrelated error taken for missing clone3")
+	}
+	if err := startErr(execE2BIG, self, g); err == errNoClone || fail.Token(err) != "failed" {
+		t.Fatal(err)
 	}
 }
