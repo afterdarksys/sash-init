@@ -1,6 +1,7 @@
 package unit
 
 import (
+	"os"
 	"reflect"
 	"testing"
 
@@ -46,5 +47,34 @@ func TestParseLimitsRejects(t *testing.T) {
 	_, err := Parse([]byte(limitsBase+`,"io_max":"1"}`), "a")
 	if fail.Token(err) != "unknown_field" {
 		t.Fatal(err)
+	}
+}
+
+// A sandboxed unit is cgroup-trusted when it can write cgroupfs anyway:
+// a read_write path covering /sys/fs/cgroup, or a capability that bypasses
+// file permissions there.
+func TestCgroupTrustedSandboxed(t *testing.T) {
+	uid := uint32(65534)
+	boxed := func(rw []string, caps []string) *Service {
+		return &Service{Execution: Execution{UID: &uid, GID: &uid}, Sandbox: &Sandbox{NoNewPrivs: true, ReadWrite: rw, Caps: caps}}
+	}
+	for _, rw := range []string{"/", "/sys", "/sys/fs", "/sys/fs/cgroup", "/sys/fs/cgroup/x"} {
+		if !CgroupTrusted(boxed([]string{"/var/lib/x", rw}, nil)) {
+			t.Errorf("rw %s untrusted", rw)
+		}
+	}
+	for _, c := range []string{"dac_override", "fowner", "chown", "setuid", "sys_admin"} {
+		if !CgroupTrusted(boxed(nil, []string{"kill", c})) {
+			t.Errorf("cap %s untrusted", c)
+		}
+	}
+	for _, sb := range []*Service{boxed([]string{"/var/lib/x", "/sys/fs/cgroupx", "/sysx"}, []string{"kill", "net_bind_service"}), boxed(nil, nil)} {
+		if CgroupTrusted(sb) {
+			t.Errorf("%+v trusted", sb.Sandbox)
+		}
+	}
+	other := &Service{Execution: Execution{UID: &uid, GID: &uid}}
+	if CgroupTrusted(other) != (os.Geteuid() == 65534) || !CgroupTrusted(&Service{}) {
+		t.Fatal("unsandboxed rule")
 	}
 }

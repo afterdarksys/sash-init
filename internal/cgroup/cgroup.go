@@ -56,4 +56,7 @@ const (
 	// enabled for the service cgroups ("no internal processes").
 	leaf   = "supervisor"
 	suffix = ".service"
+	// control is where systemd runs ExecReload and similar for a unit with
+	// Delegate=yes; it is the outer manager's, like the root itself.
+	control = ".control"
 )

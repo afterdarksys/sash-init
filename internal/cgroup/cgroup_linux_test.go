@@ -254,10 +254,15 @@ func TestSupervised(t *testing.T) {
 	if !r.Supervised(in.Process.Pid) {
 		t.Fatal("process in the leaf accepted")
 	}
-	// A process in the root itself is not: the outer manager puts processes
-	// there, and only a trusted service could move there.
-	if r.supervisedPath(r.rel) || !r.supervisedPath(r.rel+"/hide") {
+	// A process in the root itself, or in .control, is not, while the
+	// root has controllers enabled (the kernel refuses moves into it).
+	if !r.Protected() || r.supervisedPath(r.rel) || r.supervisedPath(r.rel+"/.control") || !r.supervisedPath(r.rel+"/hide") || !r.supervisedPath(r.rel+"/.control/x") {
 		t.Fatal("root rule")
+	}
+	// With none enabled, anything could have moved there: supervised.
+	open := openRoot(t, cgtest.DirOffering(t))
+	if open.Protected() || !open.supervisedPath(open.rel) || !open.supervisedPath(open.rel+"/.control") {
+		t.Fatal("unprotected root rule")
 	}
 	if err := writeFile(sub+"/cgroup.procs", strconv.Itoa(in.Process.Pid)); err != nil {
 		t.Fatal(err)
@@ -322,7 +327,7 @@ func TestSweepStrays(t *testing.T) {
 	dir := cgtest.DirOffering(t)
 	r := openRoot(t, dir)
 	l := dir + "/" + leaf
-	for _, d := range []string{l, l + "/sub", dir + "/hide", dir + "/gone.service"} {
+	for _, d := range []string{l, l + "/sub", dir + "/hide", dir + "/gone.service", dir + "/.control"} {
 		if err := os.Mkdir(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -340,7 +345,7 @@ func TestSweepStrays(t *testing.T) {
 		}
 		return c
 	}
-	inLeaf, inSub, inHide, inGone, inRoot := move(l), move(l+"/sub"), move(dir+"/hide"), move(dir+"/gone.service"), move(dir)
+	inLeaf, inSub, inHide, inGone, inRoot, inControl := move(l), move(l+"/sub"), move(dir+"/hide"), move(dir+"/gone.service"), move(dir), move(dir+"/.control")
 	keep := startIn(t, g, "/bin/sleep", "60")
 	sw := r.SweepStrays(map[string]bool{"svc": true})
 	if len(sw.Killed) != 1 || sw.Killed[0] != inLeaf.Process.Pid {
@@ -351,8 +356,11 @@ func TestSweepStrays(t *testing.T) {
 	if strings.Join(sw.Cgroups, " ") != strings.Join(want, " ") {
 		t.Fatalf("cgroups %v want %v", sw.Cgroups, want)
 	}
-	if len(sw.RootMembers) != 1 || sw.RootMembers[0] != inRoot.Process.Pid {
-		t.Fatalf("root members %v", sw.RootMembers)
+	sort.Ints(sw.RootMembers)
+	members := []int{inRoot.Process.Pid, inControl.Process.Pid}
+	sort.Ints(members)
+	if fmt.Sprint(sw.RootMembers) != fmt.Sprint(members) {
+		t.Fatalf("root members %v want %v", sw.RootMembers, members)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for _, c := range []*exec.Cmd{inLeaf, inSub, inHide, inGone} {
@@ -370,13 +378,17 @@ func TestSweepStrays(t *testing.T) {
 	}
 	// A SIGKILL takes effect at once; give it time to show.
 	time.Sleep(200 * time.Millisecond)
-	if dead(keep.Process.Pid) || dead(inRoot.Process.Pid) {
-		t.Fatal("service process or root member killed")
+	if dead(keep.Process.Pid) || dead(inRoot.Process.Pid) || dead(inControl.Process.Pid) {
+		t.Fatal("service process, root member or .control member killed")
+	}
+	if _, err := os.Stat(dir + "/.control"); err != nil {
+		t.Fatal(".control removed")
 	}
 	if again := r.SweepStrays(map[string]bool{"svc": true}); len(again.RootMembers) != 0 || len(again.Killed) != 0 || len(again.Cgroups) != 0 {
 		t.Fatalf("second sweep %+v", again)
 	}
 	inRoot.Process.Kill()
+	inControl.Process.Kill()
 }
 
 // Service cgroups an earlier instance left are killed and removed, once the

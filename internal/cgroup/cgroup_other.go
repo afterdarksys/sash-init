@@ -37,6 +37,10 @@ func (*Root) Supervised(int) bool { return true }
 
 func (*Root) Close() error { return nil }
 
+func (*Root) Protected() bool { return false }
+
+func (*Root) Rel() string { return "" }
+
 func (*Root) CleanLeftovers() ([]string, error) { return nil, nil }
 
 // Sweep is what one sweep found.

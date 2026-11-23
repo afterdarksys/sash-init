@@ -4,6 +4,7 @@ package supervise
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"github.com/afterdarksys/sahinit/internal/cgroup/cgtest"
 	"github.com/afterdarksys/sahinit/internal/fail"
 	"github.com/afterdarksys/sahinit/internal/unit"
+	"golang.org/x/sys/unix"
 )
 
 // cgSup is mustSup with a fresh delegated cgroup root.
@@ -457,5 +459,54 @@ func TestCgroupSecondInstanceBusy(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if gone(pid) || rowOf(t, sup, "idle").State != "running" {
 		t.Fatal("first instance's service disturbed")
+	}
+}
+
+// With no controller enabled below the root, a process in the root itself
+// may be an escaped service, and is refused as a peer; with controllers
+// enabled, a process in ROOT/.control (systemd's ExecReload) is accepted.
+func TestCgroupRootMemberPeer(t *testing.T) {
+	for _, protected := range []bool{false, true} {
+		t.Run(fmt.Sprintf("protected=%v", protected), func(t *testing.T) {
+			dir := cgtest.DirOffering(t)
+			into := dir
+			if protected {
+				dir = cgtest.Dir(t)
+				into = dir + "/.control"
+				if err := os.Mkdir(into, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r, err := cgroup.Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { r.Close() })
+			if r.Protected() != protected {
+				t.Fatal("protected")
+			}
+			sup := mustSup(t, map[string]*unit.Service{"idle": newSvc("idle", "simple", "exec", "no", false, time.Second, []string{"/bin/sleep", "30"})})
+			sup.Cgroups = r
+			f, err := os.Open(into)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			cmd := exec.Command("/bin/sleep", "60")
+			cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(f.Fd())}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { cmd.Process.Kill(); cmd.Wait() }()
+			fd, err := unix.PidfdOpen(cmd.Process.Pid, 0)
+			if err != nil {
+				t.Skip("no pidfd_open")
+			}
+			pin := peerPin{fd: fd, pid: cmd.Process.Pid}
+			defer pin.close()
+			if sup.peerRefused(pin) == protected {
+				t.Fatalf("protected=%v refused=%v", protected, !protected)
+			}
+		})
 	}
 }

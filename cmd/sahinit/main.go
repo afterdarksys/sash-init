@@ -236,6 +236,11 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 	// lock (openCgroups) and the socket's lock held, in that order, so a
 	// second supervisor that fails either one has touched nothing.
 	if root != nil {
+		if !root.Protected() {
+			// No controller is enabled below the root, so the kernel lets
+			// anything move into it: root members are refused as peers.
+			fmt.Fprintln(stderr, "cgroup_root_unprotected", root.Rel())
+		}
 		names, err := root.CleanLeftovers()
 		for _, name := range names {
 			fmt.Fprintln(stderr, "cgroup_leftover", name)

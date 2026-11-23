@@ -37,12 +37,38 @@ var (
 	cpuRE    = regexp.MustCompile(`^[1-9][0-9]{0,12} [1-9][0-9]{0,6}$`)
 )
 
-// CgroupTrusted reports whether svc runs without a sandbox as root or as
-// the supervisor's own uid. Such a service can write any cgroup.procs under
-// the delegated root, so it can leave its cgroup (or stop the supervisor):
-// kill-all, limits and peer_supervised are promised only for the others.
+// cgroupMount is where the cgroup2 hierarchy is mounted.
+const cgroupMount = "/sys/fs/cgroup"
+
+// cgroupBypassCaps are the capabilities a sandboxed unit may keep that let
+// it write cgroupfs files it does not own: dac_override and fowner bypass
+// the file permission check, chown can take a file over, setuid can become
+// the supervisor's uid, and sys_admin can mount or unshare its own view.
+// dac_read_search only bypasses reads and is not in the list.
+var cgroupBypassCaps = map[string]bool{"dac_override": true, "fowner": true, "chown": true, "setuid": true, "sys_admin": true}
+
+// CgroupTrusted reports whether svc may be able to write cgroup.procs under
+// the delegated root, and so leave its cgroup (or stop the supervisor).
+// Kill-all, limits and peer_supervised are promised only for the others.
+// It is trusted when it runs without a sandbox as root or as the
+// supervisor's own uid; or, sandboxed, when a read_write path is
+// /sys/fs/cgroup, an ancestor of it ("/", "/sys", "/sys/fs") or a path
+// inside it, or when it keeps a capability in cgroupBypassCaps.
 func CgroupTrusted(svc *Service) bool {
-	if svc == nil || svc.Sandbox != nil {
+	if svc == nil {
+		return false
+	}
+	if sb := svc.Sandbox; sb != nil {
+		for _, p := range sb.ReadWrite {
+			if p == "/" || p == cgroupMount || strings.HasPrefix(cgroupMount, p+"/") || strings.HasPrefix(p, cgroupMount+"/") {
+				return true
+			}
+		}
+		for _, c := range sb.Caps {
+			if cgroupBypassCaps[c] {
+				return true
+			}
+		}
 		return false
 	}
 	uid := svc.Execution.UID

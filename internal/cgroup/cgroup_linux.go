@@ -199,10 +199,12 @@ type Sweep struct {
 // under it that is neither the supervisor's leaf nor ROOT/NAME.service for
 // a NAME in running is unknown: everything in it is killed and it is
 // removed, and so is any cgroup below the leaf. A process in the leaf other
-// than the supervisor is killed. A process in the root itself is left alone
-// and reported once: the outer manager (docker exec, ExecReload, ctl) puts
-// processes there. The caller must not have a child of its own waiting in
-// the leaf (a helper not yet moved into its service cgroup).
+// than the supervisor is killed. A process in the root itself, or in a
+// top-level ".control" cgroup (where systemd runs ExecReload with
+// Delegate=yes), is left alone and reported once: the outer manager puts
+// processes there, and ".control" is never removed. The caller must not have
+// a child of its own waiting in the leaf (a helper not yet moved into its
+// service cgroup).
 //
 // Threats: an untrusted service (sandboxed, or a uid other than the
 // supervisor's and root) cannot write any cgroup.procs here, so whatever
@@ -222,6 +224,9 @@ func (r *Root) SweepStrays(running map[string]bool) Sweep {
 			continue
 		}
 		p := filepath.Join(r.dir, e.Name())
+		if e.Name() == control {
+			continue
+		}
 		if e.Name() != leaf {
 			sw.Cgroups = append(sw.Cgroups, r.dropUnknown(p)...)
 			continue
@@ -240,7 +245,7 @@ func (r *Root) SweepStrays(running map[string]bool) Sweep {
 		}
 	}
 	present := map[int]bool{}
-	for _, pid := range procsOf(r.dir) {
+	for _, pid := range append(procsOf(r.dir), procsOf(filepath.Join(r.dir, control))...) {
 		present[pid] = true
 		if !r.seenRoot[pid] {
 			r.seenRoot[pid] = true
@@ -546,11 +551,15 @@ func (r *Root) Usage(name string) (Usage, bool) {
 
 // Supervised reports whether pid is in any cgroup below the root: a service
 // cgroup, the supervisor's leaf, or an unknown cgroup. A process in the
-// root itself is not supervised: the outer manager puts processes there
-// (docker exec, ctl), and the only services that can move there are trusted
-// ones (cgroup_trusted), which can leave or stop sahinit anyway. The
-// supervisor never asks about itself. A pid whose cgroup cannot be read, or
-// whose cgroup has been removed, counts as supervised.
+// root itself, or in ROOT/.control, is not supervised while the root has a
+// controller enabled below it (Protected): the kernel then refuses moves
+// into the root, the outer manager puts processes in either place (docker
+// exec, ExecReload, ctl), and only cgroup_trusted services can write
+// cgroupfs. While the root has none, a service that could write cgroupfs
+// despite being classed untrusted could join the root, so root and
+// .control members are supervised too. The supervisor never asks about
+// itself. A pid whose cgroup cannot be read, or whose cgroup has been
+// removed, counts as supervised.
 //
 // Threats: this judges whatever process holds pid when it is called. The
 // control socket pins the peer with a pidfd when it accepts and checks that
@@ -570,8 +579,22 @@ func (r *Root) supervisedPath(cg string) bool {
 	if strings.HasSuffix(cg, " (deleted)") {
 		return true
 	}
+	if cg == r.rel || cg == joinRel(r.rel, control) {
+		return !r.Protected()
+	}
 	return below(cg, r.rel)
 }
+
+// Protected reports whether the root has a controller enabled below it, so
+// the kernel refuses to move any process into the root itself (EBUSY, the
+// no-internal-process rule).
+func (r *Root) Protected() bool {
+	raw, err := os.ReadFile(r.dir + "/cgroup.subtree_control")
+	return err == nil && len(bytes.TrimSpace(raw)) > 0
+}
+
+// Path of the root as /proc/PID/cgroup shows it.
+func (r *Root) Rel() string { return r.rel }
 
 // procCgroup returns the cgroup v2 path of a process ("self" or a pid).
 func procCgroup(pid string) (string, error) {
