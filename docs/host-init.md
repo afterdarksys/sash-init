@@ -35,8 +35,8 @@ The kernel must provide procfs, sysfs, devtmpfs, tmpfs, cgroup v2 and
 The VM suite currently exercises Debian's Linux 6.1 amd64 kernel. Kernel
 configuration still matters; version alone does not guarantee these facilities.
 
-PID 1 mounts `/proc`, `/sys`, `/dev`, `/dev/pts` (devpts, `ptmxmode=0666`),
-`/dev/shm` (tmpfs, 1777), `/run` and `/sys/fs/cgroup`, creates a sticky `/tmp`
+PID 1 mounts `/proc`, `/sys`, `/dev`, `/dev/pts` (devpts, `nosuid,noexec,gid=5,mode=620,ptmxmode=666`),
+`/dev/shm` (tmpfs, `nosuid,nodev,noexec`, 1777), `/run` and `/sys/fs/cgroup`, creates a sticky `/tmp`
 when it is missing, makes mount
 propagation private, opens `/dev/console` as standard input/output/error, enables
 the available CPU, memory and PID controllers, and starts a supervisor in
@@ -64,7 +64,7 @@ PID 1 remains alive when the supervisor fails. It kills the managed cgroup tree
 and optionally launches the configured local recovery executable on the console.
 No recovery executable is enabled by default. An enabled executable runs as root
 on the local console; provision an authenticated recovery program where needed.
-The supervisor and recovery executable receive a fixed minimal environment.
+The supervisor and recovery executable receive a fixed minimal environment. Recovery is off by default: without `--recovery`, PID 1 only logs and waits for a power signal or SIGHUP.
 
 Send SIGHUP to PID 1 to request a retry of setup and boot once recovery exits.
 A recovery program can send it before exiting. Recovery launch failures are
@@ -95,7 +95,7 @@ not implemented. See Linux [reboot semantics](https://man7.org/linux/man-pages/m
 
 ```sh
 ./build.sh                  # native race tests, vet, Linux test compilation
-./scripts/test-linux.sh     # Linux race suite with private cgroup namespace
+SASH_SRC=../sash-initp1 ./scripts/test-linux.sh  # Linux race suite, private cgroup namespace (builds sash too)
 python3 scripts/test-boot.py # QEMU boots, serial assertions, bounded VM lifetime
 python3 scripts/test-boot.py --scenario sash  # only the sash scenario
 ```
@@ -149,7 +149,8 @@ notify-adapter` with a 500 ms watchdog; it sends three heartbeats and stops,
 and the watchdog kills it (the unit is `"essential": false`, so the host does
 not enter recovery). The `persistent` scenario (`--scenario persistent`)
 builds an ext4 root image and an initramfs whose `/init` is
-`contrib/initramfs/init`: that script, not sahinit, runs `e2fsck -p`, mounts
+`contrib/initramfs/init`: that script, not sahinit, runs `e2fsck -p` (and
+reboots when it returns 2), mounts
 the root and `switch_root`s to `/sbin/sahinit init`. It boots the disk twice,
 checks a counter survives and runs an offline `e2fsck -fn` after each
 shutdown. No host disk is attached. See [operations](reference/operations.md)

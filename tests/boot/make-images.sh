@@ -100,7 +100,7 @@ mkfs.ext4 -q -F -d "$root" /out/root.ext4
 initrd=/tmp/disk-initrd
 mkdir -p "$initrd/bin" "$initrd/sbin" "$initrd/dev" "$initrd/proc" "$initrd/sys" "$initrd/newroot"
 cp /bin/busybox "$initrd/bin/busybox"
-for cmd in sh mkdir mount cat modprobe sleep switch_root; do ln -s busybox "$initrd/bin/$cmd"; done
+for cmd in sh mkdir mount cat modprobe sleep switch_root sync reboot; do ln -s busybox "$initrd/bin/$cmd"; done
 cp /assets/sahinit "$initrd/sahinit"
 cp /root-init "$initrd/init"
 chmod 0755 "$initrd/init"

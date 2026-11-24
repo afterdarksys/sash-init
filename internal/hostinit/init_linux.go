@@ -172,8 +172,8 @@ func setup() error {
 		{"/proc", "proc", unix.PROC_SUPER_MAGIC, unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC, ""},
 		{"/sys", "sysfs", unix.SYSFS_MAGIC, unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC, ""},
 		{"/dev", "devtmpfs", unix.TMPFS_MAGIC, unix.MS_NOSUID, "mode=0755"},
-		{"/dev/pts", "devpts", unix.DEVPTS_SUPER_MAGIC, unix.MS_NOSUID | unix.MS_NOEXEC, "mode=0620,ptmxmode=0666"},
-		{"/dev/shm", "tmpfs", unix.TMPFS_MAGIC, unix.MS_NOSUID | unix.MS_NODEV, "mode=1777"},
+		{"/dev/pts", "devpts", unix.DEVPTS_SUPER_MAGIC, unix.MS_NOSUID | unix.MS_NOEXEC, "gid=5,mode=620,ptmxmode=666"},
+		{"/dev/shm", "tmpfs", unix.TMPFS_MAGIC, unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC, "mode=1777"},
 		{"/run", "tmpfs", unix.TMPFS_MAGIC, unix.MS_NOSUID | unix.MS_NODEV, "mode=0755"},
 		{"/sys/fs/cgroup", "cgroup2", unix.CGROUP2_SUPER_MAGIC, unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC, ""},
 	} {
@@ -307,6 +307,8 @@ func shutdown(manager int, timeout time.Duration, action int) {
 		for _, path := range swapPaths(string(raw)) {
 			if err := swapoff(path); err != nil {
 				log("swapoff %s: %v", path, err)
+			} else {
+				log("swapoff %s", path)
 			}
 		}
 	} else {

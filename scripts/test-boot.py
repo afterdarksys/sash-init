@@ -47,6 +47,8 @@ for scenario in selected:
     required = ["sahinit-init: started pid=1", "sahinit-init: shutdown action="]
     if scenario in ("poweroff", "reboot", "stuck", "retry"):
         required += ["BOOTTEST: service cgroup", "BOOTTEST: orphan adopted", "BOOTTEST: orphan reaped"]
+    if scenario in ("poweroff", "reboot", "stuck", "retry"):
+        required += ["BOOTTEST: service session leader", "BOOTTEST: devpts and shm mounted", "BOOTTEST: tmp 1777"]
     if scenario in ("poweroff", "reboot", "retry"):
         required += ["BOOTTEST: app stopped", "BOOTTEST: reverse shutdown"]
     if scenario in ("badconfig", "bootfail", "runtimefail", "crash"):
@@ -79,7 +81,7 @@ if "persistent" in selected:
             raise SystemExit(f"FAIL persistent boot {boot}: timeout; see {assets}")
         log = result.stdout.decode(errors="replace")
         (assets / f"persistent-{boot}.log").write_text(log)
-        required = ["sahinit-root: checked ext4 root; handing off", "sahinit-init: started pid=1", f"BOOTTEST: persistent boot {boot}", "Power down"]
+        required = ["sahinit-root: checked ext4 root; handing off", "sahinit-init: started pid=1", f"BOOTTEST: persistent boot {boot}", "BOOTTEST: swap on", "sahinit-init: swapoff /var/lib/sahinit/swap", "Power down"]
         missing = [text for text in required if text not in log]
         if result.returncode or missing or "Kernel panic" in log or "BOOTTEST: FAIL" in log or "unmount/remount /:" in log:
             raise SystemExit(f"FAIL persistent boot {boot}: {missing}; see {assets}")

@@ -226,8 +226,8 @@ revocation floor: install a floor there with
 ## PID 1 files
 
 PID 1 makes the mount propagation of `/` private, mounts `/proc`, `/sys`,
-`/dev` (devtmpfs, `mode=0755`), `/dev/pts` (devpts, `mode=0620,ptmxmode=0666`),
-`/dev/shm` (tmpfs, `mode=1777`), `/run` (tmpfs, `mode=0755`) and
+`/dev` (devtmpfs, `mode=0755`), `/dev/pts` (devpts, `nosuid,noexec,gid=5,mode=620,ptmxmode=666`; group 5 is
+the conventional `tty` group), `/dev/shm` (tmpfs, `nosuid,nodev,noexec,mode=1777`), `/run` (tmpfs, `mode=0755`) and
 `/sys/fs/cgroup` (cgroup2) unless already mounted, creates `/run/sahinit`
 (0700), a sticky `/tmp` when missing, and `/sys/fs/cgroup/sahinit/supervisor`, requires
 `/sys/fs/cgroup/sahinit/cgroup.kill`, writes `+cpu`, `+memory`, `+pids` to

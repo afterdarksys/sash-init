@@ -121,7 +121,9 @@ configure the network (those are services).
    `--dir /etc/sahinit/units --socket /run/sahinit/control.sock
    --shutdown-timeout 30s`.
 3. Strongly consider `--recovery /sbin/your-recovery-program` (a local console
-   program run as root). There is none by default.
+   program run as root). **Recovery is off by default**: without it a failed
+   strict boot leaves the machine at a console with only the log lines and
+   the power signals.
 4. Verify in a VM first: `python3 scripts/test-boot.py`.
 
 What PID 1 does, in order: makes `/` mount propagation private; mounts
@@ -152,7 +154,8 @@ root. **It, not sahinit, checks the filesystem and switches root**: it mounts
 `/proc`, `/sys` and `/dev`, reads `sahinit.root=/dev/DEVICE` from the kernel
 command line (split on whitespace with globbing off, never evaluated), loads
 `virtio_pci`, `virtio_blk` and `ext4` if they are modules, waits up to 10 s
-for the device, runs `e2fsck -p` (exit 0 or 1 continue; anything else fails),
+for the device, runs `e2fsck -p` (exit 0 or 1 continue; exit 2, errors
+corrected and a reboot required, syncs and `reboot -f`s; anything else fails),
 mounts the root read-write, moves `/proc`, `/sys` and `/dev`, and
 `switch_root`s to `/sbin/sahinit init` with the arguments the kernel passed
 to `/init`. On any failure it execs the initramfs's `/sahinit init --dir

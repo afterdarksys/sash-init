@@ -16,6 +16,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 var output *os.File
@@ -77,6 +80,7 @@ func main() {
 			fatal("persistent write")
 		}
 		mark("persistent boot " + strconv.Itoa(n))
+		swapOn("/var/lib/sahinit/swap")
 		syscall.Kill(1, syscall.SIGTERM)
 		park()
 	case "fail":
@@ -170,6 +174,7 @@ func main() {
 			fatal("service cgroup " + string(cg))
 		}
 		mark("service cgroup")
+		hostChecks()
 		if scenario() != "retry" {
 			for file, want := range map[string]string{"memory.max": "134217728", "pids.max": "64"} {
 				b, err := os.ReadFile("/sys/fs/cgroup/sahinit/app.service/" + file)
@@ -356,4 +361,69 @@ func sashDrive() {
 	}
 	mark("sash mounts removed")
 	syscall.Kill(1, syscall.SIGTERM)
+}
+
+// hostChecks asserts what PID 1 set up for services: the service leads its
+// own session, devpts and /dev/shm are mounted with the hardened options,
+// and /tmp was created 1777.
+func hostChecks() {
+	if sid, _ := unix.Getsid(0); sid != os.Getpid() {
+		fatal("service is not a session leader")
+	}
+	mark("service session leader")
+	mounts, _ := os.ReadFile("/proc/mounts")
+	var pts, shm bool
+	for _, line := range strings.Split(string(mounts), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 4 {
+			continue
+		}
+		opts := "," + f[3] + ","
+		has := func(all ...string) bool {
+			for _, o := range all {
+				if !strings.Contains(opts, ","+o+",") {
+					return false
+				}
+			}
+			return true
+		}
+		if f[1] == "/dev/pts" && f[2] == "devpts" && has("nosuid", "noexec", "gid=5", "mode=620", "ptmxmode=666") {
+			pts = true
+		}
+		if f[1] == "/dev/shm" && f[2] == "tmpfs" && has("nosuid", "nodev", "noexec") {
+			shm = true
+		}
+	}
+	if !pts || !shm {
+		fatal("devpts or /dev/shm options: " + string(mounts))
+	}
+	mark("devpts and shm mounted")
+	st, err := os.Stat("/tmp")
+	if err != nil || st.Mode()&os.ModeSticky == 0 || st.Mode().Perm() != 0o777 {
+		fatal("/tmp mode")
+	}
+	mark("tmp 1777")
+}
+
+// swapOn makes (once) a 16 MiB swap file and enables it, so shutdown has a
+// swap area to turn off.
+func swapOn(path string) {
+	const page, pages = 4096, 4096
+	if _, err := os.Stat(path); err != nil {
+		buf := make([]byte, page*pages)
+		le := func(off int, v uint32) {
+			buf[off], buf[off+1], buf[off+2], buf[off+3] = byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
+		}
+		le(1024, 1)       // version
+		le(1028, pages-1) // last page
+		copy(buf[page-10:], "SWAPSPACE2")
+		if err := os.WriteFile(path, buf, 0600); err != nil {
+			fatal("swap file")
+		}
+	}
+	p, _ := syscall.BytePtrFromString(path)
+	if _, _, e := syscall.Syscall(syscall.SYS_SWAPON, uintptr(unsafe.Pointer(p)), 0, 0); e != 0 {
+		fatal("swapon " + e.Error())
+	}
+	mark("swap on")
 }

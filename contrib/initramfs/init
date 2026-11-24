@@ -38,7 +38,17 @@ while [ ! -b "$root" ]; do
 done
 e2fsck -p "$root"
 result=$?
-[ "$result" -le 1 ] || fail "filesystem check returned $result"
+case "$result" in
+0|1) ;;
+2)
+    # Errors were corrected and e2fsck asks for a reboot before the
+    # filesystem is used: do that rather than mount it.
+    echo 'sahinit-root: e2fsck corrected errors; rebooting'
+    sync
+    reboot -f
+    fail 'reboot after filesystem check failed' ;;
+*) fail "filesystem check returned $result" ;;
+esac
 mount -t ext4 -o rw "$root" /newroot || fail 'root mount failed'
 [ -x /newroot/sbin/sahinit ] || fail 'root has no /sbin/sahinit'
 mkdir -p /newroot/proc /newroot/sys /newroot/dev
