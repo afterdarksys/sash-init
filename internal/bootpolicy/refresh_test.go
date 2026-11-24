@@ -234,9 +234,11 @@ func TestRefreshCredentialAndCancellation(t *testing.T) {
 	// it before the server closes (cleanups run last-registered first), so
 	// it can never outlive the test.
 	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
 	r, _ := testRefresher(t, s, func(w http.ResponseWriter, req *http.Request) {
 		calls.Add(1)
 		seen.Store(req.Header.Get("Authorization"), true)
+		entered <- struct{}{}
 		_, _ = io.Copy(io.Discard, req.Body)
 		select {
 		case <-req.Context().Done():
@@ -299,10 +301,18 @@ func TestRefreshCredentialAndCancellation(t *testing.T) {
 	}
 	// The credential is reread on every attempt, so rotation needs no restart.
 	r.credentialFile = good
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	_, err := r.Once(ctx)
-	if !errors.Is(err, context.DeadlineExceeded) {
+	finished := make(chan error, 1)
+	go func() { _, err := r.Once(ctx); finished <- err }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refresh request never arrived")
+	}
+	cancel()
+	err := <-finished
+	if !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	if _, ok := seen.Load("Bearer " + rotated); !ok || calls.Load() != 1 {
