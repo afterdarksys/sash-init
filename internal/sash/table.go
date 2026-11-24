@@ -18,16 +18,17 @@ import (
 // the next start, so a later spawn cannot take a name an earlier one held
 // while that one runs (name_in_use).
 type Table struct {
-	mu    sync.Mutex
-	procs map[string]*Proc
-	order []string
+	mu     sync.Mutex
+	procs  map[string]*Proc
+	order  []string
+	budget budget
 	// Changed, when set, is called (without the table lock) whenever a
 	// process ends.
 	Changed func()
 }
 
 // NewTable is an empty table.
-func NewTable() *Table { return &Table{procs: map[string]*Proc{}} }
+func NewTable() *Table { return &Table{procs: map[string]*Proc{}, budget: budget{max: MaxOutput}} }
 
 // Proc is one spawned process. Its pid, start time and host handle are
 // set once, by the host's Spawn, while other goroutines may read the table.
@@ -64,7 +65,11 @@ func (t *Table) Reserve(name string) (*Proc, error) {
 	if _, ok := t.procs[name]; !ok && len(t.procs) >= MaxNames {
 		return nil, fail.E("too_many_names")
 	}
-	p := &Proc{Name: name, done: make(chan struct{}), Stdout: NewTail(), Stderr: NewTail(), table: t}
+	if old := t.procs[name]; old != nil {
+		old.Stdout.Free()
+		old.Stderr.Free()
+	}
+	p := &Proc{Name: name, done: make(chan struct{}), Stdout: &Tail{budget: &t.budget}, Stderr: &Tail{budget: &t.budget}, table: t}
 	if _, ok := t.procs[name]; !ok {
 		t.order = append(t.order, name)
 	}
@@ -208,19 +213,61 @@ func (t *Table) Failed() bool {
 const (
 	tailBytes = 64 * 1024
 	tailLines = 1000
+	// MaxOutput bounds all captured output of one service.
+	MaxOutput = 1 << 20
 )
 
-// Tail keeps the last lines a process wrote, bounded in bytes and lines.
+// budget is the bytes a service's tails may hold together.
+type budget struct {
+	mu   sync.Mutex
+	used int
+	max  int
+}
+
+// take reserves n bytes, or is false when that would pass max.
+func (b *budget) take(n int) bool {
+	if b == nil {
+		return true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.used+n > b.max {
+		return false
+	}
+	b.used += n
+	return true
+}
+
+func (b *budget) give(n int) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	b.used -= n
+	b.mu.Unlock()
+}
+
+// Used is the bytes the table's tails hold.
+func (t *Table) Used() int {
+	t.budget.mu.Lock()
+	defer t.budget.mu.Unlock()
+	return t.budget.used
+}
+
+// Tail keeps the last lines a process wrote, bounded in bytes and lines,
+// and within its service's MaxOutput: past that its own oldest lines go
+// first, and a line that still does not fit is dropped.
 type Tail struct {
 	mu      sync.Mutex
 	lines   []string
 	partial []byte
 	size    int
+	budget  *budget
 	// Copy, when set, also receives each complete line.
 	Copy func(line string)
 }
 
-// NewTail is an empty tail.
+// NewTail is an empty tail with no service budget.
 func NewTail() *Tail { return &Tail{} }
 
 func (t *Tail) Write(b []byte) (int, error) {
@@ -247,13 +294,33 @@ func (t *Tail) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
+func (t *Tail) dropOldest() {
+	t.size -= len(t.lines[0])
+	t.budget.give(len(t.lines[0]))
+	t.lines[0] = ""
+	t.lines = t.lines[1:]
+}
+
 func (t *Tail) push(l string) {
+	for !t.budget.take(len(l)) {
+		if len(t.lines) == 0 {
+			return
+		}
+		t.dropOldest()
+	}
 	t.lines = append(t.lines, l)
 	t.size += len(l)
 	for len(t.lines) > tailLines || t.size > tailBytes {
-		t.size -= len(t.lines[0])
-		t.lines = t.lines[1:]
+		t.dropOldest()
 	}
+}
+
+// Free drops every line, giving the bytes back to the service.
+func (t *Tail) Free() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.budget.give(t.size)
+	t.lines, t.partial, t.size = nil, nil, 0
 }
 
 // Lines is the last n lines (all when n <= 0), the unfinished one included.

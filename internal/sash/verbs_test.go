@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -88,7 +89,6 @@ func TestSpawnAccepted(t *testing.T) {
 		"env":    map[string]any{"PORT": "8080", "DB_PASS": map[string]any{"secret": "hunter2"}},
 		"cwd":    "/run/app/work",
 		"umask":  "027",
-		"caps":   []string{"CAP_NET_BIND_SERVICE"},
 		"limits": map[string]any{"nofile": 1024, "core": 0},
 		"stdout": "file:/var/log/app/out.log",
 		"stderr": "stdout",
@@ -100,7 +100,7 @@ func TestSpawnAccepted(t *testing.T) {
 	if strings.Join(p.Argv, " ") != "/opt/app/bin/server --port 8080" || p.User != "app" || p.Cwd != "/run/app/work" || p.CwdRoot != "/run/app" || p.Umask != 0o27 {
 		t.Fatalf("%+v", p)
 	}
-	if len(p.Caps) != 1 || p.Caps[0] != "net_bind_service" || p.Limits["nofile"] != 1024 || p.Stdout != (Stream{Kind: "file", Path: "/var/log/app/out.log", Root: "/var/log/app"}) || p.Stderr.Kind != "stdout" {
+	if len(p.Caps) != 0 || p.Limits["nofile"] != 1024 || p.Stdout != (Stream{Kind: "file", Path: "/var/log/app/out.log", Root: "/var/log/app"}) || p.Stderr.Kind != "stdout" {
 		t.Fatalf("%+v", p)
 	}
 	secret := false
@@ -163,6 +163,21 @@ func TestSpawnRefusals(t *testing.T) {
 		"cwd sibling": {func(t *testing.T) Request { return spawnReq(t, "main", withID(map[string]any{"cwd": "/run/apple"})) }, "denied"},
 		"unlisted cap": {func(t *testing.T) Request {
 			return spawnReq(t, "main", withID(map[string]any{"caps": []string{"CAP_KILL"}}))
+		}, "denied"},
+		"cap allowed": {func(t *testing.T) Request {
+			return spawnReq(t, "main", withID(map[string]any{"caps": []string{"CAP_NET_BIND_SERVICE"}}))
+		}, "caps_unsupported"},
+		"env nul": {func(t *testing.T) Request {
+			return spawnReq(t, "main", withID(map[string]any{"env": map[string]any{"PORT": "80\x0080"}}))
+		}, "denied"},
+		"secret nul": {func(t *testing.T) Request {
+			return spawnReq(t, "main", withID(map[string]any{"env": map[string]any{"PORT": map[string]any{"secret": "a\x00b"}}}))
+		}, "denied"},
+		"env too big": {func(t *testing.T) Request {
+			return spawnReq(t, "main", withID(map[string]any{"env": map[string]any{"PORT": strings.Repeat("x", maxEnvBytes)}}))
+		}, "denied"},
+		"file is root": {func(t *testing.T) Request {
+			return spawnReq(t, "main", withID(map[string]any{"stdout": "file:/var/log/app"}))
 		}, "denied"},
 		"cap ceiling": {func(t *testing.T) Request {
 			return spawnReq(t, "main", withID(map[string]any{"caps": []string{"CAP_SYS_ADMIN"}}))
@@ -396,6 +411,7 @@ func TestWaitEndsWithTheSession(t *testing.T) {
 			cancel()
 			b.Close()
 		case "deadline":
+			a.SetReadDeadline(time.Now().Add(2 * time.Second))
 			out, err := ReadFrame(a)
 			if err != nil || string(out) != `{"error":"timeout"}` {
 				t.Fatalf("deadline: %s %v", out, err)
@@ -408,5 +424,54 @@ func TestWaitEndsWithTheSession(t *testing.T) {
 			t.Fatalf("%s: Serve still blocked on the wait", how)
 		}
 		cancel()
+	}
+}
+
+func TestNameLimitAndOutputMemory(t *testing.T) {
+	s, _ := newServer()
+	for i := 0; i < MaxNames; i++ {
+		if r := s.Handle(spawnReq(t, "p"+strconv.Itoa(i), nil)); r.Error != "" {
+			t.Fatalf("%d: %+v", i, r)
+		}
+	}
+	if r := s.Handle(spawnReq(t, "one-more", nil)); r.Error != "too_many_names" {
+		t.Fatalf("past the limit: %+v", r)
+	}
+	// A name already bound may be reused once its process ended.
+	s.Table.Get("p0").Exit(0, "", time.Now())
+	if r := s.Handle(spawnReq(t, "p0", nil)); r.Error != "" {
+		t.Fatalf("reuse: %+v", r)
+	}
+	// Output past the service's budget drops the oldest lines; it never
+	// grows past MaxOutput.
+	line := strings.Repeat("y", 1000) + "\n"
+	for _, p := range s.Table.All() {
+		for i := 0; i < 100; i++ {
+			p.Stdout.Write([]byte(line))
+		}
+	}
+	if used := s.Table.Used(); used > MaxOutput || used < MaxOutput/2 {
+		t.Fatalf("captured %d bytes", used)
+	}
+	// An ended process's output is freed once read.
+	p := s.Table.Get("p1")
+	p.Exit(0, "", time.Now())
+	before := s.Table.Used()
+	r := s.Handle(Request{Key: "svc.output", Argv: []string{"output", "p1"}})
+	if r.Error != "" || len(r.Rows) == 0 || s.Table.Used() >= before {
+		t.Fatalf("output %d rows, used %d then %d", len(r.Rows), before, s.Table.Used())
+	}
+	if r := s.Handle(Request{Key: "svc.output", Argv: []string{"output", "p1"}}); len(r.Rows) != 0 {
+		t.Fatalf("read twice: %d rows", len(r.Rows))
+	}
+	// A running process's output stays.
+	s.Handle(Request{Key: "svc.output", Argv: []string{"output", "p2"}})
+	if r := s.Handle(Request{Key: "svc.output", Argv: []string{"output", "p2"}}); len(r.Rows) == 0 {
+		t.Fatal("running output freed")
+	}
+	for _, a := range [][]string{{"output", "p2", "x"}, {"output", "p2", "stderr", "tail", "2", "x"}, {"output", "p2", "tail"}} {
+		if r := s.Handle(Request{Key: "svc.output", Argv: a}); r.Error != "denied" {
+			t.Errorf("%v: %+v", a, r)
+		}
 	}
 }

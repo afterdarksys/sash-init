@@ -315,6 +315,10 @@ func (s *Server) output(a []string) (Response, error) {
 	for i, l := range tail.Lines(n) {
 		out.Rows = append(out.Rows, Row{"line": strconv.Itoa(i + 1), "text": l})
 	}
+	// An ended process's output is read once: then it is freed.
+	if p.Ended() {
+		tail.Free()
+	}
 	return out, nil
 }
 
@@ -492,6 +496,12 @@ func (s *Server) spawn(req Request) (Response, error) {
 			if !exact(plan.Caps, name) {
 				plan.Caps = append(plan.Caps, name)
 			}
+		}
+		// The sandbox gives an unprivileged child no ambient caps, so a
+		// cap that passed every check still could not be granted: refused
+		// plainly until a later batch makes caps work.
+		if len(plan.Caps) > 0 {
+			return Response{}, fail.E("caps_unsupported")
 		}
 	}
 	if raw, ok := opts["limits"]; ok {
