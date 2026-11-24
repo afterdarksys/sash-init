@@ -80,6 +80,9 @@ func runNotifyAdapter(args []string, out, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "notify_pipe_missing")
 		return 2
 	}
+	// The child must not inherit the ready pipe: it would hold the unit's
+	// readiness (and watchdog) without going through the checks below.
+	unix.CloseOnExec(fd)
 	pipe := os.NewFile(uintptr(fd), "ready")
 	defer pipe.Close()
 	path, err := unit.ResolveExec(f.Arg(0))
@@ -132,22 +135,7 @@ func runNotifyAdapter(args []string, out, stderr io.Writer) int {
 			if err != nil {
 				return
 			}
-			msgs, err := unix.ParseSocketControlMessage(oob[:on])
-			if err != nil {
-				continue
-			}
-			matched := false
-			for _, m := range msgs {
-				if rights, e := unix.ParseUnixRights(&m); e == nil {
-					for _, fd := range rights {
-						unix.Close(fd)
-					}
-				}
-				if cred, e := unix.ParseUnixCredentials(&m); e == nil && int(cred.Pid) == cmd.Process.Pid {
-					matched = true
-				}
-			}
-			if !matched || flags&(unix.MSG_TRUNC|unix.MSG_CTRUNC) != 0 {
+			if !fromChild(oob[:on], cmd.Process.Pid) || flags&(unix.MSG_TRUNC|unix.MSG_CTRUNC) != 0 {
 				continue
 			}
 			for _, line := range strings.Split(string(buf[:n]), "\n") {
@@ -182,4 +170,26 @@ func runNotifyAdapter(args []string, out, stderr io.Writer) int {
 			_ = cmd.Process.Signal(sig)
 		}
 	}
+}
+
+// fromChild reports whether a datagram's control data carries the
+// credentials of pid, the adapter's direct child. Any descriptors passed
+// along are closed.
+func fromChild(oob []byte, pid int) bool {
+	msgs, err := unix.ParseSocketControlMessage(oob)
+	if err != nil {
+		return false
+	}
+	matched := false
+	for _, m := range msgs {
+		if rights, e := unix.ParseUnixRights(&m); e == nil {
+			for _, fd := range rights {
+				unix.Close(fd)
+			}
+		}
+		if cred, e := unix.ParseUnixCredentials(&m); e == nil && int(cred.Pid) == pid {
+			matched = true
+		}
+	}
+	return matched
 }
