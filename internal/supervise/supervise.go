@@ -163,6 +163,8 @@ type runtime struct {
 	cgErr string
 	// sash is a sash unit's name table and entry results (sash.go).
 	sash *sashState
+	// journal limits the journal lines this service copies to the log.
+	journal *lineBucket
 }
 
 type ledGroup struct {

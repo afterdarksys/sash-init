@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -182,4 +183,43 @@ func TestSashEntryRefusals(t *testing.T) {
 	if err := sup.Check(t.Context(), "nope"); fail.Token(err) != "not_found" {
 		t.Fatalf("unknown: %v", err)
 	}
+}
+
+// A service's journal lines reach sahinit's log at most at the bucket's
+// rate; the rest are dropped and counted.
+func TestJournalRateLimit(t *testing.T) {
+	g := sash.SampleGrant("app", "app", "app")
+	sup, s, _, _ := grantSup(t, signed(t, g, testKey("fleet")))
+	var log syncLog
+	sup.Log = &log
+	now := time.Unix(1_700_000_000, 0)
+	s.journal = newLineBucket(func() time.Time { return now })
+	for i := 0; i < 1000; i++ {
+		sup.journalLine(s, "main", "stdout", "line\x1b")
+	}
+	if n := strings.Count(log.String(), "sash_output app main stdout: line?\n"); n != journalBurst {
+		t.Fatalf("%d lines logged, want %d", n, journalBurst)
+	}
+	now = now.Add(time.Second)
+	sup.journalLine(s, "main", "stdout", "again")
+	if !strings.Contains(log.String(), "sash_output_dropped app 800\n") || !strings.HasSuffix(log.String(), "sash_output app main stdout: again\n") {
+		t.Fatalf("log tail %q", log.String()[len(log.String())-120:])
+	}
+}
+
+type syncLog struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *syncLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *syncLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }

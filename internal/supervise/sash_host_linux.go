@@ -209,7 +209,7 @@ func (h *sashHost) Spawn(plan sash.SpawnPlan, p *sash.Proc) error {
 	writer := func(st sash.Stream, tail *sash.Tail, label string) (io.Writer, error) {
 		switch st.Kind {
 		case "journal":
-			tail.Copy = func(line string) { sup.logf("sash_output %s %s %s: %s", svc.Name, plan.Name, label, printable(line)) }
+			tail.Copy = func(line string) { sup.journalLine(s, plan.Name, label, line) }
 			return tail, nil
 		case "file":
 			f, err := openStream(st, uid, gid)
@@ -279,14 +279,4 @@ func (h *sashHost) Spawn(plan sash.SpawnPlan, p *sash.Proc) error {
 		p.Exit(code, sig, time.Now().UTC())
 	}()
 	return nil
-}
-
-// printable replaces control characters in a line copied to the log.
-func printable(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return '?'
-		}
-		return r
-	}, s)
 }

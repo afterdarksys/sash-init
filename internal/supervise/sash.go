@@ -31,6 +31,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -69,9 +70,9 @@ type sashState struct {
 	// so a blocked verb or entry never holds the cgroup kill.
 	sessions map[uint64]context.CancelFunc
 	nextSess uint64
-	serial  uint64
-	entries map[string]EntryResult
-	order   []string
+	serial   uint64
+	entries  map[string]EntryResult
+	order    []string
 }
 
 // EntryResult is the last result of one entry.
@@ -855,4 +856,80 @@ func (sup *Supervisor) statusRow(name string) (sash.Row, error) {
 		since = s.events[n-1].Time.UTC().Format(time.RFC3339)
 	}
 	return sash.Row{"name": name, "state": state, "since": since, "pid": strconv.Itoa(s.pid)}, nil
+}
+
+// lineBucket limits the journal lines one service copies to sahinit's log:
+// a token bucket of burst lines refilled at rate a second. Lines over it are
+// dropped and counted, and the count is reported with the next line let
+// through.
+type lineBucket struct {
+	mu      sync.Mutex
+	tokens  float64
+	last    time.Time
+	dropped int
+	rate    float64
+	burst   float64
+	now     func() time.Time
+}
+
+const (
+	journalRate  = 50
+	journalBurst = 200
+)
+
+func newLineBucket(now func() time.Time) *lineBucket {
+	if now == nil {
+		now = time.Now
+	}
+	return &lineBucket{tokens: journalBurst, rate: journalRate, burst: journalBurst, now: now, last: now()}
+}
+
+// allow reports whether a line may be logged, and how many were dropped
+// since the last one that was.
+func (b *lineBucket) allow() (bool, int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	t := b.now()
+	b.tokens += t.Sub(b.last).Seconds() * b.rate
+	if b.tokens > b.burst {
+		b.tokens = b.burst
+	}
+	b.last = t
+	if b.tokens < 1 {
+		b.dropped++
+		return false, 0
+	}
+	b.tokens--
+	d := b.dropped
+	b.dropped = 0
+	return true, d
+}
+
+// journalLine copies one journal line of a service's process to the log,
+// within the service's rate.
+func (sup *Supervisor) journalLine(s *runtime, proc, stream, line string) {
+	s.mu.Lock()
+	if s.journal == nil {
+		s.journal = newLineBucket(nil)
+	}
+	b := s.journal
+	s.mu.Unlock()
+	ok, dropped := b.allow()
+	if !ok {
+		return
+	}
+	if dropped > 0 {
+		sup.logf("sash_output_dropped %s %d", s.svc.Name, dropped)
+	}
+	sup.logf("sash_output %s %s %s: %s", s.svc.Name, proc, stream, printable(line))
+}
+
+// printable replaces control characters in a line copied to the log.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, s)
 }
