@@ -312,7 +312,10 @@ Refused on a sash unit (`sash_unit_field`): `exec`, `type`, `ready`,
 `execution.environment`.
 
 `sash --describe` limits: a ready or stop timeout or a restart delay above 5
-minutes, or a restart burst above 5, is `sash_lifecycle_limit`. Ordering names
+minutes, a restart burst above 5, or a restart window (`within`) shorter
+than the restart delay, is `sash_lifecycle_limit`. A sash unit's restarts
+also stop at `restart_limit` after its burst of consecutive crashes without
+a run that stayed ready for the stable period, as for exec units. Ordering names
 must be valid unit names (`sash_order_mismatch`). A non-zero exit, malformed
 output or no `start`/`run` entry is `sash_describe`. `sahinit plan` does not
 run describe; it checks only the unit file and the file permissions.

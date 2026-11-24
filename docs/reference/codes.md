@@ -241,7 +241,7 @@ holds the policy token) and, for sash units, `sash_start`, `sash_run`, `sash_sto
 | `sash_identity_mismatch` | describe's `user`/`group` are missing or do not resolve to the unit's uid/gid. | Create the account, or fix the unit's ids. |
 | `sash_order_mismatch` | describe's dependency names are invalid, or differ from the unit's `needs`/`after`/`wants`. | Remove the unit's lists or make them match. |
 | `sash_lifecycle_mismatch` | The unit's `restart` disagrees with describe's. | Remove it from the unit. |
-| `sash_lifecycle_limit` | A ready or stop timeout or restart delay over 5 minutes, or a restart burst over 5. | Lower it in the script. |
+| `sash_lifecycle_limit` | A ready or stop timeout or restart delay over 5 minutes, a restart burst over 5, or a restart window shorter than the restart delay. | Lower it in the script. |
 
 ## sash units: grant and floor (before every start)
 

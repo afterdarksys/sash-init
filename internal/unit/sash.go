@@ -261,8 +261,9 @@ func sameSet(a, b []string) bool {
 const MaxRestartBurst = 5
 
 // lifecycleLimits refuses a service block whose ready or stop timeout or
-// restart delay passes sahinit's unit timeout limit, or whose restart burst
-// passes MaxRestartBurst (sash_lifecycle_limit). Nothing is clamped: the
+// restart delay passes sahinit's unit timeout limit, whose restart burst
+// passes MaxRestartBurst, or whose restart window is shorter than its delay
+// (sash_lifecycle_limit). Nothing is clamped: the
 // script's author sees the refusal.
 //
 // Threats: describe output is the script's; without these bounds a service
@@ -276,6 +277,11 @@ func lifecycleLimits(d *sash.Description) error {
 		return bad
 	}
 	if r := d.Restart; r != nil && (r.Delay > maxTimeout || r.Burst > MaxRestartBurst) {
+		return bad
+	}
+	// A window shorter than the delay could never hold a burst: the
+	// window alone would let the unit restart forever.
+	if r := d.Restart; r != nil && r.Within > 0 && r.Within < r.Delay {
 		return bad
 	}
 	return nil
