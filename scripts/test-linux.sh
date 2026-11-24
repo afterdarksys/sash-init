@@ -10,7 +10,7 @@ if [ ! -f "$src/go.mod" ]; then
   echo "test-linux.sh: no sash repository at $src; set SASH_SRC" >&2
   exit 2
 fi
-src=$(cd "$src" && pwd)
+src=$(CDPATH= cd -- "$src" >/dev/null && pwd -P)
 docker build --target build --build-context sash="$src" -f tests/boot/Dockerfile -t sahinit-linux-test .
 # The cgroup tests refuse the real host hierarchy; Docker supplies a private
 # cgroup namespace. Privilege is needed for writable nested cgroups/Landlock.
