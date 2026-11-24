@@ -49,3 +49,11 @@ func (h *sashHost) ProbePath(string, string, string) bool { return false }
 func (h *sashHost) Signal(*sash.Proc, string) error { return fail.E("failed") }
 
 func (h *sashHost) Spawn(sash.SpawnPlan, *sash.Proc) error { return fail.E("failed") }
+
+func (h *sashHost) File(sash.FileOp) error { return fail.E("failed") }
+
+func (h *sashHost) Mount(sash.MountPlan) error { return fail.E("failed") }
+
+func (h *sashHost) Umount(string) error { return fail.E("failed") }
+
+func (h *sashHost) unmountAll(*sash.Table) {}

@@ -19,6 +19,9 @@ type fakeHost struct {
 	ready   map[string]bool
 	err     error
 	pid     int
+	files   []FileOp
+	mounts  []MountPlan
+	umounts []string
 }
 
 func (h *fakeHost) Spawn(plan SpawnPlan, p *Proc) error {
@@ -44,6 +47,21 @@ func (h *fakeHost) Status(service string) (Row, error) {
 		return Row{"name": service, "state": "ready", "since": "2026-11-23T00:00:00Z", "pid": "0"}, nil
 	}
 	return nil, fail.E("unknown_service")
+}
+
+func (h *fakeHost) File(op FileOp) error {
+	h.files = append(h.files, op)
+	return h.err
+}
+
+func (h *fakeHost) Mount(m MountPlan) error {
+	h.mounts = append(h.mounts, m)
+	return h.err
+}
+
+func (h *fakeHost) Umount(dir string) error {
+	h.umounts = append(h.umounts, dir)
+	return h.err
 }
 
 func (h *fakeHost) DialTCP(addr string) bool            { return h.ready["tcp "+addr] }
@@ -217,7 +235,7 @@ func TestSpawnRefusals(t *testing.T) {
 
 func TestGrantKeyAndUnsupportedAndCheck(t *testing.T) {
 	s, _ := newServer()
-	for _, key := range []string{"fs.mount", "file.write", "file.read", "ps", "unit.restart", ""} {
+	for _, key := range []string{"file.write", "file.read", "ps", "unit.restart", ""} {
 		if r := s.Handle(Request{Key: key, Argv: []string{"x"}}); r.Error != "unsupported" {
 			t.Errorf("%s: %+v", key, r)
 		}
@@ -365,8 +383,8 @@ func TestServeWire(t *testing.T) {
 	if got := send(body); got != `{"error":"env_refused"}` || strings.Contains(got, "hunter2") {
 		t.Fatalf("refused secret: %s", got)
 	}
-	if got := send(`{"key":"fs.mount","argv":["mount","tmpfs","/x"],"path":"","body":""}`); got != `{"error":"unsupported"}` {
-		t.Fatalf("mount: %s", got)
+	if got := send(`{"key":"file.write","argv":["\u003e","/run/app/x"],"path":"/run/app/x","body":"eA=="}`); got != `{"error":"unsupported"}` {
+		t.Fatalf("plain write: %s", got)
 	}
 	if got := send(`{"key":"svc.proc","argv":["proc","main"],"path":"","body":""}`); got != `{"error":"unknown_name"}` {
 		t.Fatalf("proc: %s", got)

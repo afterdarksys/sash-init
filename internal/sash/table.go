@@ -22,6 +22,8 @@ type Table struct {
 	procs  map[string]*Proc
 	order  []string
 	budget budget
+	// mounts are the mount points this service mounted, oldest first.
+	mounts []string
 	// Changed, when set, is called (without the table lock) whenever a
 	// process ends.
 	Changed func()
@@ -333,6 +335,43 @@ func (t *Tail) Lines(n int) []string {
 	}
 	if n > 0 && n < len(out) {
 		out = out[len(out)-n:]
+	}
+	return out
+}
+
+// Mount records a mount this service made at dir.
+func (t *Table) Mount(dir string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.mounts = append(t.mounts, dir)
+}
+
+// Mounted reports whether this service mounted dir.
+func (t *Table) Mounted(dir string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return exact(t.mounts, dir)
+}
+
+// Unmounted forgets the mount at dir.
+func (t *Table) Unmounted(dir string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i, d := range t.mounts {
+		if d == dir {
+			t.mounts = append(t.mounts[:i], t.mounts[i+1:]...)
+			return
+		}
+	}
+}
+
+// Mounts is every mount this service made, newest first.
+func (t *Table) Mounts() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]string, 0, len(t.mounts))
+	for i := len(t.mounts) - 1; i >= 0; i-- {
+		out = append(out, t.mounts[i])
 	}
 	return out
 }

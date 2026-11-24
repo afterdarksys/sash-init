@@ -445,6 +445,10 @@ func (sup *Supervisor) startSashLocked(ctx context.Context, s *runtime, gen uint
 	}
 	s.cg = sup.Cgroups
 	old := s.sash
+	s.mu.Unlock()
+	// Whatever an earlier start left mounted goes before the new table.
+	sup.sashUnmount(s)
+	s.mu.Lock()
 	s.sash = &sashState{table: table, serial: g.Serial, entries: map[string]EntryResult{}, sessions: map[uint64]context.CancelFunc{}}
 	if old != nil {
 		s.sash.entries, s.sash.order = old.entries, old.order
@@ -565,6 +569,7 @@ func (sup *Supervisor) sashFail(s *runtime, gen uint64, tok string, noRestart bo
 	if sup.Cgroups != nil {
 		sup.Cgroups.KillAll(s.svc.Name, timeoutOf(s.svc))
 	}
+	sup.sashUnmount(s)
 	sup.sashFinish(s, gen, false, tok, noRestart)
 	return fail.E(tok)
 }
@@ -644,6 +649,7 @@ func (sup *Supervisor) sashChanged(s *runtime, gen uint64) {
 		}
 	}
 	sup.sweepStrays()
+	sup.sashUnmount(s)
 	ok := !st.table.Failed()
 	tok := ""
 	if !ok {
@@ -751,6 +757,7 @@ func (sup *Supervisor) stopSashBody(ctx context.Context, s *runtime) error {
 	if sup.Cgroups != nil {
 		cgErr = sup.Cgroups.KillAll(svc.Name, timeout)
 	}
+	sup.sashUnmount(s)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pid, s.ready, s.stopReq = 0, false, false
@@ -940,4 +947,15 @@ func printable(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// sashUnmount unmounts what the service mounted, newest first, once its
+// processes are gone.
+func (sup *Supervisor) sashUnmount(s *runtime) {
+	s.mu.Lock()
+	st := s.sash
+	s.mu.Unlock()
+	if st != nil {
+		(&sashHost{sup: sup, s: s}).unmountAll(st.table)
+	}
 }

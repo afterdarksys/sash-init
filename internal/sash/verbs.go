@@ -38,6 +38,12 @@ import (
 
 // Host performs what the server has checked.
 type Host interface {
+	// File performs a checked file verb beneath op.Root.
+	File(op FileOp) error
+	// Mount performs a checked mount; Umount a checked umount of a mount
+	// this service made.
+	Mount(m MountPlan) error
+	Umount(dir string) error
 	// Spawn starts plan as p, in the service's cgroup, and arranges
 	// p.Exit when it ends and p.SetReady when it writes its readiness fd.
 	// It resolves the program with the trusted walk, the identity to the
@@ -111,6 +117,7 @@ type Server struct {
 var verbKeys = map[string]bool{
 	"svc.spawn": true, "svc.signal": true, "svc.wait": false, "svc.proc": false,
 	"svc.status": false, "svc.probe": false, "svc.output": false,
+	"fs.mount": true, "file.write": true,
 }
 
 var (
@@ -170,7 +177,7 @@ func (s *Server) Handle(req Request) (resp Response) {
 
 func (s *Server) handle(req Request) (Response, error) {
 	mutates, known := verbKeys[req.Key]
-	if !known {
+	if !known || req.Key == "file.write" && (len(req.Argv) == 0 || !fileOps[req.Argv[0]]) {
 		return Response{}, errUnsupported
 	}
 	if !s.G.Has(req.Key) {
@@ -261,6 +268,10 @@ func (s *Server) handle(req Request) (Response, error) {
 		return rows([]string{"name", "state", "since", "pid"}, row), nil
 	case "svc.probe":
 		return s.probe(a)
+	case "file.write":
+		return s.file(req)
+	case "fs.mount":
+		return s.mount(a)
 	}
 	return Response{}, errUnsupported
 }
