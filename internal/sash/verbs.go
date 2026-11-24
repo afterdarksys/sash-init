@@ -225,7 +225,7 @@ func (s *Server) handle(req Request) (Response, error) {
 		if p.Ended() {
 			state = "exited"
 		}
-		return rows([]string{"name", "pid", "state", "started_at"}, Row{"name": p.Name, "pid": strconv.Itoa(p.Pid), "state": state, "started_at": stamp(p.Started)}), nil
+		return rows([]string{"name", "pid", "state", "started_at"}, Row{"name": p.Name, "pid": strconv.Itoa(p.Pid()), "state": state, "started_at": stamp(p.StartedAt())}), nil
 	case "svc.output":
 		return s.output(a)
 	case "svc.status":
@@ -534,7 +534,7 @@ func (s *Server) spawn(req Request) (Response, error) {
 			return Response{}, fail.E("failed")
 		}
 	}
-	return rows([]string{"name", "pid", "started_at"}, Row{"name": p.Name, "pid": strconv.Itoa(p.Pid), "started_at": stamp(p.Started)}), nil
+	return rows([]string{"name", "pid", "started_at"}, Row{"name": p.Name, "pid": strconv.Itoa(p.Pid()), "started_at": stamp(p.StartedAt())}), nil
 }
 
 // env checks the env map: each name on the grant's allowlist and off the

@@ -27,24 +27,24 @@ type Table struct {
 // NewTable is an empty table.
 func NewTable() *Table { return &Table{procs: map[string]*Proc{}} }
 
-// Proc is one spawned process.
+// Proc is one spawned process. Its pid, start time and host handle are
+// set once, by the host's Spawn, while other goroutines may read the table.
 type Proc struct {
-	Name    string
-	Pid     int
-	Started time.Time
-	Stdout  *Tail
-	Stderr  *Tail
-	// Handle is the host's (a pidfd, a command).
-	Handle any
+	Name   string
+	Stdout *Tail
+	Stderr *Tail
 
-	mu     sync.Mutex
-	done   chan struct{}
-	ended  bool
-	exit   int
-	signal string
-	at     time.Time
-	ready  bool
-	table  *Table
+	mu      sync.Mutex
+	pid     int
+	started time.Time
+	handle  any
+	done    chan struct{}
+	ended   bool
+	exit    int
+	signal  string
+	at      time.Time
+	ready   bool
+	table   *Table
 }
 
 // Reserve binds name to a new process record, or is false when a process
@@ -105,6 +105,35 @@ func (t *Table) Running() int {
 		}
 	}
 	return n
+}
+
+// Started records what the host started: pid, start time and its handle
+// (a pidfd, a command).
+func (p *Proc) Started(pid int, at time.Time, handle any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pid, p.started, p.handle = pid, at, handle
+}
+
+// Pid is the process id, 0 before Started.
+func (p *Proc) Pid() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.pid
+}
+
+// StartedAt is the start time.
+func (p *Proc) StartedAt() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.started
+}
+
+// Handle is the host's handle.
+func (p *Proc) Handle() any {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.handle
 }
 
 // Ended reports whether the process has exited and been collected.

@@ -113,7 +113,7 @@ func (h *sashHost) ProbePath(kind, root, p string) bool {
 }
 
 func (h *sashHost) Signal(p *sash.Proc, sig string) error {
-	c, ok := p.Handle.(*sashChild)
+	c, ok := p.Handle().(*sashChild)
 	n, known := signalNumber[sig]
 	if !ok || !known {
 		return fail.E("failed")
@@ -256,7 +256,7 @@ func (h *sashHost) Spawn(plan sash.SpawnPlan, p *sash.Proc) error {
 		return fail.E("failed")
 	}
 	child := &sashChild{pidfd: openPidfd(cmd.Process.Pid)}
-	p.Pid, p.Started, p.Handle = cmd.Process.Pid, time.Now().UTC(), child
+	p.Started(cmd.Process.Pid, time.Now().UTC(), child)
 	if notifyR != nil {
 		go func() {
 			var b [1]byte

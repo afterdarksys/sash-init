@@ -745,7 +745,7 @@ func (s *runtime) sashRowLocked() *SashRow {
 		r.Entries = append(r.Entries, st.entries[e])
 	}
 	for _, p := range st.table.All() {
-		row := SashProc{Name: p.Name, Pid: p.Pid, State: "running", Started: p.Started.UTC()}
+		row := SashProc{Name: p.Name, Pid: p.Pid(), State: "running", Started: p.StartedAt().UTC()}
 		if p.Ended() {
 			code, sig, _ := p.Result()
 			row.State, row.Exit, row.Signal = "exited", &code, sig

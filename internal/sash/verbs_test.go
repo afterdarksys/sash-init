@@ -24,7 +24,7 @@ func (h *fakeHost) Spawn(plan SpawnPlan, p *Proc) error {
 		return h.err
 	}
 	h.pid++
-	p.Pid, p.Started = 1000+h.pid, time.Unix(1_700_000_000, 0)
+	p.Started(1000+h.pid, time.Unix(1_700_000_000, 0), nil)
 	h.spawned = append(h.spawned, plan)
 	return nil
 }

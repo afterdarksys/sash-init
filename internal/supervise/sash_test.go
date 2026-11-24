@@ -147,7 +147,7 @@ func TestSashStatusRows(t *testing.T) {
 	s.sash = &sashState{table: sash.NewTable(), serial: 9, entries: map[string]EntryResult{}}
 	s.mu.Unlock()
 	p, _ := s.sash.table.Reserve("main")
-	p.Pid, p.Started = 4242, time.Unix(1_700_000_000, 0)
+	p.Started(4242, time.Unix(1_700_000_000, 0), nil)
 	s.recordEntry("start", 0, "")
 	row, err := sup.statusRow("app")
 	if err != nil || row["state"] != "ready" || row["name"] != "app" || row["since"] == "" {
@@ -166,6 +166,7 @@ func TestSashStatusRows(t *testing.T) {
 			t.Errorf("status holds %s: %s", bad, raw)
 		}
 	}
+	p.Exit(0, "", time.Now())
 }
 
 func TestSashEntryRefusals(t *testing.T) {

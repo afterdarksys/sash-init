@@ -451,3 +451,54 @@ func TestSashHostRechecks(t *testing.T) {
 	}
 	waitGone(t, pid)
 }
+
+// The service block's restart policy, delay and burst apply: a start that
+// exits 1 is retried until the burst is spent; a service whose processes
+// die is started again.
+func TestSashRestartPolicyEndToEnd(t *testing.T) {
+	e := newSashEnv(t)
+	e.add("flaky", "service {\n  name flaky\n  user nobody\n  group nogroup\n  restart on-failure delay 100ms burst 2 within 60s\n}\n\nfn start() {\n  exit 1\n}\n",
+		e2eGrant("flaky", []string{"/usr/bin/sleep"}, []string{}), e.fleet)
+	e.add("phoenix", "service {\n  name phoenix\n  user nobody\n  group nogroup\n  run /usr/bin/sleep 300\n  restart on-failure delay 100ms burst 3 within 60s\n}\n",
+		e2eGrant("phoenix", []string{"/usr/bin/sleep"}, []string{}), e.fleet)
+	var log syncBuf
+	sup, refused := e.load(&log)
+	if len(refused) != 0 {
+		t.Fatalf("refused %v", refused)
+	}
+	if err := sup.Start(t.Context(), "flaky"); fail.Token(err) != "failed" {
+		t.Fatalf("flaky start: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		r := rowOf(t, sup, "flaky")
+		if r.State == "failed" && r.LastError == "restart_limit" {
+			if r.Restarts != 2 {
+				t.Fatalf("restarts %+v", r)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("flaky %+v", r)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := sup.Start(t.Context(), "phoenix"); err != nil {
+		t.Fatal(err)
+	}
+	first := rowOf(t, sup, "phoenix").Sash.Procs[0].Pid
+	if err := os.WriteFile(filepath.Join("/sys/fs/cgroup", rowOf(t, sup, "phoenix").Cgroup, "cgroup.kill"), []byte("1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		r := rowOf(t, sup, "phoenix")
+		if r.State == "running" && r.Restarts == 1 && len(r.Sash.Procs) == 1 && r.Sash.Procs[0].Pid != first && r.Sash.Procs[0].State == "running" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("phoenix %+v %+v", r, r.Sash)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
