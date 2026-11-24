@@ -41,12 +41,15 @@ These are not errors, but they are part of the same vocabulary.
 | `stopping` | state, event | A stop is in progress. |
 | `exited` | state, event | A oneshot that exited 0; as an event, the main process exited (with `exit`). |
 | `failed` | state | The last start or run failed; see `last_error`. |
+| `blocked` | state, event | Desired, but a `needs` provider is not ready (`last_error` `needs_not_ready`) or failed (`needs_failed`). The supervisor starts it when the provider is ready again. `ctl stop` makes it `stopped`. |
 | `started` | event | The process was launched. |
 | `ready` | event | Readiness was reached. |
 | `ended` | event | A sash service ended: no spawned process is left. |
 
 The other event kinds are `launch_failed`, `timeout`, `restart_limit`,
-`cgroup_stuck` and, for sash units, `sash_start`, `sash_run`, `sash_stop`,
+`cgroup_stuck`, `watchdog` (a notify unit missed its watchdog and was
+killed), `admission_denied` (a deployment's policy refused a start; `code`
+holds the policy token) and, for sash units, `sash_start`, `sash_run`, `sash_stop`,
 `sash_reload` and `sash_check` (the entry's exit code in `exit`, the token in
 `code`).
 
@@ -75,6 +78,9 @@ The other event kinds are `launch_failed`, `timeout`, `restart_limit`,
 | `sandbox_privs` | `no_new_privs` is `false`. | Remove it or set `true`. |
 | `sandbox_path` | A sandbox path is not absolute and clean, or at launch is missing or contains a symlink. | Use the resolved real path. |
 | `sandbox_overlap` | A path is listed twice, or in both lists after resolution. | |
+| `essential_requires_boot` | `"essential": true` on a unit with `"boot": false`. | Remove it; only boot units are essential. |
+| `restart_delay_invalid` | `restart_delay` or `restart_max_delay` is not a duration string from `10ms` to `5m`, or the maximum is below the delay. | See [restart](units.md#types-readiness-and-restart). |
+| `watchdog_invalid` | `watchdog` is not a duration string from `100ms` to `5m`, or the unit's `ready` is not `notify`. | |
 | `sandbox_cap` | An unknown capability name, or the helper could not keep a listed capability (always the case today for a non-root unit). | Leave `caps` empty. |
 
 ## Dependency graph
@@ -99,6 +105,9 @@ The other event kinds are `launch_failed`, `timeout`, `restart_limit`,
 | `sandbox_timeout` | The sandbox helper did not report within the deadline. | Check system load; see the unit's diagnostics. |
 | `sandbox_unsupported` | A sandbox was asked for off Linux. | Run on Linux or drop the sandbox. |
 | `launch_failed` | Event kind: a launch failed; its `code` holds the reason. | Read the event's code. |
+| `artifact_digest` | A deployment unit's executable does not hash to its signed `sha256` at launch (it is hashed on every start), or a bundle or generation file does not match the manifest. | The generation was changed on disk: stage a fresh one from a trusted bundle. |
+| `verified_exec_unavailable` | A deployment unit's executable could not be opened for reading (only an `O_PATH` descriptor), or the platform is not Linux, so it cannot be hashed; the launch is refused. | Run deployments on Linux, as root. |
+| `watchdog` | `last_error` and event kind: a notify unit with `watchdog` closed its notify pipe or sent no byte within the interval, and its process group was killed. The restart policy then applies. | Read its diagnostics; with `notify-adapter`, match `--watchdog` to the unit. |
 
 ## Lifecycle and control
 
@@ -114,6 +123,72 @@ The other event kinds are `launch_failed`, `timeout`, `restart_limit`,
 | `uid_denied` | The peer's uid is not allowed (not the supervisor's uid, or not in `--uid`), or its credentials could not be read. | Run `ctl` as an allowed uid. |
 | `peer_supervised` | The peer is a supervised process: inside the cgroup root (a service, the supervisor's leaf, an unknown cgroup), in a process group a service led, or gone before the check. A process in the root itself or `.control` is accepted only while the root is protected. | Run `ctl` from outside the services, e.g. an admin shell or the outer manager. |
 | `frame_size` | A control frame is empty or over 64 KiB. | |
+| `root_required` | `diff`, `apply`, `rollback` or `activate` from a peer whose effective uid is not 0. | Run `ctl` as root. |
+
+## Live catalog changes (`ctl diff`, `apply`, `rollback`, `validate`)
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `catalog_path` | The `--dir` sent with `diff` or `apply` is not absolute. | Pass an absolute directory. |
+| `catalog_refused` | A unit file in the candidate catalog was refused (`validate` lists them in `refused`). | Fix each refused file. |
+| `catalog_sash` | The running or the candidate catalog has a sash unit: live changes replace runtimes, and a sash unit's described script, grant and mounts are not carried across. | Change such a catalog by restarting the supervisor. |
+| `apply_rolled_back` | A unit of the new catalog failed to stop or start, and the old catalog and desired states were restored. `rolled_back` is true in the diff. | Read the failing unit's diagnostics; fix and apply again. |
+| `rollback_failed` | Restoring the old catalog after a failed apply or activation also failed. The running state is the mix the response's diff describes. | Inspect `ctl status`; restart the supervisor if needed. |
+| `no_previous_catalog` | `rollback` with no earlier `apply`. | |
+| `shutting_down` | A catalog change while the supervisor is stopping. | |
+| `signed_activation_required` | `apply` while running a deployment: unsigned catalogs are refused. | Stage a generation and `ctl activate`. |
+| `new_policy_required` | `rollback` while running a deployment. | Restore earlier content with a newly signed, higher-sequence generation. |
+
+## Journal
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `journal_unavailable` | Log `journal_unavailable TOKEN`: `--log-dir` could not be opened; the supervisor runs without a journal (output stays in the in-memory tails). TOKEN is one of the codes below or `failed` (for example a read-only file system). | Fix the directory, then restart the supervisor. |
+| `journal_path` | `--log-dir` is not absolute. | |
+| `journal_limits` | Internal size limits out of range. | |
+| `journal_perm` | The directory or a journal file fails the trusted walk, has group or other access, is not a regular file with one link, or is owned by someone other than root or the supervisor's uid. | `install -d -m 700 -o root /var/log/sahinit`. |
+| `journal_busy` | Another supervisor holds the journal's lock. | One supervisor per journal. |
+| `journal_torn_record` | The current file ends in a record larger than the limit without a newline; it is not repaired automatically. | Move the file aside. |
+| `journal_size` | A journal file is over 64 MiB. | Move the file aside. |
+| `journal_read` | `logs` or `events` could not read the journal. | Check the directory, the owner and that you run as it. |
+
+## Deployments (`deploy`, `ctl activate`, `supervise --deployment-root`)
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `deployment_path` | `--root` is not absolute and clean. | |
+| `deployment_perm` | The root, a pointer or a generation file fails the trusted walk, has the wrong owner, or the root has group or other access. | `chmod 700`, owner root. |
+| `deployment_busy` | Another `deploy` or activation holds the deployment lock. | Retry. |
+| `deployment_size` | A unit file over 64 KiB, an artifact over 64 MiB, or a bundle over 256 MiB. | |
+| `deployment_state` | `state.json` names an invalid generation. | Repair the pointer file from `deploy status` of a good copy. |
+| `deployment_durability` | The active pointer was renamed but its directory could not be synced: the candidate runs and is active, but may not survive a crash. | Check the storage before the next change. |
+| `deployment_jobs` | The policy has `jobs` or `offline_jobs`, or the manifest has `jobs` or `resources`. Boot jobs are not supported. | Remove them; run setup as oneshot units. |
+| `deployment_sash` | A deployment unit is a sash unit. Deployments carry exec units only. | Deploy sash units through `--dir`. |
+| `deployment_no_pending` | `ctl activate` with no pending generation. | `deploy stage` first. |
+| `deployment_not_configured` | `ctl activate` on a supervisor without `--deployment-root`. | |
+| `boot_in_progress` | `ctl activate` before the boot waves ended, or after boot failed. | Wait for boot. |
+| `bootstrap_refused` | `deploy bootstrap` with an active generation already, or no pending one. | Use `ctl activate` for later changes. |
+| `manifest_read` | The manifest file could not be read (missing, wrong owner or mode, over 256 KiB). | |
+| `manifest_shape` | Wrong `version`, missing arrays, no units, over 256 units or artifacts, or nesting too deep. | See [the bundle format](../deployments.md#bundle-format). |
+| `manifest_path` | A manifest path is absolute, unclean, escapes the bundle, repeats, or its digest is not 64 lowercase hex digits. | |
+| `manifest_unit` | A unit path is not `units/NAME.json` with a valid name. | |
+| `manifest_artifact` | An artifact path is not under `artifacts/`. | |
+| `manifest_exec` | A unit's `exec[0]` is not `@/artifacts/...` naming a manifest artifact. | |
+| `catalog_digest` | The manifest's bytes do not hash to the policy's `catalog_sha256`. | Sign the manifest you ship, byte for byte. |
+| `catalog_units` | The policy's unit list and the manifest's units differ in number. | |
+| `catalog_dependencies` | A policy unit is missing from the manifest, or its `needs` differ from the unit file's. | |
+| `generation_conflict` | A generation with this ID exists with a different policy, or an ID does not match its content. | |
+| `generation_invalid` | A pointer names a malformed generation ID. | |
+| `pending_changed` | The pending pointer changed during activation. | Retry `ctl activate`. |
+| `activation_commit` | The new generation ran but the active pointer could not be written; the old catalog was restored. | Check the storage, then activate again. |
+| `policy_unit_denied` | The policy does not admit this start now: the unit is not in it, or the policy is in grace and the unit is not in `offline_units`, or it is expired and this is not an automatic restart of a `runtime_restart_units` unit. | Renew the policy (stage and activate a newer one). |
+
+## Host helpers (`sahinit host`)
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `device_timeout` | `device-wait` timed out before the device node appeared. | Check the driver or raise `--timeout`. |
+| `notify_pipe_missing` | `notify-adapter` was not given the notify pipe as fd 3: the unit is not `"ready": "notify"`. | Set `"ready": "notify"`. |
 
 ## Control socket (supervise start)
 
@@ -145,7 +220,7 @@ The other event kinds are `launch_failed`, `timeout`, `restart_limit`,
 | Code | Meaning | What to do |
 | --- | --- | --- |
 | `boot_refused` | With `--boot-strict`, a unit file, a limit or a sash unit was refused, so the whole boot is refused. | Run `sahinit plan --dir DIR` (and `supervise` without `--boot-strict` in a test) to see each refusal. |
-| `boot_service_failed` | Log `boot_service_failed NAME`: in strict boot a boot unit became `failed` (a non-zero exit, a signal, a failed start, `restart_limit`); a long-running unit that exits 0 is `stopped` and not caught. The supervisor stops and PID 1 enters recovery. | Read `NAME`'s diagnostics in recovery; fix and send SIGHUP to PID 1. |
+| `boot_service_failed` | Log `boot_service_failed NAME`: in strict boot an essential unit (every boot unit not marked `"essential": false`) was not ready when the boot waves ended, or later became `failed` (a non-zero exit, a signal, a failed start, `restart_limit`, `watchdog`) or `stopped` on its own, or waits on a `needs` provider that did. The supervisor stops and PID 1 enters recovery. | Read `NAME`'s diagnostics in recovery; fix (or mark the unit `"essential": false`) and send SIGHUP to PID 1. |
 
 ## sash units: load
 

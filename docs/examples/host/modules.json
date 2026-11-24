@@ -1,0 +1,7 @@
+{
+  "name": "modules",
+  "exec": ["/sbin/modprobe", "virtio_net"],
+  "type": "oneshot",
+  "ready": "exit",
+  "boot": true
+}

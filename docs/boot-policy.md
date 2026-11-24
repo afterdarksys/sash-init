@@ -4,6 +4,8 @@ Implemented: strict Ed25519 verification, local trust ceilings, validity states,
 renewal ordering, a signed lifetime mode (`never` or `renew`), a signed
 revocation floor, and a durable metadata cache. **This does not enforce boot policy
 in the supervisor, validate catalog artifacts, start recovery, or run sash jobs.**
+The one exception is a [verified deployment](deployments.md), where the
+supervisor admits exec units by a staged policy; boot jobs are refused there.
 Every CLI report says `"enforcement":"metadata_only"`. An optional renewal
 worker (`sahinit policy refresh`) fetches `renew` policies from one provisioned
 HTTPS endpoint; see [renewal worker](#renewal-worker-renew-mode-only). No

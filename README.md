@@ -7,7 +7,10 @@ troubleshooting) and the security model.
 
 **Current scope.** `supervise` under an existing init with a delegated cgroup
 v2 is the supported mode. PID 1 mode is **experimental** (QEMU initramfs boots
-only). Boot policy is **metadata only**: verified and cached, never enforced.
+only). Boot policy is **metadata only** for `--dir` catalogs: verified and
+cached, never enforced; a [verified deployment](docs/deployments.md)
+(`--deployment-root`, exec units only) is the one mode where a signed policy
+admits units, and it has no issuer yet.
 sash services run with test-made grants and floors: there is no fleet signer
 and no policy issuer yet. Sandboxed units cannot hold capabilities and the
 network is not confined. There are no packaged releases.

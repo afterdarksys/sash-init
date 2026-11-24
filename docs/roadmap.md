@@ -4,10 +4,14 @@ The [reference documentation](reference/README.md) describes what exists today;
 this page is what does not, yet. Current scope, stated plainly:
 
 - `supervise` under an existing init is the supported mode.
-- PID 1 mode is experimental: initramfs QEMU boots only, no persistent-disk
-  teardown proof, no switch-root, storage discovery or watchdog.
-- Boot policy is metadata only: nothing admits or refuses a unit from it,
-  and there is no SystemAPI issuer.
+- PID 1 mode is experimental: QEMU boots only (initramfs images and a
+  disposable ext4 root booted twice through `contrib/initramfs/init`, which
+  does the fsck and switch-root); no storage discovery beyond
+  `sahinit.root=/dev/...` and no hardware watchdog.
+- Boot policy is metadata only for `--dir` catalogs. Verified deployments
+  (`--deployment-root`) admit exec units by policy; they carry no sash units
+  and no boot jobs (boot jobs are to become sash/2 services), and there is no
+  SystemAPI issuer or artifact downloader.
 - sash services (batches 1 and 2) work against test-made grants and floors;
   there is no fleet signer, the grant's `host` is not checked, and spawned
   processes cannot receive capabilities.

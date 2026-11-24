@@ -56,6 +56,10 @@ decoded strictly:
 | `wants` | array of strings | no | none | As `needs`, but an absent unit is ignored. |
 | `timeout` | string | no | `5s` | A Go duration (`500ms`, `30s`, `2m`), more than 0 and at most `5m` (`timeout_range`). |
 | `boot` | bool | no | `true` for `simple`, `false` for `oneshot` | Whether boot starts it. |
+| `essential` | bool | no | the value of `boot` | Only meaningful with `supervise --boot-strict` (PID 1): an essential unit's failure sends the host to recovery. `true` needs `"boot": true` (`essential_requires_boot`). Set `false` to let a boot unit fail alone. See [strict boot](cli.md#sahinit-supervise). |
+| `restart_delay` | string | no | `100ms` | A Go duration from `10ms` to `5m` (`restart_delay_invalid`): the first automatic restart's delay. |
+| `restart_max_delay` | string | no | `30s` | From `10ms` to `5m`, not below `restart_delay` (`restart_delay_invalid`): the cap of the growing delay. |
+| `watchdog` | string | no | none | From `100ms` to `5m`; needs `"ready": "notify"` (`watchdog_invalid`). See [watchdog](#watchdog). |
 | `execution` | object | no | supervisor identity, `/`, environment with only the default `PATH` | See [execution](#execution). |
 | `sandbox` | object | no | no sandbox | See [sandbox](#sandbox). Requires a non-root `execution.uid` (`sandbox_root`). |
 | `memory_max` | string | no | no limit | See [limits](#limits). |
@@ -117,15 +121,28 @@ fields: stop is always SIGTERM to the process group, then SIGKILL (see
 - A oneshot that exits non-zero is `failed`.
 - `restart` applies to a `simple` unit whose process exits after it was
   ready (or at any time with `ready: exec`): `always` restarts after any exit,
-  `on-failure` after a non-zero exit or a signal. There is no delay between
-  restarts. At most 5 restarts in any 30 s; the next exit is then `failed`
-  with `restart_limit`. A manual start resets the count.
+  `on-failure` after a non-zero exit or a signal. The n-th restart within
+  the window waits `restart_delay` × 2^(n−1), capped at `restart_max_delay`,
+  scaled by a random 80–100 % (so never above the cap); during the wait the
+  state is `starting`. At most 5 restarts in any 30 s; the next exit is then
+  `failed` with `restart_limit`. A manual start resets the count. A unit whose
+  `needs` provider is not ready when the delay ends becomes `blocked`.
 - A stop is never followed by a restart.
+
+### Watchdog
+
+A `"ready": "notify"` unit with `watchdog` keeps its notify pipe (fd 3) open
+after the readiness byte and must write another byte within every interval.
+End of file on the pipe or a missed interval kills the process group; the
+unit's `last_error` and event are `watchdog`, and its restart policy applies.
+For a program that speaks sd_notify, run it through
+[`sahinit host notify-adapter`](cli.md#sahinit-host) with the same interval.
+This is a service watchdog, not a hardware (`/dev/watchdog`) one.
 
 ### Lifecycle
 
 States: `stopped`, `starting`, `running`, `stopping`, `exited` (a finished
-oneshot), `failed`. Stop sends SIGTERM to the process group, waits up to
+oneshot), `failed`, `blocked` (desired, waiting for a `needs` provider). Stop sends SIGTERM to the process group, waits up to
 `timeout`, then SIGKILLs. With cgroups, whenever the main process exits for any
 reason everything left in the service's cgroup is killed, and the service has
 ended only when the cgroup is empty; otherwise it fails with `cgroup_stuck`.
@@ -140,15 +157,18 @@ answers `arg_required`. Arguments are never logged.
 
 - `needs`: the unit starts only when each named unit is running and ready, or
   has exited successfully (a oneshot). A failed one makes the start fail with
-  `needs_failed` (the unit is marked failed); one not yet ready is
-  `needs_not_ready`.
+  `needs_failed`, one not yet ready with `needs_not_ready`; either way the
+  unit becomes `blocked`. The supervisor checks every 200 ms: a running unit
+  whose provider is no longer ready is stopped and `blocked` (dependents
+  first), and a `blocked` unit starts once its providers are ready (providers
+  first). A unit an operator stopped is not desired and is left alone.
 - `after`: ordering only; no requirement.
 - `wants`: ordering when the named unit exists; ignored when it does not.
 - The whole catalog, including non-boot units, must be acyclic (`cycle`).
 - A boot unit may not `needs` a non-boot unit (`boot_needs`).
 - Boot runs waves in order; units in one wave start in parallel. A failed
-  unit does not stop later waves (except in strict host boot, where any boot
-  failure enters recovery).
+  unit does not stop later waves. In strict host boot an essential unit's
+  failure then enters recovery (see `essential`).
 - Shutdown stops every unit, including ones started by hand, in reverse wave
   order; units in one wave stop in parallel.
 
@@ -277,11 +297,12 @@ action the script asks for is checked against its signed grant. See
 | `sandbox` | object | yes | | Required (`sash_sandbox`); rules as above. The unit must not be cgroup-trusted (`sash_cgroup_trusted`). |
 | `restart` | string | no | from describe | If set, must equal describe's policy (`no` equals sash's `never`) (`sash_lifecycle_mismatch`). |
 | `needs`, `after`, `wants` | arrays | no | from describe | If set, must be the same set as describe's `requires`, `after`, `wants` (`sash_order_mismatch`). |
-| `boot` | bool | no | `true` | |
+| `boot` | bool | no | `true` | A sash boot unit is always essential in strict boot; it has no `essential` field. |
 | `memory_max`, `cpu_max`, `pids_max` | | no | none | As above. |
 
 Refused on a sash unit (`sash_unit_field`): `exec`, `type`, `ready`,
-`timeout`, `execution.groups`, `execution.directory`,
+`timeout`, `essential`, `restart_delay`, `restart_max_delay`, `watchdog`,
+`execution.groups`, `execution.directory`,
 `execution.environment`.
 
 `sash --describe` limits: a ready or stop timeout or a restart delay above 5
@@ -299,6 +320,7 @@ run describe; it checks only the unit file and the file permissions.
 | `name_invalid`, `name_mismatch` | `name` grammar; file name differs |
 | `exec_relative` | `exec[0]` not absolute and clean |
 | `type_invalid`, `ready_invalid`, `restart_invalid`, `timeout_range` | the fields above |
+| `essential_requires_boot`, `restart_delay_invalid`, `watchdog_invalid` | `essential`, the restart delays, `watchdog` |
 | `edge_empty` | an empty dependency name |
 | `execution_invalid` | any `execution` rule |
 | `sandbox_root`, `sandbox_privs`, `sandbox_path`, `sandbox_overlap`, `sandbox_cap` | sandbox rules |

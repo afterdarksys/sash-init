@@ -6,9 +6,12 @@ sahinit. Flags are in [cli](cli.md), unit fields in [units](units.md), files in
 
 **Scope today.** `supervise` is the supported way to run sahinit: under an
 existing init with a delegated cgroup v2. PID 1 mode is **experimental**: it is
-exercised in QEMU initramfs boots, not on persistent-disk hosts. Boot policy is
-**metadata only**: nothing admits or blocks a unit from it. sash services run
-with test-made grants and floors; there is no fleet signer yet.
+exercised in QEMU boots (initramfs images, and a disposable ext4 disk booted
+twice), not on real hosts. Boot policy is **metadata only** for `--dir`
+catalogs: nothing admits or blocks a unit from it. A [deployment](../deployments.md)
+(`--deployment-root`) is the one place a signed policy admits units; there is
+no issuer for it yet. sash services run with test-made grants and floors;
+there is no fleet signer yet.
 
 ## Requirements
 
@@ -122,18 +125,75 @@ configure the network (those are services).
 4. Verify in a VM first: `python3 scripts/test-boot.py`.
 
 What PID 1 does, in order: makes `/` mount propagation private; mounts
-`/proc`, `/sys`, `/dev`, `/run` and `/sys/fs/cgroup` where missing; opens
+`/proc`, `/sys`, `/dev`, `/dev/pts`, `/dev/shm`, `/run` and `/sys/fs/cgroup`
+where missing; creates a sticky `/tmp` when missing; opens
 `/dev/console`; disables Ctrl-Alt-Del's immediate reboot (it becomes SIGINT);
 creates `/run/sahinit` (0700) and `/sys/fs/cgroup/sahinit/supervisor`; checks
 for `cgroup.kill`; enables `cpu`, `memory` and `pids`; starts
 `sahinit supervise --boot-strict ...` in `/sys/fs/cgroup/sahinit/supervisor`
 with only `PATH`, `HOME=/root` and `TERM=linux`; then reaps every orphan.
 
-In strict boot **every boot unit is essential**: any refused unit file or
-limit, a graph error, a failed boot wave, or a boot unit that later becomes
-`failed` (a non-zero exit, a signal, `restart_limit`) stops the supervisor, and PID 1 enters recovery. A
-oneshot that exited 0 and a unit stopped with `ctl stop` are fine. Test a
-catalog with plain `supervise` (without `--boot-strict`) before booting it.
+In strict boot **every boot unit is essential unless it says
+`"essential": false`**: any refused unit file or limit, a graph error, an
+essential unit that is not ready when the boot waves end, or one that later
+becomes `failed` (a non-zero exit, a signal, `restart_limit`, `watchdog`),
+stops on its own, or waits on a failed `needs` provider, stops the supervisor,
+and PID 1 enters recovery. A oneshot that exited 0, a unit in an automatic
+restart and a unit stopped with `ctl stop` are fine. Mark units the machine
+can live without (a getty, a DHCP client) `"essential": false`; their
+failure stays theirs, and their dependents wait (`blocked`). Test a catalog
+with plain `supervise` (without `--boot-strict`) and `sahinit validate`
+before booting it.
+
+### Persistent ext4 root
+
+`contrib/initramfs/init` is a BusyBox initramfs `/init` for a local ext4
+root. **It, not sahinit, checks the filesystem and switches root**: it mounts
+`/proc`, `/sys` and `/dev`, reads `sahinit.root=/dev/DEVICE` from the kernel
+command line (split on whitespace with globbing off, never evaluated), loads
+`virtio_pci`, `virtio_blk` and `ext4` if they are modules, waits up to 10 s
+for the device, runs `e2fsck -p` (exit 0 or 1 continue; anything else fails),
+mounts the root read-write, moves `/proc`, `/sys` and `/dev`, and
+`switch_root`s to `/sbin/sahinit init` with the arguments the kernel passed
+to `/init`. On any failure it execs the initramfs's `/sahinit init --dir
+/etc/sahinit/failed` (a missing catalog, so strict boot fails and PID 1 waits
+in recovery); it never opens a shell. Package it with a static BusyBox,
+`/sahinit`, `e2fsck` and its libraries, and the kernel's modules;
+`tests/boot/make-images.sh` is a working example. Encrypted, LVM, RAID,
+UUID-addressed and network roots are not handled.
+
+At shutdown PID 1 runs `swapoff` on every area in `/proc/swaps` before
+unmounting; it never enables swap. `python3 scripts/test-boot.py --scenario
+persistent` boots a disposable ext4 image twice and checks it offline with
+`e2fsck -fn` after each shutdown.
+
+### Console and host services
+
+PID 1 mounts devpts (so `/dev/ptmx` and `/dev/pts/N` work) and `/dev/shm`;
+it does not start a getty or a login. Every service starts as the leader of
+a new session (`setsid`), so a getty can take its terminal as controlling
+terminal. `docs/examples/host/` has example units: a serial `agetty` (marked
+`"essential": false`), `udevd` with a coldplug `udevadm trigger` oneshot,
+`modprobe` and a foreground `udhcpc`. They are recipes for an image that
+already contains those programs, the login and PAM configuration agetty's
+`login` needs, udev rules and firmware; adjust paths and interfaces. None uses
+autologin. `sahinit host device-wait --path /dev/vdb` is a oneshot that
+waits for a device node.
+
+### Readiness watchdog
+
+A notify unit with `"watchdog": "5s"` must write a byte to fd 3 at least
+every 5 s after it is ready; otherwise it is killed (`watchdog`) and its
+restart policy applies. For a program that speaks sd_notify, wrap it:
+
+```json
+{"name":"agent","type":"simple","ready":"notify","watchdog":"5s","restart":"on-failure",
+ "exec":["/sbin/sahinit","host","notify-adapter","--watchdog","5s","--","/usr/sbin/agent"]}
+```
+
+The adapter supports `READY=1` and `WATCHDOG=1` from its direct child only;
+run the program in the foreground. This does not replace a hardware
+watchdog: nothing pets `/dev/watchdog`.
 
 ### Power and signals
 
@@ -149,6 +209,51 @@ stop every service in reverse order; then SIGTERM and SIGKILL to every
 remaining process (1 s each); sync; unmount every non-pseudo filesystem,
 deepest first, remounting busy ones read-only (root last); sync; the power
 operation. PID 1 never exits, even if the kernel refuses it.
+
+## Journal
+
+`supervise --log-dir /var/log/sahinit` (or `init --log-dir ...`) keeps a
+bounded on-disk journal of every unit's stdout and stderr and of lifecycle
+events; without it output lives only in the in-memory tails of
+`ctl diagnostics`. Provision the directory on a writable filesystem:
+
+```sh
+install -d -o root -g root -m 700 /var/log/sahinit
+sahinit logs --unit web --follow
+sahinit logs --unit web --contains timeout --since 250
+sahinit events --unit web --boot "$(cat /proc/sys/kernel/random/boot_id)"
+```
+
+A directory that cannot be used (read-only root, wrong owner or mode, another
+supervisor's lock) never fails a boot: the supervisor logs
+`journal_unavailable TOKEN` and runs without one. Retention is 1 MiB plus four
+archives; a full in-memory queue drops records (counted in diagnostics). It is
+bounded operational logging, not a tamper-evident audit log.
+
+## Live catalog changes
+
+```sh
+sahinit validate --dir /etc/sahinit/candidate
+sahinit ctl --socket /run/sahinit/control.sock --dir /etc/sahinit/candidate diff
+sahinit ctl --socket /run/sahinit/control.sock --dir /etc/sahinit/candidate apply
+sahinit ctl --socket /run/sahinit/control.sock rollback
+sahinit ctl --socket /run/sahinit/control.sock explain web
+```
+
+`diff`, `apply`, `rollback` and `activate` are root only (`root_required`).
+`apply` validates the whole candidate (graph, limits) before it stops
+anything, stops changed and removed units and every unit that transitively
+`needs` one, then starts the affected units that are desired. Unaffected
+units keep running. A failed replacement restores the old catalog. Side
+effects of programs (and finished oneshots) are not undone. The change lives
+in memory only: deploy the files to `--dir` too, or the next supervisor start
+loads the old ones. Catalogs with sash units cannot be changed live
+(`catalog_sash`). With a deployment, use `ctl activate` instead.
+
+## Deployments
+
+Signed, verified catalogs with immutable generations: see
+[deployments](../deployments.md).
 
 ## Sash services
 
@@ -310,8 +415,8 @@ decision that discards anti-rollback state) remove `policy.json` and
   binary as the sandbox helper for every launch, so restart it promptly after
   replacing the file rather than running a new helper under an old supervisor.
 - **PID 1:** replace the binary and reboot. PID 1 does not re-execute itself.
-- **Units:** there is no live reload. Edit the catalog, check it with
-  `sahinit plan`, and restart the supervisor.
+- **Units:** check a new catalog with `sahinit validate`, then either
+  `ctl --dir DIR apply` (root, no sash units) or restart the supervisor.
 - **State:** policy caches, policy floors and sash floors only rise and are
   read by any version that has them; an upgrade does not touch them.
 
@@ -369,6 +474,10 @@ starts the supervisor again.
 | `sash_identity_mismatch` | the script's `user`/`group` do not resolve to the unit's ids | `getent passwd USER` |
 | a sash start fails with `sash_grant_revoked` | serial below the floor | issue a newer grant |
 | every sash start fails with `sash_floor_store_failed` | state directory permissions, or floors signed by an old fleet key | `ls -ln` the directory (0700, supervisor uid); see key rotation |
-| PID 1 machine sits at a console after boot | strict boot failed | read the log lines before `recovery:`; fix and `kill -HUP 1` |
+| PID 1 machine sits at a console after boot | strict boot failed | read the log lines before `recovery:` (`boot_service_failed NAME`); fix, or mark the unit `"essential": false`, and `kill -HUP 1` |
+| a unit stays `blocked` | a `needs` provider is not ready | `ctl explain NAME` lists `blocked_by` |
+| `journal_unavailable` at start | `--log-dir` read-only, missing parent, wrong owner or mode | `install -d -m 700 -o root DIR`; the supervisor runs without a journal meanwhile |
+| `ctl apply` says `root_required` | not run as root | `sudo sahinit ctl ...` |
+| a notify unit fails with `watchdog` | heartbeats stopped, or adapter and unit intervals differ | match `--watchdog` to the unit's `watchdog` |
 | `policy status` says `clock_uncertain` | a `renew` policy without `--trust-system-clock` | establish trusted time, pass the flag |
 | `policy_store_failed` | cache directory not owned by you or group-accessible | `chmod 700`, owned by the running uid |

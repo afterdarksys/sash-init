@@ -1,0 +1,9 @@
+{
+  "name": "device-trigger",
+  "exec": ["/usr/bin/udevadm", "trigger", "--action=add", "--settle"],
+  "type": "oneshot",
+  "ready": "exit",
+  "needs": ["udev"],
+  "timeout": "30s",
+  "boot": true
+}

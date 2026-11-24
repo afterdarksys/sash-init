@@ -33,6 +33,10 @@ code disagree, the code is right and this page is a bug.
 - On Linux the checked file is executed **through its open file
   descriptor**, so the inode checked is the inode run.
 - `#!/usr/bin/env` and other PATH lookups are refused (`exec_interp`).
+- A [deployment](../deployments.md) unit's executable is also hashed through
+  that same descriptor on **every** launch and must match the SHA-256 in the
+  signed manifest (`artifact_digest`); off Linux, or without a readable
+  descriptor, the launch is refused (`verified_exec_unavailable`).
 
 ### A clean start
 
@@ -96,6 +100,9 @@ starts; a limit that cannot be applied refuses the unit and is never ignored.
     only while a controller is enabled below the root, because the kernel
     then refuses moves into the root; otherwise sahinit logs
     `cgroup_root_unprotected` and refuses them too.
+- `diff`, `apply`, `rollback` and `activate` additionally need the peer's
+  effective uid to be 0 (`root_required`), whatever `--uid` allows: they
+  read a directory as the supervisor and replace what runs.
 - So a service, even one running as an allowed uid, cannot stop or restart
   other services through the socket.
 - Responses carry tokens, never paths or OS error text.
@@ -138,6 +145,20 @@ them, before Linux 6.9, a narrow reuse race remains for the group signal.
 - Floors only rise, are signed under their own domain (no grant or policy
   verifies as a floor), and fail closed when unreadable or unverifiable.
 
+### Deployments
+
+A generation is staged only when its policy verifies under the local trust,
+the manifest's exact bytes match the signed `catalog_sha256`, every unit and
+artifact matches its manifest digest, and the unit set and `needs` match the
+policy; it is re-verified on every load. Each start (manual, boot, restart,
+dependency resume) is admitted against the active generation's policy and the
+revocation floor (`policy_revoked`): grace admits only `offline_units`, an
+expired policy only automatic restarts of `runtime_restart_units`. `apply`
+and `rollback` are refused in this mode; earlier content returns only as a
+newly signed, higher-sequence generation. This binds the declared files, not
+the kernel, shared libraries, an interpreter's dependencies or files named in
+arguments.
+
 ### Boot-policy metadata
 
 Ed25519 over a domain-separated message and the exact payload bytes; strict
@@ -150,9 +171,10 @@ bounded sizes and times, and a credential that is never printed.
 
 ## What is NOT guaranteed
 
-- **Boot policy is not enforced.** It is verified metadata only; no unit or
-  job is admitted or refused because of it. Catalog and script hashes in a
-  policy are signed claims that nothing checks yet.
+- **Boot policy is not enforced for `--dir` catalogs.** Only a deployment
+  (`--deployment-root`) admits units by policy. Boot jobs and their script
+  hashes are refused (`deployment_jobs`); nothing runs them. There is no
+  policy issuer and no artifact downloader.
 - **Root on the host** can defeat everything here: replace the binary, edit
   the catalog, delete or restore the policy cache and the floors (the
   anti-rollback guarantee is file-based; there is no TPM or verified boot).
@@ -167,15 +189,24 @@ bounded sizes and times, and a credential that is never printed.
 - **The grant's `host` is not checked**: sahinit has no host name.
 - **A legitimate mount is visible host-wide**: mounts are made in sahinit's
   own mount namespace.
-- **Output tails and events are not an audit log**: they are in memory,
-  bounded, lost on exit, and contain whatever the service printed, secrets
-  included.
+- **Output tails, events and the journal are not an audit log**: tails are
+  in memory and lost on exit; the journal (`--log-dir`) is bounded, drops
+  records when its queue is full, may lose its unsynced tail on power loss,
+  and is not tamper-evident. Both contain whatever the service printed,
+  secrets included; journal files are 0600 to the supervisor's uid.
+- **Live catalog changes cannot undo side effects**: a failed `apply`
+  restores the old catalog's configuration and processes, not what the
+  programs did.
+- **The service watchdog is not a hardware watchdog**: a hung kernel or PID 1
+  is not reset.
 - **`--trust-system-clock` is an assertion, not authentication**: time is
   never established from a policy or from disk.
 - **The recovery program runs as root on the console** with no
   authentication added by sahinit; provision an authenticated one.
-- **PID 1 mode is experimental**: persistent-disk teardown, storage
-  discovery, a hardware watchdog and switch-root are not provided or proven.
+- **PID 1 mode is experimental**: storage discovery beyond
+  `sahinit.root=/dev/...` and a hardware watchdog are not provided; the
+  filesystem check and switch-root are done by the separate initramfs script
+  (`contrib/initramfs/init`), proven only on a disposable ext4 disk in QEMU.
 - **Old-kernel fallbacks** (no `close_range`, older Landlock ABIs, no
   `cgroup.kill`, no `clone3` into a cgroup) are tested only through hooks,
   not on real kernels.

@@ -37,8 +37,15 @@ Two rules recur:
 | Policy cache directory | `--cache` | `sahinit policy` | owned by the effective uid, no group or other access | |
 | `policy.json`, `floor.json`, `lock`, `pending-*` | | policy store | 0600, owned by the effective uid, one link | in the cache directory |
 | Renewal credential | `--credential` | `policy refresh` | owned by the effective uid, mode 0600 or stricter, one link, not a symlink | |
+| Journal directory | `--log-dir` (`supervise`, `init`), `--dir` (`logs`, `events`) | `supervise` writes, `logs` and `events` read | trusted walk; no group or other access (0700); created 0700 when missing | none for `supervise` and `init` (no journal); `/var/log/sahinit` for `logs` and `events` |
+| `current.jsonl`, `archive.N.jsonl`, `lock`, `view.lock` | | the journal | 0600, regular, one link, owned by root or the effective uid | in the journal directory |
+| Deployment root | `--deployment-root` (`supervise`, `init`), `--root` (`deploy`) | `supervise`, `deploy` | absolute, clean; trusted walk; no group or other access; created 0700 | |
+| `state.json`, `lock`, `policy/`, `generations/ID/` | | deployments | 0600 files, 0700 directories; artifacts 0555, unit files 0400 | in the deployment root |
+| Bundle, manifest | `--bundle`, `--manifest` | `deploy stage` | each file: owner and mode rule, regular, not a symlink, trusted parent | |
 | Recovery program | `init --recovery` | PID 1 | executed by path as root | none (disabled) |
-| `/proc`, `/sys`, `/dev`, `/run`, `/sys/fs/cgroup` | | PID 1 mounts them | | |
+| `/proc`, `/sys`, `/dev`, `/dev/pts`, `/dev/shm`, `/run`, `/sys/fs/cgroup` | | PID 1 mounts them | | |
+| `/tmp` | | PID 1 creates it (sticky, 1777) when missing | | |
+| `/proc/swaps` | | PID 1 at shutdown (`swapoff`) | | |
 | `/run/sahinit` | | PID 1 creates it, mode 0700 | | |
 | `/proc/sys/kernel/random/boot_id` | | read for the sash mount table | | |
 | `/proc/self/mountinfo` | | PID 1 (mount checks, shutdown unmounts) | | |
@@ -75,17 +82,24 @@ many bytes of JSON, 1 to 64 KiB (`frame_size`). The server reads the request
 within 5 s and serves at most 32 connections at once (`busy` beyond that).
 
 Request: `{"op": OP, "name": NAME, "arg": ARG}` with only those keys; `op` is
-required. Operations: `status`, `diagnostics`, `start`, `stop`, `restart`,
-`oneshot` (with `arg`), `reload`, `check`.
+required. Operations: `status`, `diagnostics`, `explain`, `start`, `stop`,
+`restart`, `oneshot` (with `arg`), `reload`, `check`; and, for a peer whose
+effective uid is 0 only (`root_required`), `diff` and `apply` (with `arg`, an
+absolute unit directory), `rollback` and `activate`.
 
-Response: `{"ok": bool, "error": TOKEN, "rows": [...], "diagnostics": {...}}`.
-`rows` is present for status and after a mutation on a known name.
+Response: `{"ok": bool, "error": TOKEN, "rows": [...], "diagnostics": {...},
+"explanation": {...}, "diff": {...}}`. `rows` is present for status and after
+a mutation on a known name; `explanation` for `explain`
+(`{name, desired, state, reason, blocked_by}`); `diff` for the catalog
+operations (`{added, removed, changed, affected, generation, rolled_back}`).
 
 Status row:
 
 | Key | Meaning |
 | --- | --- |
-| `name`, `state`, `pid`, `ready`, `restarts` | state is `stopped`, `starting`, `running`, `stopping`, `exited` or `failed` |
+| `name`, `state`, `pid`, `ready`, `restarts` | state is `stopped`, `starting`, `running`, `stopping`, `exited`, `failed` or `blocked` |
+| `desired` | whether the unit should run: set by boot and `start`, cleared by `stop` |
+| `essential` | the unit's resolved `essential` (strict boot only acts on it) |
 | `sandbox` | the applied sandbox claim (`none`, `no_new_privs,landlock_vN,caps`) or empty |
 | `last_error` | the token of the last failure, or empty |
 | `cgroups` | `enabled`, `disabled` or `unsupported` |
@@ -97,7 +111,8 @@ Status row:
 
 Diagnostics (`diagnostics` op, one service): `name`, `cgroups`, `stdout` and
 `stderr` (each `{data: base64, dropped: N}`, the last 8192 bytes), `events`
-(the last 64: `{sequence, time, kind, pid, code, exit}`) and `last_exit`
+(the last 64: `{sequence, time, kind, pid, code, exit}`), `journal`
+(`{dropped, error}` of the `--log-dir` journal, zero without one) and `last_exit`
 (`{code, signal, time}`; a signal exit has code -1). Event kinds: `starting`,
 `started`, `ready`, `stopping`, `exited`, `ended`, `launch_failed`,
 `timeout`, `restart_limit`, `cgroup_stuck`, and for sash units
@@ -181,13 +196,45 @@ Formats are specified in [boot policy](../boot-policy.md); the rules on disk:
   without spaces and at most one trailing newline. Reread on every attempt,
   so it can be replaced in place. Never printed.
 
+## Journal
+
+`supervise --log-dir DIR` keeps a bounded journal: `current.jsonl` (rotated at
+1 MiB) and up to four archives `archive.0.jsonl` (newest) to
+`archive.3.jsonl`. Each line is one JSON record
+`{sequence, boot_id, time, unit, stream, data, event}`: `stream` is `stdout`,
+`stderr` or `event`; `data` is the output chunk (at most 8 KiB) base64
+encoded by JSON, so binary output and terminal escapes stay inert; `event` is
+a lifecycle event object. `sequence` grows across restarts. Records queue in
+memory (256) and are written by a background goroutine that syncs every
+second and on close; a full queue drops records and counts them in the
+`journal` field of `ctl diagnostics` (`{"dropped","error"}`). An unsynced
+tail can be lost on power failure; opening repairs a torn final record. It is
+bounded operational logging, not an audit log. `lock` makes one writer per
+directory; `view.lock` lets readers and rotation exclude each other.
+
+## Deployment root
+
+See [deployments](../deployments.md). `generations/ID/` holds a verified copy
+of one bundle (`manifest.json`, `policy.json`, `units/`, `artifacts/`) and is
+never changed after it is renamed into place; `ID` is
+`SEQUENCE-` and the first 16 hex digits of the manifest digest. `state.json`
+is `{"active","pending","previous"}`. `policy/` is a boot-policy store
+(`policy.json`, `floor.json`) holding the newest staged policy and the
+revocation floor: install a floor there with
+`sahinit policy floor-install --trust FILE --document FLOOR --cache ROOT/policy`. Nothing is pruned.
+
 ## PID 1 files
 
 PID 1 makes the mount propagation of `/` private, mounts `/proc`, `/sys`,
-`/dev` (devtmpfs, `mode=0755`), `/run` (tmpfs, `mode=0755`) and
+`/dev` (devtmpfs, `mode=0755`), `/dev/pts` (devpts, `mode=0620,ptmxmode=0666`),
+`/dev/shm` (tmpfs, `mode=1777`), `/run` (tmpfs, `mode=0755`) and
 `/sys/fs/cgroup` (cgroup2) unless already mounted, creates `/run/sahinit`
-(0700) and `/sys/fs/cgroup/sahinit/supervisor`, requires
+(0700), a sticky `/tmp` when missing, and `/sys/fs/cgroup/sahinit/supervisor`, requires
 `/sys/fs/cgroup/sahinit/cgroup.kill`, writes `+cpu`, `+memory`, `+pids` to
 `/sys/fs/cgroup/cgroup.subtree_control` where available, and opens
 `/dev/console` for standard input, output and error. At shutdown it reads
-`/proc/self/mountinfo` and unmounts every non-pseudo mount, deepest first.
+`/proc/self/mountinfo` and unmounts every non-pseudo mount, deepest first,
+after `swapoff` of every swap area listed in `/proc/swaps`. It does no
+filesystem check and no `switch_root`; `contrib/initramfs/init` (see
+[operations](operations.md#persistent-ext4-root)) does both before it execs
+sahinit on the new root.

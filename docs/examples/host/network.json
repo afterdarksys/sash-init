@@ -1,0 +1,10 @@
+{
+  "name": "network",
+  "exec": ["/sbin/udhcpc", "-f", "-i", "eth0"],
+  "type": "simple",
+  "ready": "exec",
+  "restart": "on-failure",
+  "needs": ["device-trigger"],
+  "boot": true,
+  "essential": false
+}

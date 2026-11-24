@@ -1,4 +1,4 @@
-# Minimal Linux host init
+# Linux host init
 
 `sahinit` now includes an experimental PID 1 parent for a local-root Linux
 machine. The existing `supervise` command remains usable under another init.
@@ -35,7 +35,9 @@ The kernel must provide procfs, sysfs, devtmpfs, tmpfs, cgroup v2 and
 The VM suite currently exercises Debian's Linux 6.1 amd64 kernel. Kernel
 configuration still matters; version alone does not guarantee these facilities.
 
-PID 1 mounts `/proc`, `/sys`, `/dev`, `/run` and `/sys/fs/cgroup`, makes mount
+PID 1 mounts `/proc`, `/sys`, `/dev`, `/dev/pts` (devpts, `ptmxmode=0666`),
+`/dev/shm` (tmpfs, 1777), `/run` and `/sys/fs/cgroup`, creates a sticky `/tmp`
+when it is missing, makes mount
 propagation private, opens `/dev/console` as standard input/output/error, enables
 the available CPU, memory and PID controllers, and starts a supervisor in
 `/sys/fs/cgroup/sahinit/supervisor`. Service cgroups are siblings below
@@ -49,11 +51,14 @@ See the Linux [wait semantics](https://man7.org/linux/man-pages/man2/wait.2.html
 ## Failure and recovery
 
 Host mode starts the supervisor with `--boot-strict`. Refused unit files,
-unavailable requested limits, invalid graphs and failed boot waves enter recovery.
-All boot units are essential in this mode: a failed boot unit or an unexpectedly
-exited long-running boot unit shuts down the supervisor and enters recovery.
-Successful oneshots may stay exited; explicit administrative stops stay stopped.
-Ordinary `supervise` retains its previous best-effort boot behavior.
+unavailable requested limits and invalid graphs enter recovery. Every boot unit
+is essential unless its unit says `"essential": false`: an essential unit that
+fails, that stops on its own, that is not ready when the boot waves finish, or
+whose `needs` provider failed, shuts down the supervisor and enters recovery.
+A unit marked `"essential": false` fails alone; its dependents are paused
+(`blocked`) and resumed when it is ready again. Successful oneshots may stay
+exited; explicit administrative stops stay stopped. Ordinary `supervise`
+(without `--boot-strict`) never stops for a failed unit.
 
 PID 1 remains alive when the supervisor fails. It kills the managed cgroup tree
 and optionally launches the configured local recovery executable on the console.
@@ -78,7 +83,8 @@ cannot be repaired by SIGHUP because those arguments remain the same.
 PID 1 first gives the supervisor the configured shutdown deadline. The supervisor
 stops dependents before providers, including manually started units; independent
 units in each wave stop concurrently. PID 1 then terminates remaining processes,
-escalates to KILL, reaps, syncs, attempts deepest-first unmounts of data mounts,
+escalates to KILL, reaps, syncs, attempts `swapoff` of every active swap area,
+attempts deepest-first unmounts of data mounts,
 remounts busy filesystems/root read-only, syncs again and invokes the kernel power
 operation. Pseudo filesystems remain available for diagnostics. Failed unmounts
 and power operations are logged; PID 1 never deliberately exits after setup.
@@ -138,14 +144,27 @@ grant "fails the unit without stopping boot" only for a unit that is started
 later. Not covered here: shutdown (rather than `ctl stop`) of a running sash
 service, bind mounts, restart policy and the `check` and `reload` entries.
 
-Still outside this milestone: root discovery/switch-root, fsck, encrypted or
-network root, device hotplug/module loading, swap teardown, PTY/login setup,
-network configuration, durable logs, hardware watchdogs, live transactional
-reload and targeted dependency failure propagation. Services may supply some of
-these. Persistent-disk teardown is not proven by the initramfs tests.
+The `notify` scenario runs an sd_notify service through `sahinit host
+notify-adapter` with a 500 ms watchdog; it sends three heartbeats and stops,
+and the watchdog kills it (the unit is `"essential": false`, so the host does
+not enter recovery). The `persistent` scenario (`--scenario persistent`)
+builds an ext4 root image and an initramfs whose `/init` is
+`contrib/initramfs/init`: that script, not sahinit, runs `e2fsck -p`, mounts
+the root and `switch_root`s to `/sbin/sahinit init`. It boots the disk twice,
+checks a counter survives and runs an offline `e2fsck -fn` after each
+shutdown. No host disk is attached. See [operations](reference/operations.md)
+for the initramfs entry point, the journal, live catalog changes and the
+console, device and network examples, and [deployments](deployments.md) for
+verified deployment generations.
 
-Signed policy remains metadata-only; verified artifact admission and the
-SystemAPI issuer are separate unfinished integrations. Sash services run under
-PID 1 (the `sash` VM scenario), with test-made grants and floors; there is no
-fleet signer yet. Existing
-Linux sandbox/cgroup trust limitations continue to apply.
+Still outside this milestone: root discovery beyond `sahinit.root=/dev/...`,
+encrypted, LVM/RAID or network root, device hotplug, network configuration
+beyond the example units, hardware watchdogs and distribution packaging.
+Services may supply some of these. sahinit itself does no fsck and no
+switch_root; the initramfs script does.
+
+Deployments carry exec units only (no sash units, no boot jobs); there is no
+SystemAPI issuer and no artifact downloader. Sash services run under PID 1
+(the `sash` VM scenario), with test-made grants and floors; there is no fleet
+signer yet. Existing Linux sandbox/cgroup trust limitations continue to apply.
+Service watchdogs do not provide a hardware reset guarantee.

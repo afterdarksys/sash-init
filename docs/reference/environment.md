@@ -14,9 +14,11 @@ derived from `internal/unit/execution.go`, `internal/sandbox`,
 | --- | --- | --- |
 | `SAHINIT_READY_FD` | exec units with `"ready": "notify"`; every process a sash service spawns | `3`. Write at least one byte to fd 3 to report readiness. The fd is the write end of a pipe; close it when done. |
 | `PATH` | every service process, the sandbox helper, `sash --describe`, `sash --session` and sash-spawned processes | `/usr/bin:/bin:/usr/sbin:/sbin` unless the unit's (or the spawn's) environment sets `PATH`, which then replaces it. |
+| `NOTIFY_SOCKET`, `WATCHDOG_USEC` | the child of `sahinit host notify-adapter` only | A private datagram socket path, and the `--watchdog` interval in microseconds when it is set. The adapter removes any inherited `SAHINIT_*`, `NOTIFY_SOCKET` and `WATCHDOG_*` first. |
 | `PATH`, `HOME`, `TERM` | the supervisor and the recovery program started by PID 1 | exactly `PATH=/usr/sbin:/usr/bin:/sbin:/bin`, `HOME=/root`, `TERM=linux`, and nothing else. |
 
-No other variable is added. In particular sahinit does not set `NOTIFY_SOCKET`,
+No other variable is added. In particular the supervisor does not set `NOTIFY_SOCKET`
+(only `notify-adapter` does, for its own child),
 `LISTEN_FDS`, `INVOCATION_ID`, `HOME`, `USER`, `LOGNAME` or `SHELL` for
 services: set what a program needs in `execution.environment`.
 
