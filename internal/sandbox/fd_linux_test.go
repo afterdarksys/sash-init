@@ -5,6 +5,7 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -51,7 +52,9 @@ func helperSelf(t *testing.T) (string, unit.Execution) {
 // notify is on may be open; a binary keeps no exec fd.
 func TestServiceFDs(t *testing.T) {
 	self, ident := helperSelf(t)
-	script := `ls -1 /proc/$$/fd | tr '\n' ' '; printf '%s' "${SAHINIT_READY_FD-unset}"`
+	// No pipeline: the shell holds a pipe end of its own while ls lists its
+	// fds, which ls sees when it runs before the shell forks the reader.
+	script := `ls -1 /proc/$$/fd; printf '%s' "${SAHINIT_READY_FD-unset}"`
 	cases := []struct {
 		name      string
 		sandboxed bool
@@ -87,7 +90,7 @@ func TestServiceFDs(t *testing.T) {
 			if err := cmd.Wait(); err != nil {
 				t.Fatal(err, errb.String())
 			}
-			if got := out.String(); got != tc.want {
+			if got := strings.ReplaceAll(out.String(), "\n", " "); got != tc.want {
 				t.Fatalf("fds %q, want %q (stderr %q)", got, tc.want, errb.String())
 			}
 		})
@@ -105,7 +108,7 @@ func TestDirectScriptKeepsExecFD(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := dir + "/run"
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nls -1 /proc/$$/fd | tr '\\n' ' '\n"), 0o755); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nls -1 /proc/$$/fd\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
@@ -116,7 +119,7 @@ func TestDirectScriptKeepsExecFD(t *testing.T) {
 	if err := cmd.Wait(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(" "+out.String(), " 4 ") {
+	if !strings.Contains("\n"+out.String(), "\n4\n") {
 		t.Fatalf("fds %q", out.String())
 	}
 }
@@ -206,5 +209,51 @@ func TestOpenExecRefuses(t *testing.T) {
 	}
 	if _, err := openExec(wr); fail.Token(err) != "exec_perm" {
 		t.Fatal(err)
+	}
+}
+
+// Concurrent direct launches of a binary, with fds opened and closed
+// around them, each run the binary: the child's fd shuffle before execve
+// must never land on the exec fd it runs through /proc/self/fd/N.
+func TestDirectLaunchConcurrentExecFD(t *testing.T) {
+	stop := make(chan struct{})
+	churned := make(chan struct{})
+	go func() {
+		defer close(churned)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if f, err := os.Open("/dev/null"); err == nil {
+				f.Close()
+			}
+		}
+	}()
+	defer func() { close(stop); <-churned }()
+	const workers, launches = 8, 100
+	errs := make(chan error, workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			for i := 0; i < launches; i++ {
+				var out, errb bytes.Buffer
+				cmd, _, _, err := Launch(context.Background(), "/bin/sh", []string{"/bin/true"}, nil, false, 5*time.Second, Options{Stdout: &out, Stderr: &errb})
+				if err != nil {
+					errs <- fmt.Errorf("launch %d: %v", i, err)
+					return
+				}
+				if err := cmd.Wait(); err != nil {
+					errs <- fmt.Errorf("wait %d: %v", i, err)
+					return
+				}
+			}
+			errs <- nil
+		}()
+	}
+	for w := 0; w < workers; w++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
 	}
 }

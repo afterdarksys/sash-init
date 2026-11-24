@@ -25,6 +25,7 @@ import (
 	"github.com/afterdarksys/sahinit/internal/cgroup"
 	"github.com/afterdarksys/sahinit/internal/fail"
 	"github.com/afterdarksys/sahinit/internal/unit"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -255,6 +256,17 @@ func direct(self, target string, argv []string, execF *os.File, script, notify b
 	}
 	if held != nil {
 		defer held.Close()
+		// The forked child moves fds through the ones just above its
+		// highest passed fd (syscall's nextfd) before execve, which would
+		// overwrite held when it is that number. Passing /dev/null as a
+		// close-on-exec copy above held puts that scratch range above it.
+		hi, err := unix.FcntlInt(null.Fd(), unix.F_DUPFD_CLOEXEC, int(held.Fd())+1)
+		null.Close()
+		if err != nil {
+			closePair(notifyR, notifyW)
+			return nil, nil, fail.E("failed")
+		}
+		null = os.NewFile(uintptr(hi), "/dev/null")
 	}
 	cmd := &exec.Cmd{
 		Path:        target,
