@@ -1,0 +1,411 @@
+{
+  "forced": [
+    "nosuid",
+    "nodev"
+  ],
+  "mount_sources": [
+    "tmpfs",
+    "proc",
+    "/srv/nginx/static"
+  ],
+  "opts": [
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "nosuid",
+        "nodev"
+      ],
+      "bind": false,
+      "err": ""
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "nosuid",
+        "nodev",
+        "size=64m",
+        "mode=0755",
+        "uid=990",
+        "gid=990"
+      ],
+      "bind": false,
+      "err": ""
+    },
+    {
+      "src": "proc",
+      "type": "proc",
+      "opts": [
+        "nosuid",
+        "nodev",
+        "noexec"
+      ],
+      "bind": false,
+      "err": ""
+    },
+    {
+      "src": "sysfs",
+      "type": "sysfs",
+      "opts": [
+        "ro",
+        "nosuid",
+        "nodev"
+      ],
+      "bind": false,
+      "err": ""
+    },
+    {
+      "src": "devpts",
+      "type": "devpts",
+      "opts": [
+        "nosuid",
+        "nodev"
+      ],
+      "bind": false,
+      "err": ""
+    },
+    {
+      "src": "tmpfs",
+      "type": "proc",
+      "opts": [
+        "nosuid",
+        "nodev"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "/srv/x",
+      "type": "",
+      "opts": [
+        "bind",
+        "nosuid",
+        "nodev"
+      ],
+      "bind": true,
+      "err": ""
+    },
+    {
+      "src": "/srv/x",
+      "type": "",
+      "opts": [
+        "rbind",
+        "ro",
+        "nosuid",
+        "nodev"
+      ],
+      "bind": true,
+      "err": ""
+    },
+    {
+      "src": "/srv/x",
+      "type": "tmpfs",
+      "opts": [
+        "bind",
+        "nosuid",
+        "nodev"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "",
+      "opts": [
+        "nosuid",
+        "nodev"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "overlay",
+      "type": "overlay",
+      "opts": [
+        "nosuid",
+        "nodev",
+        "lowerdir=/x"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "nosuid",
+        "nodev",
+        "lowerdir=/x"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "suid"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "dev"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "exec"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "x-bind"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "move"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "BIND"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "ro",
+        "rw"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "mode=4755"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "mode=1777"
+      ],
+      "bind": false,
+      "err": ""
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "mode=2000"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "uid=4294967295"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "uid=4294967294"
+      ],
+      "bind": false,
+      "err": ""
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "size=101%"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "size=100%"
+      ],
+      "bind": false,
+      "err": ""
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "nr_inodes=5%"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "size=99999999999999g"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "size=8796093022207k"
+      ],
+      "bind": false,
+      "err": ""
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "remount",
+        "nosuid",
+        "nodev"
+      ],
+      "bind": false,
+      "err": ""
+    },
+    {
+      "src": "/srv/x",
+      "type": "",
+      "opts": [
+        "bind",
+        "remount",
+        "ro",
+        "nosuid",
+        "nodev"
+      ],
+      "bind": true,
+      "err": ""
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "size=1x"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "uid=-1"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": null,
+      "bind": false,
+      "err": ""
+    },
+    {
+      "src": "sysfs",
+      "type": "sysfs",
+      "opts": [
+        "nosuid",
+        "nodev",
+        "mode=777"
+      ],
+      "bind": false,
+      "err": ""
+    },
+    {
+      "src": "tmpfs",
+      "type": "tmpfs",
+      "opts": [
+        "nosuid=1"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    }
+  ],
+  "source": "sash internal/grant/policy.go at f28285b (feat/init-phase1): CheckMountOpts, AllowsMountSource and MountForcedOpts; sahinit internal/sash/testdata/sash-mount-vectors.json",
+  "sources": [
+    {
+      "src": "tmpfs",
+      "allow": true
+    },
+    {
+      "src": "proc",
+      "allow": true
+    },
+    {
+      "src": "sysfs",
+      "allow": false
+    },
+    {
+      "src": "/srv/nginx/static",
+      "allow": true
+    },
+    {
+      "src": "/srv/nginx/static/img",
+      "allow": true
+    },
+    {
+      "src": "/srv/nginx",
+      "allow": false
+    },
+    {
+      "src": "/srv/nginx/static/../../../etc",
+      "allow": false
+    },
+    {
+      "src": "/",
+      "allow": false
+    },
+    {
+      "src": "/srv/nginx/staticx",
+      "allow": false
+    },
+    {
+      "src": "TMPFS",
+      "allow": false
+    }
+  ]
+}
