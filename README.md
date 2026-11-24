@@ -45,6 +45,8 @@ docker run --rm --init --privileged --cgroupns=private -v "$PWD":/src -w /src \
 Without `--privileged --cgroupns=private` the cgroup tests are skipped, and
 each one says why.
 
+A unit may name a sash service script instead of `exec`. sahinit then runs `sash --describe` at load, verifies the service's signed `sash/2` grant and its per-service floor before every start, and performs the script's process verbs itself after re-checking each one. See [sash services, batch 1](docs/design/sash-services-1.md). `./scripts/test-sash-docker.sh` builds sash from its repository and runs the end-to-end tests against it.
+
 Execution context, local control commands, and lifecycle diagnostics are documented
 in [execution and diagnostics](docs/execution.md).
 
