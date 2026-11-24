@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -27,6 +28,17 @@ func park() {
 }
 
 func main() {
+	// The sash service's spawned process runs as nobody and cannot open the
+	// console: it reports readiness on the readiness pipe and waits for TERM.
+	if len(os.Args) > 1 && os.Args[1] == "sleeper" {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGTERM)
+		ready := os.NewFile(3, "ready")
+		ready.Write([]byte("x"))
+		ready.Close()
+		<-sig
+		return
+	}
 	output, _ = os.OpenFile("/dev/console", os.O_WRONLY, 0)
 	if output == nil {
 		os.Exit(90)
@@ -53,6 +65,10 @@ func main() {
 		mark("recovery " + scenario())
 		syscall.Kill(1, syscall.SIGTERM)
 		park()
+	case "sashlaunch":
+		sashLaunch()
+	case "sashdrive":
+		sashDrive()
 	case "fork":
 		c := exec.Command("/probe", "orphan")
 		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -151,4 +167,147 @@ func main() {
 		os.WriteFile("/run/app-stopped", nil, 0600)
 		mark("app stopped")
 	}
+}
+
+// sashLaunch is a root oneshot unit without a sandbox (cgroup_trusted): it
+// starts the sash driver in a new session and moves it to the root cgroup,
+// because the control socket refuses peers that are supervised services.
+func sashLaunch() {
+	c := exec.Command("/probe", "sashdrive")
+	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := c.Start(); err != nil {
+		fatal("sash driver start")
+	}
+	if err := os.WriteFile("/sys/fs/cgroup/cgroup.procs", []byte(strconv.Itoa(c.Process.Pid)), 0); err != nil {
+		fatal("sash driver cgroup: " + err.Error())
+	}
+	mark("sash driver detached")
+}
+
+type sashRow struct {
+	Name      string `json:"name"`
+	State     string `json:"state"`
+	Ready     bool   `json:"ready"`
+	LastError string `json:"last_error"`
+	Restarts  int    `json:"restarts"`
+	Sash      *struct {
+		Serial  uint64 `json:"grant_serial"`
+		Entries []struct {
+			Entry string `json:"entry"`
+			Exit  int    `json:"exit"`
+		} `json:"entries"`
+		Procs []struct {
+			Name  string `json:"name"`
+			Pid   int    `json:"pid"`
+			State string `json:"state"`
+		} `json:"procs"`
+	} `json:"sash"`
+}
+
+func ctl(op, name string) (string, bool) {
+	out, err := exec.Command("/init", "ctl", "--socket", "/run/sahinit/control.sock", op, name).CombinedOutput()
+	return strings.TrimSpace(string(out)), err == nil
+}
+
+func status(name string) sashRow {
+	out, ok := ctl("status", name)
+	var resp struct {
+		Rows []sashRow `json:"rows"`
+	}
+	if !ok || json.Unmarshal([]byte(out), &resp) != nil || len(resp.Rows) != 1 {
+		fatal("sash status " + name + ": " + out)
+	}
+	return resp.Rows[0]
+}
+
+// mounted is the fstype and options of the mount at dir, or "".
+func mounted(dir string) string {
+	raw, _ := os.ReadFile("/proc/self/mountinfo")
+	found := ""
+	for _, line := range strings.Split(string(raw), "\n") {
+		f := strings.Fields(line)
+		for i, w := range f {
+			if w == "-" && len(f) > 4 && f[4] == dir && i+1 < len(f) {
+				found = f[i+1] + " " + f[5]
+			}
+		}
+	}
+	return found
+}
+
+func owned(path string, dir bool, mode uint32) bool {
+	var st syscall.Stat_t
+	if syscall.Lstat(path, &st) != nil || st.Uid != 65534 || st.Gid != 65534 {
+		return false
+	}
+	isDir := st.Mode&syscall.S_IFMT == syscall.S_IFDIR
+	return isDir == dir && (mode == 0 || st.Mode&0o7777 == mode)
+}
+
+// sashDrive checks the sash service from outside every service cgroup,
+// through the control socket, then powers the VM off.
+func sashDrive() {
+	var row sashRow
+	for end := time.Now().Add(60 * time.Second); ; {
+		if row = status("svc"); row.State == "running" && row.Ready {
+			break
+		}
+		if time.Now().After(end) || row.State == "failed" {
+			fatal(fmt.Sprintf("sash service not ready: %+v", row))
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if row.Sash == nil || row.Sash.Serial != 5 || len(row.Sash.Procs) != 1 || row.Sash.Procs[0].Name != "main" || row.Sash.Procs[0].State != "running" {
+		fatal(fmt.Sprintf("sash row %+v", row.Sash))
+	}
+	mark("sash service ready")
+	pid := strconv.Itoa(row.Sash.Procs[0].Pid)
+	cg, _ := os.ReadFile("/proc/" + pid + "/cgroup")
+	st, _ := os.ReadFile("/proc/" + pid + "/status")
+	if strings.TrimSpace(string(cg)) != "0::/sahinit/svc.service" || !strings.Contains(string(st), "\nUid:\t65534\t") {
+		fatal("sash spawn " + string(cg))
+	}
+	mark("sash spawn in cgroup sahinit/svc.service as 65534")
+	if !owned("/srv/svc/d", true, 0o750) || !owned("/srv/svc/d/f", false, 0) {
+		fatal("sash file verbs")
+	}
+	mark("sash file verbs")
+	if m := mounted("/mnt/svc"); !strings.HasPrefix(m, "tmpfs ") || !strings.Contains(m, "nosuid") || !strings.Contains(m, "nodev") || !strings.Contains(m, "noexec") {
+		fatal("sash tmpfs mount " + m)
+	}
+	mark("sash tmpfs mount")
+	if out, ok := ctl("start", "revoked"); ok || !strings.Contains(out, "sash_grant_revoked") {
+		fatal("sash revoked start: " + out)
+	}
+	if r := status("revoked"); r.State != "failed" || r.LastError != "sash_grant_revoked" || r.Restarts != 0 {
+		fatal(fmt.Sprintf("sash revoked %+v", r))
+	}
+	if r := status("svc"); r.State != "running" {
+		fatal("sash svc after refusal " + r.State)
+	}
+	mark("sash grant below floor refused")
+	if out, ok := ctl("stop", "svc"); !ok {
+		fatal("sash stop: " + out)
+	}
+	row = status("svc")
+	stopped := false
+	for _, e := range row.Sash.Entries {
+		stopped = stopped || e.Entry == "stop" && e.Exit == 0
+	}
+	if row.State != "stopped" || !stopped || !owned("/srv/svc/stopped", false, 0) {
+		fatal(fmt.Sprintf("sash stop entry %+v %+v", row, row.Sash))
+	}
+	mark("sash stop entry")
+	if _, err := os.Stat("/proc/" + pid); !os.IsNotExist(err) {
+		fatal("sash spawn survived stop")
+	}
+	if _, err := os.Stat("/sys/fs/cgroup/sahinit/svc.service"); !os.IsNotExist(err) {
+		fatal("sash cgroup left")
+	}
+	mark("sash cgroup killed")
+	if m := mounted("/mnt/svc"); m != "" {
+		fatal("sash mount left " + m)
+	}
+	mark("sash mounts removed")
+	syscall.Kill(1, syscall.SIGTERM)
 }
