@@ -428,10 +428,17 @@ func TestSashHostRechecks(t *testing.T) {
 		"cwd symlink":    {"/usr/bin/sleep", id(map[string]any{"cwd": work + "/link"}), "denied"},
 		"stream symlink": {"/usr/bin/sleep", id(map[string]any{"stdout": "file:" + work + "/link/x"}), "denied"},
 	} {
-		if r := spawn("p", c.prog, c.opts); r.Error != c.want {
+		if r := spawn("p-"+strings.ReplaceAll(name, " ", "-"), c.prog, c.opts); r.Error != c.want {
 			t.Errorf("%s: %+v, want %s", name, r, c.want)
 		}
 	}
+	// A grant whose identity names another account than the unit's uid
+	// and gid passes the grant check, and the host refuses it.
+	srv.G.User, srv.G.Group = "daemon", "daemon"
+	if r := spawn("p-daemon", "/usr/bin/sleep", map[string]any{"user": "daemon", "group": "daemon"}); r.Error != "denied" {
+		t.Errorf("another account: %+v", r)
+	}
+	srv.G.User, srv.G.Group = "nobody", "nogroup"
 	r := spawn("good", "/usr/bin/sleep", id(map[string]any{"cwd": work, "stdout": "file:" + work + "/out.log", "env": map[string]any{"PORT": "1"}}))
 	if r.Error != "" {
 		t.Fatalf("good spawn %+v", r)
