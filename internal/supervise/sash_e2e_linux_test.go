@@ -182,7 +182,7 @@ func (e *sashEnv) load(log *syncBuf) (*Supervisor, map[string]string) {
 		t.Fatal(err)
 	}
 	sup.Cgroups, sup.Log = e.root, log
-	sup.Sash = &SashConfig{Binary: e.sash, Fleet: e.fleet.Public().(ed25519.PublicKey), Floors: e.floors}
+	sup.Sash = &SashConfig{Binary: e.sash, Fleet: e.fleet.Public().(ed25519.PublicKey), Floors: e.floors, StateDir: filepath.Join(e.base, "floors")}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()

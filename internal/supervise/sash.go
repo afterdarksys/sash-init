@@ -50,6 +50,9 @@ type SashConfig struct {
 	Fleet ed25519.PublicKey
 	// Floors holds the signed per-service floors.
 	Floors *sash.FloorStore
+	// StateDir is a private directory for sahinit's sash state (the
+	// mounts it made); "" keeps them in memory only.
+	StateDir string
 	// Now is the clock for grant expiry; nil is time.Now.
 	Now func() time.Time
 }

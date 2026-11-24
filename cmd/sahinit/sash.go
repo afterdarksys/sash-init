@@ -195,5 +195,5 @@ func setupSash(f sashFlags, svcs map[string]*unit.Service, root *cgroup.Root, se
 			refused++
 		}
 	}
-	return &supervise.SashConfig{Binary: bin, Fleet: key, Floors: store}, refused
+	return &supervise.SashConfig{Binary: bin, Fleet: key, Floors: store, StateDir: f.floorDir}, refused
 }

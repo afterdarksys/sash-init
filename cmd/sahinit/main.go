@@ -273,6 +273,10 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 	}
 	sup.SocketGID = gid
 	sup.Sash = sashCfg
+	if sashCfg != nil {
+		// Mounts a previous sahinit made for sash services and left.
+		sup.CleanSashMounts()
+	}
 	sup.Cgroups, sup.CgroupMode = root, mode
 	sup.Log = stderr
 	if passed {

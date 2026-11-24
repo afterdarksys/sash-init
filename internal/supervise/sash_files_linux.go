@@ -264,17 +264,53 @@ func (h *sashHost) File(op sash.FileOp) error {
 
 var mountFlagBits = map[string]uintptr{"ro": unix.MS_RDONLY, "nosuid": unix.MS_NOSUID, "nodev": unix.MS_NODEV, "noexec": unix.MS_NOEXEC, "rw": 0}
 
+var mountAttrBits = map[string]uint64{"ro": unix.MOUNT_ATTR_RDONLY, "nosuid": unix.MOUNT_ATTR_NOSUID, "nodev": unix.MOUNT_ATTR_NODEV, "noexec": unix.MOUNT_ATTR_NOEXEC, "rw": 0}
+
+// Mount performs a checked mount. A type mount is made with its flags. A
+// bind is cloned with open_tree (recursively for rbind), given ro, nosuid,
+// nodev and noexec with mount_setattr (on every nested mount too), and
+// only then attached with move_mount: no mount of the tree is ever
+// attached without nosuid and nodev. A kernel without these calls may
+// still bind (bind, then a remount on the new mount), but never rbind
+// (unsupported). A remount changes only this mount's own flags
+// (MS_REMOUNT|MS_BIND), after its mount ID is checked. Each new mount's ID
+// is recorded; a mount point another service holds is exists.
 func (h *sashHost) Mount(m sash.MountPlan) error {
 	var flags uintptr
+	var attr uint64
 	for _, f := range m.Flags {
 		bit, ok := mountFlagBits[f]
 		if !ok {
 			return fail.E("mount_opt_refused")
 		}
 		flags |= bit
+		attr |= mountAttrBits[f]
 	}
 	if flags&(unix.MS_NOSUID|unix.MS_NODEV) != unix.MS_NOSUID|unix.MS_NODEV {
 		return fail.E("mount_opt_refused")
+	}
+	reg := h.sup.mounts()
+	name := h.s.svc.Name
+	if rec, held := reg.get(m.Dir); held && (rec.Service != name || !m.Remount) {
+		return fail.E("exists")
+	}
+	if m.Remount {
+		rec, ok := reg.get(m.Dir)
+		if !ok || len(m.Data) > 0 {
+			return fail.E("not_mounted")
+		}
+		id, fd, err := mountID(m.Dir)
+		if err != nil {
+			return err
+		}
+		defer unix.Close(fd)
+		if id != rec.ID {
+			return fail.E("not_mounted")
+		}
+		if err := unix.Mount("", fdPath(fd), "", flags|unix.MS_REMOUNT|unix.MS_BIND, ""); err != nil {
+			return fail.E("failed")
+		}
+		return nil
 	}
 	how := unix.OpenHow{Flags: uint64(unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC), Resolve: unix.RESOLVE_NO_SYMLINKS}
 	dfd, err := unix.Openat2(unix.AT_FDCWD, m.Dir, &how)
@@ -282,56 +318,103 @@ func (h *sashHost) Mount(m sash.MountPlan) error {
 		return pathErr(err)
 	}
 	defer unix.Close(dfd)
-	data := strings.Join(m.Data, ",")
-	switch {
-	case m.Remount && m.Bind:
-		err = unix.Mount("", fdPath(dfd), "", flags|unix.MS_REMOUNT|unix.MS_BIND, "")
-	case m.Remount:
-		err = unix.Mount("", fdPath(dfd), "", flags|unix.MS_REMOUNT, data)
-	case m.Bind:
-		sh := unix.OpenHow{Flags: uint64(unix.O_PATH | unix.O_CLOEXEC), Resolve: unix.RESOLVE_NO_SYMLINKS}
-		sfd, serr := unix.Openat2(unix.AT_FDCWD, m.Src, &sh)
-		if serr != nil {
-			return pathErr(serr)
-		}
-		defer unix.Close(sfd)
-		bind := uintptr(unix.MS_BIND)
+	kind := "type"
+	if m.Bind {
+		kind = "bind"
 		if m.Rec {
-			bind |= unix.MS_REC
+			kind = "rbind"
 		}
-		if err = unix.Mount(fdPath(sfd), fdPath(dfd), "", bind, ""); err == nil {
-			// A bind takes its options only from a remount, made on the
-			// new mount: dfd still names the directory beneath it, so the
-			// mount point is opened again.
-			nfd, nerr := unix.Openat2(unix.AT_FDCWD, m.Dir, &how)
-			if nerr != nil {
-				return fail.E("failed")
-			}
-			defer unix.Close(nfd)
-			if err = unix.Mount("", fdPath(nfd), "", flags|unix.MS_REMOUNT|unix.MS_BIND, ""); err != nil {
-				unix.Unmount(fdPath(nfd), unix.MNT_DETACH)
-			}
+		if err := bindMount(m, dfd, attr, flags); err != nil {
+			return err
 		}
-	default:
-		err = unix.Mount(m.Type, fdPath(dfd), m.Type, flags, data)
+	} else if err := unix.Mount(m.Type, fdPath(dfd), m.Type, flags, strings.Join(m.Data, ",")); err != nil {
+		return fail.E("failed")
+	}
+	id, nfd, err := mountID(m.Dir)
+	if err == nil {
+		unix.Close(nfd)
+		err = reg.add(mountRec{Service: name, Dir: m.Dir, Kind: kind, ID: id})
 	}
 	if err != nil {
+		// Not recorded, so not kept.
+		if _, fd, ierr := mountID(m.Dir); ierr == nil {
+			unix.Unmount(fdPath(fd), unix.MNT_DETACH)
+			unix.Close(fd)
+		}
 		return fail.E("failed")
 	}
 	return nil
 }
 
-func (h *sashHost) Umount(dir string) error {
-	how := unix.OpenHow{Flags: uint64(unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC), Resolve: unix.RESOLVE_NO_SYMLINKS}
-	fd, err := unix.Openat2(unix.AT_FDCWD, dir, &how)
+// bindMount attaches a bind of m.Src at dfd with its flags already set.
+func bindMount(m sash.MountPlan, dfd int, attr uint64, flags uintptr) error {
+	sh := unix.OpenHow{Flags: uint64(unix.O_PATH | unix.O_CLOEXEC), Resolve: unix.RESOLVE_NO_SYMLINKS}
+	sfd, err := unix.Openat2(unix.AT_FDCWD, m.Src, &sh)
 	if err != nil {
 		return pathErr(err)
 	}
-	defer unix.Close(fd)
-	if err := unix.Unmount(fdPath(fd), unix.MNT_DETACH); err != nil {
+	defer unix.Close(sfd)
+	treeFlags := uint(unix.OPEN_TREE_CLONE | unix.OPEN_TREE_CLOEXEC | unix.AT_EMPTY_PATH)
+	setFlags := uint(unix.AT_EMPTY_PATH)
+	if m.Rec {
+		treeFlags |= unix.AT_RECURSIVE
+		setFlags |= unix.AT_RECURSIVE
+	}
+	tree, err := unix.OpenTree(sfd, "", treeFlags)
+	if errors.Is(err, unix.ENOSYS) {
+		if m.Rec {
+			return fail.E("unsupported")
+		}
+		return legacyBind(sfd, dfd, m, flags)
+	}
+	if err != nil {
+		return fail.E("failed")
+	}
+	defer unix.Close(tree)
+	if err := unix.MountSetattr(tree, "", setFlags, &unix.MountAttr{Attr_set: attr}); err != nil {
+		if errors.Is(err, unix.ENOSYS) && !m.Rec {
+			return legacyBind(sfd, dfd, m, flags)
+		}
+		if errors.Is(err, unix.ENOSYS) {
+			return fail.E("unsupported")
+		}
+		return fail.E("failed")
+	}
+	if err := unix.MoveMount(tree, "", dfd, "", unix.MOVE_MOUNT_F_EMPTY_PATH|unix.MOVE_MOUNT_T_EMPTY_PATH); err != nil {
 		return fail.E("failed")
 	}
 	return nil
+}
+
+// legacyBind is a single-mount bind on a kernel without the new mount
+// calls: bind, then set the flags with a remount on the new mount (dfd
+// names the directory beneath it, so the point is opened again); if that
+// fails the bind is unmounted.
+func legacyBind(sfd, dfd int, m sash.MountPlan, flags uintptr) error {
+	if err := unix.Mount(fdPath(sfd), fdPath(dfd), "", unix.MS_BIND, ""); err != nil {
+		return fail.E("failed")
+	}
+	how := unix.OpenHow{Flags: uint64(unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC), Resolve: unix.RESOLVE_NO_SYMLINKS}
+	nfd, err := unix.Openat2(unix.AT_FDCWD, m.Dir, &how)
+	if err != nil {
+		return fail.E("failed")
+	}
+	defer unix.Close(nfd)
+	if err := unix.Mount("", fdPath(nfd), "", flags|unix.MS_REMOUNT|unix.MS_BIND, ""); err != nil {
+		unix.Unmount(fdPath(nfd), unix.MNT_DETACH)
+		return fail.E("failed")
+	}
+	return nil
+}
+
+// Umount unmounts a mount this service made, after checking its ID.
+func (h *sashHost) Umount(dir string) error {
+	reg := h.sup.mounts()
+	rec, ok := reg.get(dir)
+	if !ok || rec.Service != h.s.svc.Name {
+		return fail.E("not_mounted")
+	}
+	return reg.unmountRec(rec)
 }
 
 // unmountAll unmounts every mount the service made, newest first, when it
@@ -340,7 +423,9 @@ func (h *sashHost) unmountAll(t *sash.Table) {
 	for _, dir := range t.Mounts() {
 		if err := h.Umount(dir); err != nil {
 			h.sup.logf("sash_umount %s %s", h.s.svc.Name, fail.Token(err))
-			continue
+			if fail.Token(err) != "not_mounted" {
+				continue
+			}
 		}
 		t.Unmounted(dir)
 	}

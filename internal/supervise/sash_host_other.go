@@ -57,3 +57,10 @@ func (h *sashHost) Mount(sash.MountPlan) error { return fail.E("failed") }
 func (h *sashHost) Umount(string) error { return fail.E("failed") }
 
 func (h *sashHost) unmountAll(*sash.Table) {}
+
+type mountRegistry struct{}
+
+func (sup *Supervisor) mounts() *mountRegistry { return nil }
+
+// CleanSashMounts has nothing to clean off Linux.
+func (sup *Supervisor) CleanSashMounts() {}

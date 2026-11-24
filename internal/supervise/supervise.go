@@ -115,6 +115,9 @@ type Supervisor struct {
 	Log io.Writer
 	// Sash, when set, runs sash units (sash.go). Set before Boot.
 	Sash *SashConfig
+	// mountReg holds every sash service's mounts (sash_mounts_linux.go).
+	mountsOnce sync.Once
+	mountReg   *mountRegistry
 	// lookupUser and lookupGroup replace the system's name lookup in
 	// tests.
 	lookupUser, lookupGroup func(string) (uint32, error)
