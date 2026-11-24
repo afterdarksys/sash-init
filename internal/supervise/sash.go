@@ -364,14 +364,14 @@ func (sup *Supervisor) startSashLocked(ctx context.Context, s *runtime, gen uint
 	if d == nil || sup.Sash == nil {
 		return sup.sashFail(s, gen, "sash_unavailable", true)
 	}
-	if sup.Cgroups == nil {
-		return sup.sashFail(s, gen, "sash_cgroups", true)
-	}
 	g, doc, err := sup.loadGrant(svc)
 	if err != nil {
 		tok := fail.Token(err)
 		sup.logf("sash_grant %s %s", svc.Name, tok)
 		return sup.sashFail(s, gen, tok, true)
+	}
+	if sup.Cgroups == nil {
+		return sup.sashFail(s, gen, "sash_cgroups", true)
 	}
 	sup.launching.RLock()
 	grp, err := sup.Cgroups.Prepare(svc.Name, svc.Limits, timeoutOf(svc))

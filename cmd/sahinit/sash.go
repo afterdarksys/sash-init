@@ -163,9 +163,6 @@ func setupSash(f sashFlags, svcs map[string]*unit.Service, root *cgroup.Root, se
 	if err != nil {
 		return refuse("sash_binary")
 	}
-	if root == nil {
-		return refuse("sash_cgroups")
-	}
 	if f.fleetPub == "" {
 		return refuse("sash_fleet_key")
 	}
@@ -179,6 +176,10 @@ func setupSash(f sashFlags, svcs map[string]*unit.Service, root *cgroup.Root, se
 	store, err := sash.OpenFloorStore(f.floorDir, key)
 	if err != nil {
 		return refuse("sash_floor_store")
+	}
+	if root == nil {
+		store.Close()
+		return refuse("sash_cgroups")
 	}
 	lookUser, lookGroup := supervise.LookupIDs()
 	refused := 0
