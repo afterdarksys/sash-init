@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/afterdarksys/sahinit/internal/fail"
 	"github.com/afterdarksys/sahinit/internal/sash"
@@ -189,11 +190,23 @@ func TestApplyDescribe(t *testing.T) {
 		"wants":       {strings.Replace(sashUnit, `"name":"app",`, `"name":"app","wants":["db"],`, 1), nil, "sash_order_mismatch"},
 		"bad dep":     {sashUnit, func(d *sash.Description) { d.Requires = []string{"a_b"} }, "sash_order_mismatch"},
 		"restart":     {strings.Replace(sashUnit, `"name":"app",`, `"name":"app","restart":"always",`, 1), nil, "sash_lifecycle_mismatch"},
+		"ready limit": {sashUnit, func(d *sash.Description) { d.Ready = &sash.Ready{Kind: "none", Timeout: 6 * time.Minute} }, "sash_lifecycle_limit"},
+		"stop limit":  {sashUnit, func(d *sash.Description) { d.Stop = &sash.Stop{Signal: "TERM", Timeout: 6 * time.Minute} }, "sash_lifecycle_limit"},
+		"delay limit": {sashUnit, func(d *sash.Description) { d.Restart.Delay = 6 * time.Minute }, "sash_lifecycle_limit"},
+		"burst limit": {sashUnit, func(d *sash.Description) { d.Restart.Burst = MaxRestartBurst + 1 }, "sash_lifecycle_limit"},
 		"never vs no": {strings.Replace(sashUnit, `"name":"app",`, `"name":"app","restart":"on-failure",`, 1), func(d *sash.Description) { d.Restart.Policy = "never" }, "sash_lifecycle_mismatch"},
 	} {
 		if err := ApplyDescribe(mustParse(t, c.unit, "app"), describeOf(t, c.edit), look, look); fail.Token(err) != c.want {
 			t.Errorf("%s: %v, want %s", name, err, c.want)
 		}
+	}
+	atLimit := mustParse(t, sashUnit, "app")
+	if err := ApplyDescribe(atLimit, describeOf(t, func(d *sash.Description) {
+		d.Ready = &sash.Ready{Kind: "none", Timeout: 5 * time.Minute}
+		d.Stop = &sash.Stop{Signal: "TERM", Timeout: 5 * time.Minute}
+		d.Restart.Burst, d.Restart.Delay = MaxRestartBurst, 5*time.Minute
+	}), look, look); err != nil {
+		t.Fatalf("at the limits: %v", err)
 	}
 	noRestart := mustParse(t, strings.Replace(sashUnit, `"name":"app",`, `"name":"app","restart":"no",`, 1), "app")
 	if err := ApplyDescribe(noRestart, describeOf(t, func(d *sash.Description) { d.Restart = nil }), look, look); err != nil || noRestart.Restart != "no" {

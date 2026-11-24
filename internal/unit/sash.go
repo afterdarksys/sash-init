@@ -222,6 +222,9 @@ func ApplyDescribe(svc *Service, d *sash.Description, lookupUser, lookupGroup fu
 			return fail.E("sash_order_mismatch")
 		}
 	}
+	if err := lifecycleLimits(d); err != nil {
+		return err
+	}
 	policy := "no"
 	if d.Restart != nil && d.Restart.Policy != "never" {
 		policy = d.Restart.Policy
@@ -248,4 +251,29 @@ func sameSet(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// MaxRestartBurst is the most restarts a sash service block may allow in
+// its window: sahinit's own default burst.
+const MaxRestartBurst = 5
+
+// lifecycleLimits refuses a service block whose ready or stop timeout or
+// restart delay passes sahinit's unit timeout limit, or whose restart burst
+// passes MaxRestartBurst (sash_lifecycle_limit). Nothing is clamped: the
+// script's author sees the refusal.
+//
+// Threats: describe output is the script's; without these bounds a service
+// file alone could make sahinit hold a start, a stop or a restart for a day.
+func lifecycleLimits(d *sash.Description) error {
+	bad := fail.E("sash_lifecycle_limit")
+	if d.Ready != nil && d.Ready.Timeout > maxTimeout {
+		return bad
+	}
+	if d.Stop != nil && d.Stop.Timeout > maxTimeout {
+		return bad
+	}
+	if r := d.Restart; r != nil && (r.Delay > maxTimeout || r.Burst > MaxRestartBurst) {
+		return bad
+	}
+	return nil
 }
