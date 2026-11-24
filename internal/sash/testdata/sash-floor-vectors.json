@@ -1,0 +1,17 @@
+{
+  "domain": "sahinit-sash-floor-v1\n",
+  "fleet_pub": "a71fcc2f89c887d6bd6f92bb5e7fb86e6fe9f67c9c5b428e033190b7b05fcbf2",
+  "source": "sahinit internal/sash TestFloorGoldenVector; the fleet key is sash's golden fleet key (sash-grant-vectors.json)",
+  "vectors": [
+    {
+      "name": "valid",
+      "doc": "{\"payload\":\"eyJ2ZXJzaW9uIjoic2FoaW5pdC1zYXNoLWZsb29yLzEiLCJzZXJ2aWNlIjoibmdpbngiLCJtaW5fc2VyaWFsIjo3LCJpc3N1ZWRfYXQiOjE3MDAwMDAwMDB9\",\"signature\":\"1AlhJeFwv2IvIqx44T+tosAgZxDlmZs5thxADe/m3ErNvgvg1Uz20YvGM3mLKwmHwcZ793UkZD3sl0P0/AH2AA==\"}",
+      "want": "ok"
+    },
+    {
+      "name": "other_key",
+      "doc": "{\"payload\":\"eyJ2ZXJzaW9uIjoic2FoaW5pdC1zYXNoLWZsb29yLzEiLCJzZXJ2aWNlIjoibmdpbngiLCJtaW5fc2VyaWFsIjo3LCJpc3N1ZWRfYXQiOjE3MDAwMDAwMDB9\",\"signature\":\"SECozugrrHMR8NGkVqe+3Qitb6M+nyxXFO8ymCvIrAXUE4D3hPZ+ejsoUPfvUNo8C/UhDimGTXkl+M7pZ357BQ==\"}",
+      "want": "sash_floor_bad_signature"
+    }
+  ]
+}
