@@ -1120,7 +1120,12 @@ func OpenBeneath(root, p string, flags int, mode uint32) (int, error) {
 	if rel == "" {
 		rel = "."
 	}
-	how = unix.OpenHow{Flags: uint64(flags | unix.O_CLOEXEC | unix.O_NOFOLLOW), Mode: uint64(mode), Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS}
+	// O_NOFOLLOW with O_PATH would hand back the symlink itself; without
+	// it RESOLVE_NO_SYMLINKS refuses a trailing link with ELOOP.
+	if flags&unix.O_PATH == 0 {
+		flags |= unix.O_NOFOLLOW
+	}
+	how = unix.OpenHow{Flags: uint64(flags | unix.O_CLOEXEC), Mode: uint64(mode), Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS}
 	return unix.Openat2(rfd, rel, &how)
 }
 

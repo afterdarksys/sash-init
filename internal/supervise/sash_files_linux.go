@@ -275,7 +275,7 @@ func (h *sashHost) Mount(m sash.MountPlan) error {
 	case m.Remount:
 		err = unix.Mount("", fdPath(dfd), "", flags|unix.MS_REMOUNT, data)
 	case m.Bind:
-		sh := unix.OpenHow{Flags: uint64(unix.O_PATH | unix.O_CLOEXEC | unix.O_NOFOLLOW), Resolve: unix.RESOLVE_NO_SYMLINKS}
+		sh := unix.OpenHow{Flags: uint64(unix.O_PATH | unix.O_CLOEXEC), Resolve: unix.RESOLVE_NO_SYMLINKS}
 		sfd, serr := unix.Openat2(unix.AT_FDCWD, m.Src, &sh)
 		if serr != nil {
 			return pathErr(serr)
@@ -286,9 +286,16 @@ func (h *sashHost) Mount(m sash.MountPlan) error {
 			bind |= unix.MS_REC
 		}
 		if err = unix.Mount(fdPath(sfd), fdPath(dfd), "", bind, ""); err == nil {
-			// A bind takes its options only from a remount.
-			if err = unix.Mount("", fdPath(dfd), "", flags|unix.MS_REMOUNT|unix.MS_BIND, ""); err != nil {
-				unix.Unmount(fdPath(dfd), unix.MNT_DETACH)
+			// A bind takes its options only from a remount, made on the
+			// new mount: dfd still names the directory beneath it, so the
+			// mount point is opened again.
+			nfd, nerr := unix.Openat2(unix.AT_FDCWD, m.Dir, &how)
+			if nerr != nil {
+				return fail.E("failed")
+			}
+			defer unix.Close(nfd)
+			if err = unix.Mount("", fdPath(nfd), "", flags|unix.MS_REMOUNT|unix.MS_BIND, ""); err != nil {
+				unix.Unmount(fdPath(nfd), unix.MNT_DETACH)
 			}
 		}
 	default:
