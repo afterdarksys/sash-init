@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -101,13 +102,14 @@ var (
 var specKeys = map[string]struct{}{
 	"no_new_privs": {}, "read_only_paths": {}, "read_write_paths": {}, "caps": {},
 	"notify": {}, "sandbox": {}, "cgroup": {}, "pass": {}, "umask": {}, "rlimits": {},
+	"stdout_file": {}, "stderr_file": {}, "stderr_stdout": {},
 }
 
 var childTokens = map[string]struct{}{
 	"sandbox_cap": {}, "sandbox_path": {}, "sandbox_privs": {}, "sandbox_overlap": {},
 	"openat2_unavailable": {}, "landlock_unavailable": {}, "landlock_abi": {},
 	"exec_relative": {}, "exec_not_file": {}, "failed": {}, "sandbox_root": {},
-	"cgroup_join": {},
+	"cgroup_join": {}, "stream_denied": {},
 }
 
 func okLine(abi int) []byte {
@@ -202,6 +204,14 @@ func ApplyCLI(args []string) int {
 		env = append(env, "SAHINIT_READY_FD=3")
 	}
 	argv = append([]string{}, argv...)
+	// The umask, then the stream files, as the target's uid and before
+	// Landlock, which may not let it write there.
+	if umask >= 0 {
+		unix.Umask(umask)
+	}
+	if err := openStreams(raw); err != nil {
+		return writeStatus(fail.Token(err))
+	}
 	status := noneLine
 	if sb != nil {
 		h, abi, err := restrict(sb)
@@ -213,9 +223,6 @@ func ApplyCLI(args []string) int {
 			return writeStatus("failed")
 		}
 		status = okLine(abi)
-	}
-	if umask >= 0 {
-		unix.Umask(umask)
 	}
 	if err := setRlimits(limits); err != nil {
 		return writeStatus("failed")
@@ -762,12 +769,12 @@ func closeHeld(h *held) error {
 // marshalSpec writes the helper's spec. A nil sb is a helper that only
 // joins the cgroup (join must then be set).
 func marshalSpec(sb *unit.Sandbox, notify, join bool) ([]byte, error) {
-	return marshalSpecPass(sb, notify, join, 0, nil, nil)
+	return marshalSpecPass(sb, notify, join, 0, nil, nil, Options{})
 }
 
 // marshalSpecPass is marshalSpec with a count of passed fds, a umask and
 // rlimits.
-func marshalSpecPass(sb *unit.Sandbox, notify, join bool, pass int, umask *int, limits map[string]uint64) ([]byte, error) {
+func marshalSpecPass(sb *unit.Sandbox, notify, join bool, pass int, umask *int, limits map[string]uint64, streams Options) ([]byte, error) {
 	if sb == nil && !join {
 		return nil, fail.E("failed")
 	}
@@ -786,7 +793,13 @@ func marshalSpecPass(sb *unit.Sandbox, notify, join bool, pass int, umask *int, 
 		Pass       int               `json:"pass,omitempty"`
 		Umask      *int              `json:"umask,omitempty"`
 		Rlimits    map[string]uint64 `json:"rlimits,omitempty"`
+		StdoutFile *StreamFile       `json:"stdout_file,omitempty"`
+		StderrFile *StreamFile       `json:"stderr_file,omitempty"`
+		StderrOut  bool              `json:"stderr_stdout,omitempty"`
 	}{
+		StdoutFile: streams.StdoutFile,
+		StderrFile: streams.StderrFile,
+		StderrOut:  streams.StderrToStdout,
 		Rlimits:    limits,
 		Pass:       pass,
 		Umask:      umask,
@@ -831,7 +844,7 @@ func launchHelper(ctx context.Context, self string, argv []string, execF *os.Fil
 	if len(opts.Pass) > 0 && (sb == nil || notify || len(opts.Pass) > MaxPass) {
 		return nil, "", nil, fail.E("failed")
 	}
-	spec, err := marshalSpecPass(sb, notify, join, len(opts.Pass), opts.Umask, opts.Rlimits)
+	spec, err := marshalSpecPass(sb, notify, join, len(opts.Pass), opts.Umask, opts.Rlimits, opts)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -1088,6 +1101,81 @@ func setRlimits(limits map[string]uint64) error {
 		lim := unix.Rlimit{Cur: v, Max: v}
 		if err := unix.Setrlimit(res, &lim); err != nil {
 			return fail.E("failed")
+		}
+	}
+	return nil
+}
+
+// OpenBeneath opens p beneath root with no symlink at any component, the
+// last included: root itself is resolved with RESOLVE_NO_SYMLINKS, and p
+// relative to it with RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS and O_NOFOLLOW.
+func OpenBeneath(root, p string, flags int, mode uint32) (int, error) {
+	how := unix.OpenHow{Flags: uint64(unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC), Resolve: unix.RESOLVE_NO_SYMLINKS}
+	rfd, err := unix.Openat2(unix.AT_FDCWD, root, &how)
+	if err != nil {
+		return -1, err
+	}
+	defer unix.Close(rfd)
+	rel := strings.TrimPrefix(strings.TrimPrefix(p, root), "/")
+	if rel == "" {
+		rel = "."
+	}
+	how = unix.OpenHow{Flags: uint64(flags | unix.O_CLOEXEC | unix.O_NOFOLLOW), Mode: uint64(mode), Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS}
+	return unix.Openat2(rfd, rel, &how)
+}
+
+// openStreams opens the spec's stream files as the helper's own uid (the
+// target's), beneath their roots, and puts them on fds 1 and 2. A file
+// that is not a regular file with one link, or that the target's uid may
+// not open, is stream_denied.
+//
+// Threats: sahinit runs as root; a stream it opened itself would let a
+// service append to a root-only file under its file_write root. Opened
+// here, before Landlock, with the target's credentials, it reaches only
+// what the service's own uid may write.
+func openStreams(raw []byte) error {
+	obj, err := jsonobj.Decode(raw, specKeys)
+	if err != nil {
+		return fail.E("failed")
+	}
+	open := func(key string, target int) error {
+		v, ok := obj[key]
+		if !ok {
+			return nil
+		}
+		var f StreamFile
+		if err := jsonobj.Unmarshal(v, &f); err != nil || f.Root == "" || !strings.HasPrefix(f.Path, f.Root+"/") {
+			return fail.E("stream_denied")
+		}
+		fd, err := OpenBeneath(f.Root, f.Path, unix.O_WRONLY|unix.O_CREAT|unix.O_APPEND|unix.O_NONBLOCK, 0o640)
+		if err != nil {
+			return fail.E("stream_denied")
+		}
+		defer unix.Close(fd)
+		var st unix.Stat_t
+		if unix.Fstat(fd, &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Nlink != 1 {
+			return fail.E("stream_denied")
+		}
+		if err := unix.Dup3(fd, target, 0); err != nil {
+			return fail.E("failed")
+		}
+		return nil
+	}
+	if err := open("stdout_file", 1); err != nil {
+		return err
+	}
+	if err := open("stderr_file", 2); err != nil {
+		return err
+	}
+	if v, ok := obj["stderr_stdout"]; ok {
+		var on bool
+		if err := jsonobj.Unmarshal(v, &on); err != nil {
+			return fail.E("failed")
+		}
+		if on {
+			if err := unix.Dup3(1, 2, 0); err != nil {
+				return fail.E("failed")
+			}
 		}
 	}
 	return nil

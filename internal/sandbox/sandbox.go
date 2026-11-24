@@ -107,7 +107,7 @@ func Launch(ctx context.Context, self string, argv []string, sb *unit.Sandbox, n
 		return nil, "", nil, fail.E("cgroup_unavailable")
 	}
 	join := opts.Cgroup != nil && noClone.Load()
-	if (len(opts.Pass) > 0 || opts.Umask != nil || len(opts.Rlimits) > 0) && sb == nil {
+	if (len(opts.Pass) > 0 || opts.Umask != nil || len(opts.Rlimits) > 0 || opts.StdoutFile != nil || opts.StderrFile != nil) && sb == nil {
 		return nil, "", nil, fail.E("failed")
 	}
 	if len(opts.Pass) > MaxPass || len(opts.Pass) > 0 && notify {
@@ -366,11 +366,24 @@ type Options struct {
 	Pass []*os.File
 	// Umask, when not nil, is the target's umask.
 	Umask *int
+	// StdoutFile and StderrFile, when set, are opened by the helper, as
+	// the target's uid and gid, beneath Root with no symlink at any
+	// component (stream_denied otherwise), for appending, and made the
+	// target's stdout or stderr. StderrToStdout makes stderr the same file
+	// as stdout. Only a sandboxed launch has them.
+	StdoutFile, StderrFile *StreamFile
+	StderrToStdout         bool
 	// Rlimits are set by the helper, soft and hard, before it execs (so
 	// they can only lower a limit):
 	// resource name (nofile, nproc, core, memlock, stack, as, cpu, fsize)
 	// to value. Only a sandboxed launch sets them.
 	Rlimits map[string]uint64
+}
+
+// StreamFile is a file the helper opens for a stream.
+type StreamFile struct {
+	Root string `json:"root"`
+	Path string `json:"path"`
 }
 
 // MaxPass is the most fds Options.Pass may hold.

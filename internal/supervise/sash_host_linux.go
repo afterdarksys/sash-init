@@ -75,24 +75,8 @@ func (h *sashHost) DialTCP(addr string) bool {
 	return true
 }
 
-// openBeneath opens p beneath root with no symlink at any component.
-func openBeneath(root, p string, flags int, mode uint32) (int, error) {
-	how := unix.OpenHow{Flags: uint64(unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC), Resolve: unix.RESOLVE_NO_SYMLINKS}
-	rfd, err := unix.Openat2(unix.AT_FDCWD, root, &how)
-	if err != nil {
-		return -1, err
-	}
-	defer unix.Close(rfd)
-	rel := strings.TrimPrefix(strings.TrimPrefix(p, root), "/")
-	if rel == "" {
-		rel = "."
-	}
-	how = unix.OpenHow{Flags: uint64(flags | unix.O_CLOEXEC | unix.O_NOFOLLOW), Mode: uint64(mode), Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS}
-	return unix.Openat2(rfd, rel, &how)
-}
-
 func (h *sashHost) ProbePath(kind, root, p string) bool {
-	fd, err := openBeneath(root, p, unix.O_PATH, 0)
+	fd, err := sandbox.OpenBeneath(root, p, unix.O_PATH, 0)
 	if err != nil {
 		return false
 	}
@@ -144,32 +128,6 @@ func signalName(sig syscall.Signal) string {
 	return strings.TrimPrefix(unix.SignalName(sig), "SIG")
 }
 
-// openStream opens a file: stream beneath its root for appending, creating
-// it (0640, owned by the child's ids) when missing.
-func openStream(st sash.Stream, uid, gid uint32) (*os.File, error) {
-	created := true
-	fd, err := openBeneath(st.Root, st.Path, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_APPEND|unix.O_NONBLOCK, 0o640)
-	if err == unix.EEXIST {
-		created = false
-		fd, err = openBeneath(st.Root, st.Path, unix.O_WRONLY|unix.O_APPEND|unix.O_NONBLOCK, 0)
-	}
-	if err != nil {
-		return nil, fail.E("denied")
-	}
-	var fs unix.Stat_t
-	if unix.Fstat(fd, &fs) != nil || fs.Mode&unix.S_IFMT != unix.S_IFREG || fs.Nlink != 1 {
-		unix.Close(fd)
-		return nil, fail.E("denied")
-	}
-	if created {
-		if err := unix.Fchown(fd, int(uid), int(gid)); err != nil {
-			unix.Close(fd)
-			return nil, fail.E("failed")
-		}
-	}
-	return os.NewFile(uintptr(fd), st.Path), nil
-}
-
 func (h *sashHost) Spawn(plan sash.SpawnPlan, p *sash.Proc) error {
 	sup, s := h.sup, h.s
 	svc := s.svc
@@ -190,7 +148,7 @@ func (h *sashHost) Spawn(plan sash.SpawnPlan, p *sash.Proc) error {
 		return fail.E("denied")
 	}
 	if plan.Cwd != "" {
-		fd, err := openBeneath(plan.CwdRoot, plan.Cwd, unix.O_PATH|unix.O_DIRECTORY, 0)
+		fd, err := sandbox.OpenBeneath(plan.CwdRoot, plan.Cwd, unix.O_PATH|unix.O_DIRECTORY, 0)
 		if err != nil {
 			return fail.E("denied")
 		}
@@ -200,24 +158,11 @@ func (h *sashHost) Spawn(plan sash.SpawnPlan, p *sash.Proc) error {
 	for _, e := range plan.Env {
 		env = append(env, e.Name+"="+e.Value)
 	}
-	var files []*os.File
-	defer func() {
-		for _, f := range files {
-			f.Close()
-		}
-	}()
 	writer := func(st sash.Stream, tail *sash.Tail, label string) (io.Writer, error) {
 		switch st.Kind {
 		case "journal":
 			tail.Copy = func(line string) { sup.journalLine(s, plan.Name, label, line) }
 			return tail, nil
-		case "file":
-			f, err := openStream(st, uid, gid)
-			if err != nil {
-				return nil, err
-			}
-			files = append(files, f)
-			return f, nil
 		}
 		return nil, nil
 	}
@@ -239,6 +184,15 @@ func (h *sashHost) Spawn(plan sash.SpawnPlan, p *sash.Proc) error {
 		Rlimits:   plan.Limits,
 	}
 	opts.Stdout, opts.Stderr = out, errw
+	// A file stream is opened by the helper, as the child, beneath its
+	// root: sahinit's own permissions never reach it.
+	if plan.Stdout.Kind == "file" {
+		opts.StdoutFile = &sandbox.StreamFile{Root: plan.Stdout.Root, Path: plan.Stdout.Path}
+	}
+	if plan.Stderr.Kind == "file" {
+		opts.StderrFile = &sandbox.StreamFile{Root: plan.Stderr.Root, Path: plan.Stderr.Path}
+	}
+	opts.StderrToStdout = plan.Stderr.Kind == "stdout" && plan.Stdout.Kind == "file"
 	if plan.Umask >= 0 {
 		m := plan.Umask
 		opts.Umask = &m
@@ -253,6 +207,9 @@ func (h *sashHost) Spawn(plan sash.SpawnPlan, p *sash.Proc) error {
 	cmd, _, notifyR, err := sandbox.Launch(context.Background(), sup.self, plan.Argv, &sb, true, timeoutOf(svc), opts)
 	sup.launching.RUnlock()
 	if err != nil {
+		if fail.Token(err) == "stream_denied" {
+			return fail.E("denied")
+		}
 		return fail.E("failed")
 	}
 	child := &sashChild{pidfd: openPidfd(cmd.Process.Pid)}

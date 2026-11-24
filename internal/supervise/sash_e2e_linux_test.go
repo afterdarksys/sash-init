@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -388,7 +389,12 @@ func TestSashHostRechecks(t *testing.T) {
 	g := e2eGrant("app", []string{"/usr/bin/sleep", "/tmp/sahinit-not-trusted"}, []string{"PORT", "LD_PRELOAD"})
 	work := filepath.Join(e.base, "work")
 	os.Mkdir(work, 0o755)
+	os.Chown(work, 65534, 65534)
 	os.Symlink("/etc", filepath.Join(work, "link"))
+	// A root-only file under file_write: sahinit is root, the child is not.
+	if err := os.WriteFile(filepath.Join(work, "root.log"), []byte("root only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	g.FileRead, g.FileWrite = []string{"/usr"}, []string{work}
 	grp, err := e.root.Prepare("app", unit.Limits{}, time.Second)
 	if err != nil {
@@ -420,13 +426,14 @@ func TestSashHostRechecks(t *testing.T) {
 		opts map[string]any
 		want string
 	}{
-		"unlisted":       {"/bin/sh", id(nil), "denied"},
-		"untrusted file": {untrusted, id(nil), "denied"},
-		"root":           {"/usr/bin/sleep", id(map[string]any{"user": "root"}), "denied"},
-		"env":            {"/usr/bin/sleep", id(map[string]any{"env": map[string]any{"LD_PRELOAD": "/x"}}), "env_refused"},
-		"cwd outside":    {"/usr/bin/sleep", id(map[string]any{"cwd": "/etc"}), "denied"},
-		"cwd symlink":    {"/usr/bin/sleep", id(map[string]any{"cwd": work + "/link"}), "denied"},
-		"stream symlink": {"/usr/bin/sleep", id(map[string]any{"stdout": "file:" + work + "/link/x"}), "denied"},
+		"unlisted":         {"/bin/sh", id(nil), "denied"},
+		"untrusted file":   {untrusted, id(nil), "denied"},
+		"root":             {"/usr/bin/sleep", id(map[string]any{"user": "root"}), "denied"},
+		"env":              {"/usr/bin/sleep", id(map[string]any{"env": map[string]any{"LD_PRELOAD": "/x"}}), "env_refused"},
+		"cwd outside":      {"/usr/bin/sleep", id(map[string]any{"cwd": "/etc"}), "denied"},
+		"cwd symlink":      {"/usr/bin/sleep", id(map[string]any{"cwd": work + "/link"}), "denied"},
+		"stream symlink":   {"/usr/bin/sleep", id(map[string]any{"stdout": "file:" + work + "/link/x"}), "denied"},
+		"stream root file": {"/usr/bin/sleep", id(map[string]any{"stdout": "file:" + work + "/root.log"}), "denied"},
 	} {
 		if r := spawn("p-"+strings.ReplaceAll(name, " ", "-"), c.prog, c.opts); r.Error != c.want {
 			t.Errorf("%s: %+v, want %s", name, r, c.want)
@@ -447,7 +454,7 @@ func TestSashHostRechecks(t *testing.T) {
 	if cg := cgroupOf(t, pid); !strings.HasSuffix(cg, "/app.service") {
 		t.Fatalf("spawned into %s", cg)
 	}
-	if st, err := os.Stat(work + "/out.log"); err != nil || st.Mode().Perm() != 0o640 {
+	if st, err := os.Stat(work + "/out.log"); err != nil || st.Mode().Perm() != 0o640 || st.Sys().(*syscall.Stat_t).Uid != 65534 {
 		t.Fatalf("stream file %v %v", st, err)
 	}
 	if r := srv.Handle(sash.Request{Key: "svc.signal", Argv: []string{"signal", "good", "KILL"}}); r.Error != "" {

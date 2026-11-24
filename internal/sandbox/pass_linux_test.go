@@ -106,7 +106,7 @@ func TestPassRefusals(t *testing.T) {
 
 func mustSpec(t *testing.T) []byte {
 	t.Helper()
-	b, err := marshalSpecPass(&unit.Sandbox{NoNewPrivs: true}, false, false, 2, nil, nil)
+	b, err := marshalSpecPass(&unit.Sandbox{NoNewPrivs: true}, false, false, 2, nil, nil, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
