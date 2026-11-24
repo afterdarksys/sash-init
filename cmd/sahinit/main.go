@@ -22,11 +22,11 @@ import (
 	"github.com/afterdarksys/sahinit/internal/unit"
 )
 
-const usageText = policyUsage +
+const usageText = policyUsage + sashUsage +
 	"usage: sahinit init [--dir DIR] [--socket PATH] [--recovery EXECUTABLE] [--shutdown-timeout DURATION]\n" +
-	"usage: sahinit ctl --socket PATH status|diagnostics|start|stop|restart [NAME]\n" +
+	"usage: sahinit ctl --socket PATH status|diagnostics|start|stop|restart|reload|check [NAME]\n" +
 	"usage: sahinit plan --dir DIR\n" +
-	"usage: sahinit supervise --dir DIR --socket PATH [--uid UID]... [--gid GID] [--no-cgroups] [--cgroup-sweep DURATION] [--boot-strict]\n" +
+	"usage: sahinit supervise --dir DIR --socket PATH [--uid UID]... [--gid GID] [--no-cgroups] [--cgroup-sweep DURATION] [--boot-strict] [--sash PATH] [--sash-fleet-pub PATH] [--sash-floor-dir DIR]\n" +
 	"usage: sahinit migrate --from FORMAT --source DIR [--out NEW_DIR] [--boot]\n"
 
 func main() {
@@ -60,6 +60,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "policy":
 		return runPolicy(args[1:], stdout, stderr)
+	case "sash":
+		return runSash(args[1:], stdout, stderr)
 	case "ctl":
 		return runCtl(args[1:], stdout, stderr)
 	case "migrate":
@@ -183,6 +185,10 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 	noCgroups := fs.Bool("no-cgroups", false, "")
 	strict := fs.Bool("boot-strict", false, "exit to the PID 1 recovery loop if boot fails")
 	sweep := fs.Duration("cgroup-sweep", 30*time.Second, "")
+	var sf sashFlags
+	fs.StringVar(&sf.binary, "sash", "/usr/bin/sash", "")
+	fs.StringVar(&sf.fleetPub, "sash-fleet-pub", "", "")
+	fs.StringVar(&sf.floorDir, "sash-floor-dir", "", "")
 	var uids []uint32
 	passed := false
 	fs.Func("uid", "", func(s string) error {
@@ -238,14 +244,26 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "boot_refused")
 		return 2
 	}
-	waves, err := graph.Plan(svcs)
-	if err != nil {
-		fmt.Fprintln(stderr, fail.Token(err))
-		return 2
-	}
 	self, err := os.Executable()
 	if err != nil {
 		fmt.Fprintln(stderr, "failed")
+		return 2
+	}
+	sashCfg, sashRefused := setupSash(sf, svcs, root, self, stderr)
+	if *strict && sashRefused > 0 {
+		fmt.Fprintln(stderr, "boot_refused")
+		return 2
+	}
+	if len(svcs) == 0 {
+		fmt.Fprintln(stderr, "empty")
+		return 2
+	}
+	if sashCfg != nil {
+		defer sashCfg.Floors.Close()
+	}
+	waves, err := graph.Plan(svcs)
+	if err != nil {
+		fmt.Fprintln(stderr, fail.Token(err))
 		return 2
 	}
 	sup, err := supervise.New(svcs, self)
@@ -254,6 +272,7 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	sup.SocketGID = gid
+	sup.Sash = sashCfg
 	sup.Cgroups, sup.CgroupMode = root, mode
 	sup.Log = stderr
 	if passed {

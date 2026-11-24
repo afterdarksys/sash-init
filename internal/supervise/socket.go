@@ -340,6 +340,10 @@ func (sup *Supervisor) dispatch(op, name, arg string) response {
 		return sup.mutResp(name, sup.Restart(ctx, name))
 	case "oneshot":
 		return sup.mutResp(name, sup.Oneshot(ctx, name, arg))
+	case "reload":
+		return sup.mutResp(name, sup.Reload(ctx, name))
+	case "check":
+		return sup.mutResp(name, sup.Check(ctx, name))
 	default:
 		resp := response{OK: false, Error: "unknown_op"}
 		if unit.NameOK(name) {

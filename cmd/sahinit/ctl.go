@@ -22,7 +22,7 @@ func runCtl(args []string, stdout, stderr io.Writer) int {
 	}
 	op := fs.Arg(0)
 	switch op {
-	case "status", "diagnostics", "start", "stop", "restart":
+	case "status", "diagnostics", "start", "stop", "restart", "reload", "check":
 	default:
 		fmt.Fprintln(stderr, "unknown_op")
 		return 2

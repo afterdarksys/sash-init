@@ -68,6 +68,9 @@ type Row struct {
 	CgroupTrusted bool          `json:"cgroup_trusted"`
 	Limits        RowLimits     `json:"limits"`
 	Usage         *cgroup.Usage `json:"usage,omitempty"`
+	// Sash is present for a sash unit: its entry results, name table and
+	// grant serial, never the grant body or env values.
+	Sash *SashRow `json:"sash,omitempty"`
 }
 
 // RowLimits are a unit's cgroup limits; zero or empty is no limit.
@@ -110,6 +113,11 @@ type Supervisor struct {
 	// Log, when set, receives one line per stray process killed
 	// ("cgroup_stray PID").
 	Log io.Writer
+	// Sash, when set, runs sash units (sash.go). Set before Boot.
+	Sash *SashConfig
+	// lookupUser and lookupGroup replace the system's name lookup in
+	// tests.
+	lookupUser, lookupGroup func(string) (uint32, error)
 	// launching is held (read) while a child may sit in the supervisor's
 	// leaf before joining its cgroup, so the stray sweep skips that time.
 	launching sync.RWMutex
@@ -153,6 +161,8 @@ type runtime struct {
 	// makes the service failed whatever else happened.
 	cg    *cgroup.Root
 	cgErr string
+	// sash is a sash unit's name table and entry results (sash.go).
+	sash *sashState
 }
 
 type ledGroup struct {
@@ -300,6 +310,9 @@ func (sup *Supervisor) Stop(ctx context.Context, name string) error {
 		return fail.E("busy")
 	}
 	defer s.op.Unlock()
+	if s.svc.Sash != nil {
+		return sup.stopSashLocked(ctx, s)
+	}
 
 	s.mu.Lock()
 	state := s.state
@@ -416,6 +429,25 @@ func (sup *Supervisor) Shutdown(ctx context.Context) error {
 	for _, wave := range waves {
 		for _, name := range wave {
 			s := sup.rt[name]
+			if s.svc.Sash != nil {
+				s.mu.Lock()
+				s.gen++
+				active := s.state == "running" || s.state == "starting" || s.state == "stopping"
+				if active {
+					s.stopReq = true
+					s.state = "stopping"
+					s.eventLocked("stopping", "", nil)
+				}
+				s.mu.Unlock()
+				if active {
+					wg.Add(1)
+					go func(s *runtime) {
+						defer wg.Done()
+						note(sup.stopSashBody(context.Background(), s))
+					}(s)
+				}
+				continue
+			}
 			s.mu.Lock()
 			s.gen++
 			s.stopReq = true
@@ -529,6 +561,7 @@ func (sup *Supervisor) row(s *runtime) Row {
 		Limits:    RowLimits{MemoryMax: l.MemoryMax, CPUMax: l.CPUMax(), PidsMax: l.PidsMax},
 
 		CgroupTrusted: unit.CgroupTrusted(s.svc),
+		Sash:          s.sashRowLocked(),
 	}
 	s.mu.Unlock()
 	if sup.Cgroups != nil {
@@ -597,6 +630,23 @@ func (sup *Supervisor) startLocked(ctx context.Context, s *runtime, arg string, 
 			s.mu.Unlock()
 		}
 		return err
+	}
+	if s.svc.Sash != nil {
+		s.mu.Lock()
+		if sup.shuttingDown.Load() || s.state == "running" || s.state == "starting" || s.state == "stopping" {
+			s.mu.Unlock()
+			return fail.E("busy")
+		}
+		if user {
+			s.gen++
+			s.restarts = 0
+			s.restartsAt = nil
+		}
+		gen := s.gen
+		s.eventLocked("starting", "", nil)
+		s.state, s.ready, s.pid, s.stopReq, s.timedOut, s.lastError, s.sandbox, s.cgErr = "starting", false, 0, false, false, "", "", ""
+		s.mu.Unlock()
+		return sup.startSashLocked(ctx, s, gen)
 	}
 	argv := append([]string{}, s.svc.Exec...)
 	if s.svc.Type == "oneshot" {
@@ -942,11 +992,15 @@ func (sup *Supervisor) onExit(s *runtime, procDone chan struct{}, gen uint64, ex
 }
 
 func (sup *Supervisor) allowRestart(s *runtime) bool {
-	burst := sup.RestartBurst
+	return allowRestartWith(s, sup.RestartBurst, sup.RestartWindow)
+}
+
+// allowRestartWith is allowRestart with a burst and window; caller holds
+// s.mu.
+func allowRestartWith(s *runtime, burst int, window time.Duration) bool {
 	if burst <= 0 {
 		burst = defaultBurst
 	}
-	window := sup.RestartWindow
 	if window <= 0 {
 		window = defaultWindow
 	}

@@ -126,7 +126,7 @@ var capNames = map[string]string{
 
 const (
 	maxSpawnArgv = 32
-	maxSpawnArg  = 4096
+	maxSpawnArg  = 256
 	maxEnv       = 128
 	maxEnvBytes  = 16384
 	maxWait      = 24 * time.Hour

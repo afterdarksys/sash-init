@@ -142,6 +142,14 @@ func parseSashUnit(obj map[string]json.RawMessage, stem string) (*Service, error
 	return svc, nil
 }
 
+// CheckSashFiles is checkSashFiles, for the check before each start.
+func CheckSashFiles(svc *Service) string {
+	if svc == nil || svc.Sash == nil {
+		return "failed"
+	}
+	return checkSashFiles(svc)
+}
+
 // checkSashFiles is "" when the service file and grant pass the trusted
 // walk and their owner and mode rules, else the refusal token.
 func checkSashFiles(svc *Service) string {
