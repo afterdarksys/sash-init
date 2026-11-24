@@ -35,3 +35,10 @@ func TestUnmountOrder(t *testing.T) {
 		t.Fatalf("got %q want %q", got, want)
 	}
 }
+
+func TestSwapPaths(t *testing.T) {
+	got := swapPaths("Filename Type Size Used Priority\n/swap\\040file file 1024 0 -2\n/dev/vdb partition 2048 0 -3\n")
+	if !reflect.DeepEqual(got, []string{"/swap file", "/dev/vdb"}) {
+		t.Fatal(got)
+	}
+}

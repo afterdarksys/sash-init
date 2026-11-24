@@ -1,0 +1,49 @@
+#!/bin/busybox sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Local ext4 root handoff. Package with static busybox, sahinit, e2fsck and
+# the target kernel's modules. Never source the kernel command line as shell.
+# This script, not sahinit, runs the filesystem check (e2fsck -p) and the
+# switch_root; sahinit only starts as PID 1 on the new root afterwards.
+PATH=/bin:/sbin
+export PATH
+fail() {
+    echo "sahinit-root: recovery: $*" >&2
+    exec /sahinit init --dir /etc/sahinit/failed
+}
+mkdir -p /proc /sys /dev /newroot
+mount -t proc proc /proc || fail proc
+mount -t sysfs sysfs /sys || fail sysfs
+mount -t devtmpfs devtmpfs /dev || fail devtmpfs
+exec </dev/console >/dev/console 2>&1
+root=
+# Split the command line on whitespace only: noglob stops a word such as
+# "*" expanding to file names, and nothing from it is ever evaluated.
+cmdline=$(cat /proc/cmdline)
+set -f
+for word in $cmdline; do
+    case "$word" in sahinit.root=/dev/*) root=${word#sahinit.root=} ;; esac
+done
+set +f
+case "$root" in /dev/*) ;; *) fail 'missing sahinit.root=/dev/DEVICE' ;; esac
+# These may be built into the kernel. Wait below verifies the device exists.
+modprobe virtio_pci 2>/dev/null || :
+modprobe virtio_blk 2>/dev/null || :
+modprobe ext4 2>/dev/null || :
+attempt=0
+while [ ! -b "$root" ]; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 100 ] || fail 'root device timed out'
+    sleep 0.1
+done
+e2fsck -p "$root"
+result=$?
+[ "$result" -le 1 ] || fail "filesystem check returned $result"
+mount -t ext4 -o rw "$root" /newroot || fail 'root mount failed'
+[ -x /newroot/sbin/sahinit ] || fail 'root has no /sbin/sahinit'
+mkdir -p /newroot/proc /newroot/sys /newroot/dev
+mount --move /proc /newroot/proc || fail 'move proc'
+mount --move /sys /newroot/sys || fail 'move sys'
+mount --move /dev /newroot/dev || fail 'move dev'
+echo 'sahinit-root: checked ext4 root; handing off'
+exec switch_root /newroot /sbin/sahinit init "$@"

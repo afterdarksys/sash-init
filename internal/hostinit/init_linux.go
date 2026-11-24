@@ -10,10 +10,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -170,6 +172,8 @@ func setup() error {
 		{"/proc", "proc", unix.PROC_SUPER_MAGIC, unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC, ""},
 		{"/sys", "sysfs", unix.SYSFS_MAGIC, unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC, ""},
 		{"/dev", "devtmpfs", unix.TMPFS_MAGIC, unix.MS_NOSUID, "mode=0755"},
+		{"/dev/pts", "devpts", unix.DEVPTS_SUPER_MAGIC, unix.MS_NOSUID | unix.MS_NOEXEC, "mode=0620,ptmxmode=0666"},
+		{"/dev/shm", "tmpfs", unix.TMPFS_MAGIC, unix.MS_NOSUID | unix.MS_NODEV, "mode=1777"},
 		{"/run", "tmpfs", unix.TMPFS_MAGIC, unix.MS_NOSUID | unix.MS_NODEV, "mode=0755"},
 		{"/sys/fs/cgroup", "cgroup2", unix.CGROUP2_SUPER_MAGIC, unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC, ""},
 	} {
@@ -179,6 +183,16 @@ func setup() error {
 	}
 	if err := os.MkdirAll("/run/sahinit", 0700); err != nil {
 		return err
+	}
+	// A missing /tmp is created 1777 (chmod after mkdir, which the umask
+	// would narrow); an existing one is left alone. Failing to create it is
+	// logged, not a failed boot.
+	if _, err := os.Lstat("/tmp"); os.IsNotExist(err) {
+		if err := os.Mkdir("/tmp", 0o700); err != nil {
+			log("mkdir /tmp: %v", err)
+		} else if err := os.Chmod("/tmp", os.ModeSticky|0o777); err != nil {
+			log("chmod /tmp: %v", err)
+		}
 	}
 	if err := os.MkdirAll("/sys/fs/cgroup/sahinit/supervisor", 0755); err != nil {
 		return err
@@ -289,6 +303,15 @@ func shutdown(manager int, timeout time.Duration, action int) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	unix.Sync()
+	if raw, err := os.ReadFile("/proc/swaps"); err == nil {
+		for _, path := range swapPaths(string(raw)) {
+			if err := swapoff(path); err != nil {
+				log("swapoff %s: %v", path, err)
+			}
+		}
+	} else {
+		log("read swaps: %v", err)
+	}
 	unmount()
 	unix.Sync()
 	if err := unix.Reboot(action); err != nil {
@@ -299,6 +322,31 @@ func shutdown(manager int, timeout time.Duration, action int) {
 		reap(func(int, unix.WaitStatus) {})
 		time.Sleep(time.Second)
 	}
+}
+
+func swapoff(path string) error {
+	p, err := unix.BytePtrFromString(path)
+	if err != nil {
+		return err
+	}
+	_, _, errno := unix.Syscall(unix.SYS_SWAPOFF, uintptr(unsafe.Pointer(p)), 0, 0)
+	runtime.KeepAlive(p)
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+func swapPaths(raw string) []string {
+	var paths []string
+	for _, line := range strings.Split(raw, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 || !strings.HasPrefix(fields[0], "/") {
+			continue
+		}
+		paths = append(paths, strings.NewReplacer(`\040`, " ", `\011`, "\t", `\134`, `\`).Replace(fields[0]))
+	}
+	return paths
 }
 
 // Unmount deepest/newest first, retaining pseudo filesystems for diagnostics.
