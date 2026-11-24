@@ -25,7 +25,7 @@ Each group below lists the code, what it means, and what to do.
 | `failed` | A failure with no more specific token: malformed JSON, a missing required field, an I/O error, a credential that cannot be set, a connection that failed. | Check the input against the reference; for `ctl`, check the socket path and that the supervisor runs. Under PID 1 look for the `sahinit-init:` log lines. |
 | `empty` | The unit directory has no units, every unit was left out, or the graph is empty. | Add units, or fix the per-file refusals printed before it. |
 | `busy` | The service is already starting, running or stopping; another operation holds it; the socket has 32 requests in flight; a sash mount is in use. | Retry after the current operation; for a mount, stop what uses it. |
-| `timeout` | A start did not become ready within the unit's `timeout`, a stop's wait ran out, or a sash `wait` verb ran out. | Raise `timeout` (at most `5m`), or fix the readiness signal (notify writes to fd 3). |
+| `timeout` | A start did not become ready within the unit's `timeout`, a sash start's readiness ran out, or a sash `wait` verb ran out. (A plain stop never times out: it escalates to SIGKILL.) | Raise `timeout` (at most `5m`), or fix the readiness signal (notify writes to fd 3). |
 | `not_found` | No unit with that name, or (sash file verbs) a path that does not exist. | Check the name with `ctl status`. |
 | `unsupported` | Not implemented here: a sash verb sahinit does not serve, an rbind on a kernel without `open_tree`, a kernel with no mount IDs. | Use a supported verb or a newer kernel. |
 
@@ -63,7 +63,7 @@ The other event kinds are `launch_failed`, `timeout`, `restart_limit`,
 | `duplicate_field` | A JSON key appears twice, a dependency list repeats a name, or two units share a name. | Remove the duplicate. |
 | `name_invalid` | `name` does not match `^[a-z][a-z0-9-]{0,62}$`. | Rename. |
 | `name_mismatch` | `name` differs from the file name. | Make `NAME.json` hold `"name": "NAME"`. |
-| `exec_relative` | `exec[0]` (or a sash path) is not absolute and clean. | Use an absolute, clean path. |
+| `exec_relative` | `exec[0]` is not absolute and clean. | Use an absolute, clean path. |
 | `type_invalid` | `type` is not `simple` or `oneshot`. | |
 | `ready_invalid` | `ready` does not fit the type (`exec`/`notify` for simple, `exit` for oneshot). | |
 | `restart_invalid` | `restart` is not `no`, `on-failure` or `always`, or a oneshot restarts. | |
@@ -91,7 +91,7 @@ The other event kinds are `launch_failed`, `timeout`, `restart_limit`,
 | Code | Meaning | What to do |
 | --- | --- | --- |
 | `exec_not_file` | The executable (or a path component) is missing, not a regular executable file, or a symlink chain is too long; the helper's exec fd is not a regular executable. | Install the program; check `ls -l` of the resolved path. |
-| `exec_perm` | The executable or a directory on its path is owned by someone other than root or the supervisor's uid, or writable by group or other (sticky directories excepted). | Fix ownership and modes along the whole path. |
+| `exec_perm` | The executable or a directory on its path is owned by someone other than root or the supervisor's uid, or writable by group or other (a sticky directory may be writable by others, but still needs that owner). | Fix ownership and modes along the whole path. |
 | `exec_interp` | A `#!` script's interpreter is relative, is `env` (or `busybox env`), is itself a script, or the line is over 256 bytes. | Name the real interpreter, e.g. `#!/usr/bin/python3`. |
 | `landlock_unavailable` | The kernel has no Landlock (or refused a ruleset). | Enable Landlock (Linux 5.13+, `lsm=` including `landlock`), or drop the sandbox. |
 | `landlock_abi` | The sandbox needs a Landlock right the kernel's ABI lacks. | Use a newer kernel. |
@@ -145,7 +145,7 @@ The other event kinds are `launch_failed`, `timeout`, `restart_limit`,
 | Code | Meaning | What to do |
 | --- | --- | --- |
 | `boot_refused` | With `--boot-strict`, a unit file, a limit or a sash unit was refused, so the whole boot is refused. | Run `sahinit plan --dir DIR` (and `supervise` without `--boot-strict` in a test) to see each refusal. |
-| `boot_service_failed` | Log `boot_service_failed NAME`: in strict boot a boot unit failed, or a long-running boot unit exited. The supervisor stops and PID 1 enters recovery. | Read `NAME`'s diagnostics in recovery; fix and send SIGHUP to PID 1. |
+| `boot_service_failed` | Log `boot_service_failed NAME`: in strict boot a boot unit became `failed` (a non-zero exit, a signal, a failed start, `restart_limit`); a long-running unit that exits 0 is `stopped` and not caught. The supervisor stops and PID 1 enters recovery. | Read `NAME`'s diagnostics in recovery; fix and send SIGHUP to PID 1. |
 
 ## sash units: load
 
@@ -170,7 +170,7 @@ The other event kinds are `launch_failed`, `timeout`, `restart_limit`,
 
 ## sash units: grant and floor (before every start)
 
-Every grant failure fails the unit without restart and is logged as
+Every grant failure except `sash_floor_busy` fails the unit without restart and is logged as
 `sash_grant SERVICE TOKEN`.
 
 | Code | Meaning | What to do |
@@ -186,7 +186,7 @@ Every grant failure fails the unit without restart and is logged as
 | `grant_service_mismatch` | The grant's `service` is not this unit's name. | |
 | `grant_identity_mismatch` | The grant's `user`/`group` differ from describe's. | |
 | `sash_grant_revoked` | The grant's `serial` is below the service's floor. | Install a grant with a serial at or above the floor. |
-| `sash_floor_busy` | A floor install held the store lock for over 2 s. Transient; the restart policy may retry. | Retry. |
+| `sash_floor_busy` | A floor install held the store lock for over 2 s (every grant check takes that lock, so a concurrent `floor-install` can cause it). Transient; the restart policy may retry. | Retry. |
 | `sash_floor_missing` | `sash floor-show`: no floor for that service. | Informational. |
 | `sash_floor_bad_shape` | A floor document or service name is malformed. | |
 | `sash_floor_bad_signature` | A floor does not verify with the fleet key. | Re-sign. |

@@ -10,7 +10,7 @@ Two rules recur:
 - **Trusted walk.** A path is resolved one component at a time from `/`.
   Every directory it passes through must be owned by root or the supervisor's
   effective uid and not group- or other-writable; a sticky directory (such as
-  `/tmp`) may be writable by others. Symlinks are followed only inside such
+  `/tmp`) may be writable by others, but must still have such an owner. Symlinks are followed only inside such
   directories (at most 40). Implemented by `unit.ResolveTrusted`.
 - **Owner and mode rule.** The file itself is owned by root or the effective
   uid and is not group- or other-writable.
@@ -147,7 +147,7 @@ effective uid with no group or other access. Contents:
 - `SERVICE.floor`: the signed floor, `{"payload": base64, "signature": base64}`,
   at most 4 KiB. The payload is exactly
   `{"version":"sahinit-sash-floor/1","service":S,"min_serial":N,"issued_at":T}`,
-  `min_serial` 1 to 2^53-1, signed by the fleet key over
+  `min_serial` 1 to 2^53-1, `issued_at` above 0, signed by the fleet key over
   `sahinit-sash-floor-v1\n` + payload. No floor file means no floor.
 - `lock`: flock for installs and reads; an install in progress is waited for
   2 s (`sash_floor_busy`).

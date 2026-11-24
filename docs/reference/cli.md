@@ -59,10 +59,11 @@ Linux, `init requires Linux PID 1`) and exits 1. As PID 1 it never exits. See
 The supervisor is always started as
 `sahinit supervise --dir DIR --socket PATH --boot-strict [--sash ...] [--sash-fleet-pub ...] [--sash-floor-dir ...]`.
 
-Errors: a flag that does not parse, an extra argument, or a value outside the
-constraints is the configuration error `invalid init configuration`. As PID 1
-this is logged as `sahinit-init: recovery: setup: invalid init configuration`
-and PID 1 enters recovery (it does not exit). Signals to PID 1 are listed in
+Errors: an extra argument, a relative path or a timeout outside the range is
+`invalid init configuration`; an unknown flag or a value that does not parse
+is Go's flag error text (for example `flag provided but not defined: -x`). As
+PID 1 either is logged as `sahinit-init: recovery: setup: ERROR` and PID 1
+enters recovery (it does not exit). Signals to PID 1 are listed in
 [operations](operations.md#power-and-signals).
 
 ## sahinit supervise
@@ -83,10 +84,10 @@ every service in reverse dependency order.
 | `--dir` | path | required | The unit directory. See [units](units.md#the-unit-directory). |
 | `--socket` | path | required | Absolute and clean. Its directory must be private (see [files](config-files.md#control-socket-and-lock)). |
 | `--uid` | uint32 | none | Repeatable. When given at least once, **only** the listed uids may use the socket; include the supervisor's own uid if it should still be allowed. Without it only the supervisor's effective uid is allowed. |
-| `--gid` | uint32 | none | At most once. Required (`socket_group`) when `--uid` names a uid other than the supervisor's: the socket is then mode 0660 with this group. |
+| `--gid` | uint32 | none | At most once. Required (`socket_group`) when `--uid` names a uid other than the supervisor's: the socket is then mode 0660 with this group. Otherwise it is ignored. |
 | `--no-cgroups` | bool | false | Use process groups instead of cgroup v2. Units with limits are refused (`cgroup_controller`); sash units are refused (`sash_cgroups`). Status reports `"cgroups":"disabled"`. |
 | `--cgroup-sweep` | duration | `30s` | At least 0. Interval of the stray-cgroup sweep; `0` turns the timer off (the sweep still runs when a service ends, on every control request and at shutdown). |
-| `--boot-strict` | bool | false | Host-boot mode, used by `init`. Any refused unit file, refused limit or refused sash unit refuses the whole start (`boot_refused`); a failed boot wave, a failed boot unit or an unexpectedly exited long-running boot unit stops the supervisor with exit 1 (`boot_service_failed NAME`). |
+| `--boot-strict` | bool | false | Host-boot mode, used by `init`. Any refused unit file, refused limit or refused sash unit refuses the whole start (`boot_refused`); a failed boot wave (its token is printed), or a boot unit that later becomes `failed` (a non-zero exit, a signal, `restart_limit`; logged `boot_service_failed NAME`), stops the supervisor with exit 1. A `simple` boot unit that exits 0 without restart becomes `stopped` and is not caught. |
 | `--sash` | path | `/usr/bin/sash` | The sash binary, resolved and checked like a unit executable (`sash_binary`). Only used when a unit has `sash`. |
 | `--sash-fleet-pub` | path | empty | The fleet public key file. Required by sash units (`sash_fleet_key`). |
 | `--sash-floor-dir` | path | empty | The sash state directory: floors and the mount table. Required by sash units (`sash_floor_store`). |
@@ -98,7 +99,8 @@ Startup order and what each step can print on stderr:
 2. Load units. A catalog-level refusal (`unit_perm`, `symlink`, `stray_file`,
    `too_many`, `empty`, `failed`, and any parse token such as `unknown_field`)
    is printed and exits 2. Each refused unit file is printed as `TOKEN FILE`
-   and left out (with `--boot-strict`: `boot_refused`, exit 2).
+   and left out. With `--boot-strict` only `boot_refused` is printed (exit 2);
+   run `plan` to see which file.
 3. Open cgroups (`cgroup_unavailable`, `cgroup_busy`; exit 2), unless
    `--no-cgroups` or not Linux.
 4. Refuse units whose limits cannot be applied: `cgroup_controller FILE`.
@@ -156,7 +158,7 @@ supervisor and prints the JSON response on stdout.
 | `status` | optional | Status rows for every service, or one. |
 | `diagnostics` | required | Output tails, recent events and the last exit of one service. |
 | `start` | required | Start a stopped, failed or exited service. A oneshot answers `arg_required` (see below). |
-| `stop` | required | Stop a service. A stopped or exited service stays as it is. |
+| `stop` | required | Stop a service: SIGTERM, then SIGKILL after `timeout`. A stopped or exited service stays as it is; a failed one with no process becomes `stopped`. |
 | `restart` | required | Stop, then start. |
 | `reload` | required | Run a sash unit's `reload` entry. |
 | `check` | required | Run a sash unit's `check` entry, read-only. |

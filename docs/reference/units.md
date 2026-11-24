@@ -23,8 +23,9 @@ A unit is one JSON file in the unit directory. This page is derived from
   and mode rule is **left out** and reported as `unit_perm FILE`; the rest of
   the catalog loads.
 - Any other problem in a file (a parse or validation error below) refuses the
-  **whole catalog** with that token. Only `unit_perm`, `sash_file_perm`,
-  `sash_grant_perm` and the later per-unit checks (`cgroup_controller` and the
+  **whole catalog** with that token. Only `unit_perm`, the file checks of
+  `sash_file_perm` and `sash_grant_perm` (a relative `sash.file` or
+  `sash.grant` is a parse error and refuses the catalog), and the later per-unit checks (`cgroup_controller` and the
   sash load checks) leave one unit out.
 - Two files whose `name` is the same is `duplicate_field`. If every file is
   left out, the result is `empty`.
@@ -36,8 +37,10 @@ decoded strictly:
 
 - one object, nothing after it (`failed`);
 - an unknown key is `unknown_field`; a repeated key is `duplicate_field`;
-- `null` for any value, a wrong JSON type, or a number that does not fit the
+- `null` for a value, a wrong JSON type, or a number that does not fit the
   field is `failed`.
+  (except `restart`, `timeout` and the limits, which report
+  `restart_invalid`, `timeout_range` and `limit_invalid`).
 
 ## Exec unit fields
 
@@ -53,7 +56,7 @@ decoded strictly:
 | `wants` | array of strings | no | none | As `needs`, but an absent unit is ignored. |
 | `timeout` | string | no | `5s` | A Go duration (`500ms`, `30s`, `2m`), more than 0 and at most `5m` (`timeout_range`). |
 | `boot` | bool | no | `true` for `simple`, `false` for `oneshot` | Whether boot starts it. |
-| `execution` | object | no | supervisor identity, `/`, empty environment | See [execution](#execution). |
+| `execution` | object | no | supervisor identity, `/`, environment with only the default `PATH` | See [execution](#execution). |
 | `sandbox` | object | no | no sandbox | See [sandbox](#sandbox). Requires a non-root `execution.uid` (`sandbox_root`). |
 | `memory_max` | string | no | no limit | See [limits](#limits). |
 | `cpu_max` | string | no | no limit | See [limits](#limits). |
@@ -186,7 +189,7 @@ answers `arg_required`. Arguments are never logged.
 | `directory` | string | `/` | Absolute, clean, at most 4096 bytes, no NUL. Must exist and be reachable by the identity at launch. |
 | `environment` | array of strings | `[]` | `KEY=value` literals; at most 128 entries and 16 KiB in total; `KEY` matches `^[A-Za-z_][A-Za-z0-9_]*$`, is unique and does not start with `SAHINIT_`. |
 
-Every violation is `execution_invalid`. IDs are numeric only: there is no
+Every rule violation is `execution_invalid` (a wrong JSON type or an out-of-range number is `failed`). IDs are numeric only: there is no
 name-service lookup for exec units. Without `uid`/`gid` the service runs as
 the supervisor (root under PID 1). An unprivileged supervisor that cannot set
 the requested credentials fails the start. The environment rules are in

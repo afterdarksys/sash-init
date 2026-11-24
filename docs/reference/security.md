@@ -28,7 +28,7 @@ code disagree, the code is right and this page is a bug.
 
 - `exec[0]`, `#!` interpreters, the sash binary and sash scripts are resolved
   once with the trusted walk (every directory from `/` owned by root or the
-  supervisor's uid, not writable by others, sticky directories excepted), so
+  supervisor's uid, not writable by others, sticky directories may be writable by others), so
   nobody else can swap a component between the check and the exec.
 - On Linux the checked file is executed **through its open file
   descriptor**, so the inode checked is the inode run.

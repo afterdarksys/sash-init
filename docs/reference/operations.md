@@ -130,8 +130,8 @@ for `cgroup.kill`; enables `cpu`, `memory` and `pids`; starts
 with only `PATH`, `HOME=/root` and `TERM=linux`; then reaps every orphan.
 
 In strict boot **every boot unit is essential**: any refused unit file or
-limit, a graph error, a failed boot unit or an unexpectedly exited
-long-running boot unit stops the supervisor, and PID 1 enters recovery. A
+limit, a graph error, a failed boot wave, or a boot unit that later becomes
+`failed` (a non-zero exit, a signal, `restart_limit`) stops the supervisor, and PID 1 enters recovery. A
 oneshot that exited 0 and a unit stopped with `ctl stop` are fine. Test a
 catalog with plain `supervise` (without `--boot-strict`) before booting it.
 
@@ -289,7 +289,7 @@ fails verification, which also blocks normal replacement. Rotate with overlap:
 
 1. Add the new key to `keys` in the trust file, keeping the old one.
 2. Install a policy signed with the new key at a higher `sequence`
-   (`policy cache`).
+   (`policy cache`; a `renew` policy also needs `--trust-system-clock`).
 3. If a floor is installed, install a floor signed with the new key and a
    **higher** `min_sequence` (at most the new policy's sequence). Re-signing
    the same payload is treated as the same floor and keeps the old file.
@@ -335,7 +335,8 @@ exits, so it is always available). Repair the catalog from recovery, then send S
 starts the supervisor again.
 
 - If the **init flags** are invalid, PID 1 logs
-  `sahinit-init: recovery: setup: invalid init configuration` and falls back to
+  `sahinit-init: recovery: setup: ERROR` (`invalid init configuration`, or Go's
+  flag error for an unknown flag) and falls back to
   the defaults **without** a recovery program. SIGHUP cannot fix this, because
   the flags do not change. Reboot with corrected kernel arguments, or with
   another init.
