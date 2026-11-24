@@ -17,7 +17,7 @@ func procAttr(g *cgroup.Group) *syscall.SysProcAttr {
 	// Pdeathsig is delivered on the thread that created the child and can
 	// fire when the runtime recycles that thread (Go issue 27505). The field
 	// is still set so a live parent thread takes the child with it.
-	attr := &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	attr := &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGKILL}
 	if g != nil && g.Dir != nil {
 		attr.UseCgroupFD = true
 		attr.CgroupFD = int(g.Dir.Fd())

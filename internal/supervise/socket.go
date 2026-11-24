@@ -14,6 +14,7 @@ import (
 
 	"github.com/afterdarksys/sahinit/internal/fail"
 	"github.com/afterdarksys/sahinit/internal/frame"
+	"github.com/afterdarksys/sahinit/internal/graph"
 	"github.com/afterdarksys/sahinit/internal/jsonobj"
 	"github.com/afterdarksys/sahinit/internal/unit"
 	"golang.org/x/sys/unix"
@@ -28,6 +29,8 @@ type response struct {
 	Error       string       `json:"error"`
 	Rows        []Row        `json:"rows,omitempty"`
 	Diagnostics *Diagnostics `json:"diagnostics,omitempty"`
+	Explanation *Explanation `json:"explanation,omitempty"`
+	Diff        *CatalogDiff `json:"diff,omitempty"`
 }
 
 // Listen binds a local stream unix socket. The mode follows the allowlist:
@@ -316,12 +319,65 @@ func (sup *Supervisor) handle(conn *net.UnixConn) {
 		sup.writeResp(conn, sup.mutResp(name, err))
 		return
 	}
+	// Catalog changes are root's alone, whatever --uid allows: diff and
+	// apply read a path the supervisor opens, and all four replace what
+	// runs.
+	if catalogOps[op] && uid != rootUID {
+		sup.writeResp(conn, response{OK: false, Error: "root_required"})
+		return
+	}
 	sup.writeResp(conn, sup.dispatch(op, name, arg))
 }
+
+// catalogOps change or read a whole catalog; only a peer whose effective
+// uid is rootUID (0; tests change it) may ask for them.
+var catalogOps = map[string]bool{"diff": true, "apply": true, "rollback": true, "activate": true}
+
+var rootUID uint32
 
 func (sup *Supervisor) dispatch(op, name, arg string) response {
 	ctx := context.Background()
 	switch op {
+	case "activate":
+		if sup.OnActivate == nil {
+			return response{Error: "deployment_not_configured"}
+		}
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		diff, err := sup.OnActivate(ctx)
+		return response{OK: err == nil, Error: fail.Token(err), Diff: &diff}
+	case "apply", "diff":
+		if !filepath.IsAbs(arg) {
+			return response{Error: "catalog_path"}
+		}
+		next, refused, err := unit.Load(arg)
+		if err == nil && len(refused) > 0 {
+			err = fail.E("catalog_refused")
+		}
+		if err == nil && (hasSash(next) || hasSash(sup.Catalog())) {
+			err = fail.E("catalog_sash")
+		}
+		if err == nil {
+			_, err = graph.Plan(next)
+		}
+		if err != nil {
+			return response{Error: fail.Token(err)}
+		}
+		diff := Diff(sup.Catalog(), next)
+		if op == "apply" {
+			ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			defer cancel()
+			diff, err = sup.Apply(ctx, next)
+		}
+		return response{OK: err == nil, Error: fail.Token(err), Diff: &diff}
+	case "rollback":
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		diff, err := sup.Rollback(ctx)
+		return response{OK: err == nil, Error: fail.Token(err), Diff: &diff}
+	case "explain":
+		e, err := sup.Explain(name)
+		return response{OK: err == nil, Error: fail.Token(err), Explanation: e}
 	case "diagnostics":
 		d, err := sup.Diagnostics(name)
 		return response{OK: err == nil, Error: fail.Token(err), Diagnostics: d}
@@ -361,7 +417,7 @@ func (sup *Supervisor) oneshot(name string) (*runtime, bool) {
 	if !unit.NameOK(name) {
 		return nil, false
 	}
-	s, ok := sup.rt[name]
+	s, ok := sup.runtime(name)
 	if !ok || s.svc.Type != "oneshot" {
 		return nil, false
 	}
@@ -412,7 +468,7 @@ func (sup *Supervisor) supervisedPeer(pid int) bool {
 	if err != nil {
 		return true
 	}
-	for _, s := range sup.rt {
+	for _, s := range sup.peerRuntimes() {
 		s.mu.Lock()
 		hit := s.ledGroupLocked(pgid)
 		s.mu.Unlock()

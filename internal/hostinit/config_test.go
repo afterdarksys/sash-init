@@ -13,7 +13,7 @@ func TestConfig(t *testing.T) {
 	if err != nil || c.Units != "/etc/sahinit/units" || c.Recovery != "" || c.ShutdownTimeout != 30*time.Second {
 		t.Fatalf("%+v %v", c, err)
 	}
-	for _, args := range [][]string{{"--dir", "relative"}, {"--socket", "sock"}, {"--recovery", "sh"}, {"--shutdown-timeout", "0s"}, {"--shutdown-timeout", "24h"}, {"unexpected"}, {"--unknown"}, {"--sash", "sash"}, {"--sash-fleet-pub", "fleet.pub"}, {"--sash-floor-dir", "floors"}} {
+	for _, args := range [][]string{{"--dir", "relative"}, {"--socket", "sock"}, {"--recovery", "sh"}, {"--shutdown-timeout", "0s"}, {"--shutdown-timeout", "24h"}, {"unexpected"}, {"--unknown"}, {"--sash", "sash"}, {"--sash-fleet-pub", "fleet.pub"}, {"--sash-floor-dir", "floors"}, {"--log-dir", "log"}, {"--trust", "/t.json"}, {"--trust-system-clock"}, {"--deployment-root", "/d"}, {"--deployment-root", "d", "--trust", "/t.json"}} {
 		if _, err := Parse(args); err == nil {
 			t.Fatalf("accepted %v", args)
 		}
@@ -34,5 +34,18 @@ func TestSuperviseArgs(t *testing.T) {
 func TestRefuseOrdinaryProcess(t *testing.T) {
 	if err := Run(nil); err == nil {
 		t.Fatal("ordinary process accepted as host init")
+	}
+}
+
+// The journal is opt-in: without --log-dir the supervisor gets none, and a
+// deployment replaces --dir.
+func TestSuperviseArgsLogAndDeployment(t *testing.T) {
+	c, err := Parse([]string{"--log-dir", "/var/log/sahinit"})
+	if got := strings.Join(c.SuperviseArgs(), " "); err != nil || got != "supervise --dir /etc/sahinit/units --socket /run/sahinit/control.sock --boot-strict --log-dir /var/log/sahinit" {
+		t.Fatalf("log %q %v", got, err)
+	}
+	c, err = Parse([]string{"--deployment-root", "/var/lib/sahinit/deploy", "--trust", "/etc/sahinit/trust.json", "--trust-system-clock"})
+	if got := strings.Join(c.SuperviseArgs(), " "); err != nil || got != "supervise --deployment-root /var/lib/sahinit/deploy --trust /etc/sahinit/trust.json --socket /run/sahinit/control.sock --boot-strict --trust-system-clock" {
+		t.Fatalf("deployment %q %v", got, err)
 	}
 }

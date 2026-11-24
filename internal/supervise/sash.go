@@ -861,7 +861,7 @@ func (sup *Supervisor) statusRow(name string) (sash.Row, error) {
 	if !unit.NameOK(name) {
 		return nil, fail.E("unknown_service")
 	}
-	s, ok := sup.rt[name]
+	s, ok := sup.runtime(name)
 	if !ok {
 		return nil, fail.E("unknown_service")
 	}

@@ -18,18 +18,23 @@ func runCtl(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("ctl", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	socket := fs.String("socket", "", "")
+	catalog := fs.String("dir", "", "catalog for diff/apply")
 	if err := fs.Parse(args); err != nil || *socket == "" || fs.NArg() < 1 || fs.NArg() > 2 {
 		fmt.Fprint(stderr, usageText)
 		return 2
 	}
 	op := fs.Arg(0)
 	switch op {
-	case "status", "diagnostics", "start", "stop", "restart", "reload", "check":
+	case "status", "diagnostics", "explain", "start", "stop", "restart", "reload", "check", "diff", "apply", "rollback", "activate":
 	default:
 		fmt.Fprintln(stderr, "unknown_op")
 		return 2
 	}
-	if op != "status" && fs.NArg() != 2 {
+	if ((op == "diff" || op == "apply") && (*catalog == "" || fs.NArg() != 1)) || ((op != "diff" && op != "apply") && *catalog != "") || ((op == "rollback" || op == "activate") && fs.NArg() != 1) {
+		fmt.Fprint(stderr, usageText)
+		return 2
+	}
+	if op != "status" && op != "diff" && op != "apply" && op != "rollback" && op != "activate" && fs.NArg() != 2 {
 		fmt.Fprint(stderr, usageText)
 		return 2
 	}
@@ -44,7 +49,11 @@ func runCtl(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "failed")
 		return 1
 	}
-	raw, _ := json.Marshal(map[string]string{"op": op, "name": fs.Arg(1)})
+	request := map[string]string{"op": op, "name": fs.Arg(1)}
+	if *catalog != "" {
+		request["arg"] = *catalog
+	}
+	raw, _ := json.Marshal(request)
 	if err := frame.Write(conn, raw); err != nil {
 		fmt.Fprintln(stderr, "failed")
 		return 1

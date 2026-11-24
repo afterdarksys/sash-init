@@ -13,6 +13,8 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -97,6 +99,18 @@ func Launch(ctx context.Context, self string, argv []string, sb *unit.Sandbox, n
 	}
 	if execF != nil {
 		defer execF.Close()
+	}
+	if opts.SHA256 != "" {
+		// Signed execution requires a pinned readable file (Linux). Hash the
+		// same inode that execveat/directTarget will execute, on every start.
+		if execF == nil {
+			return nil, "", nil, fail.E("verified_exec_unavailable")
+		}
+		h := sha256.New()
+		n, err := io.Copy(h, io.NewSectionReader(execF, 0, (64<<20)+1))
+		if err != nil || n > 64<<20 || hex.EncodeToString(h.Sum(nil)) != opts.SHA256 {
+			return nil, "", nil, fail.E("artifact_digest")
+		}
 	}
 	head, err := readHead(execF, target)
 	if err != nil {
@@ -365,6 +379,7 @@ func cloneMissing(err error, self string, g *cgroup.Group) bool {
 type Options struct {
 	// Path is argv[0] already resolved (unit.Service.Path). Empty means
 	// Launch resolves argv[0] itself. Either way it is checked again.
+	SHA256    string
 	Path      string
 	Execution unit.Execution
 	Stdout    io.Writer

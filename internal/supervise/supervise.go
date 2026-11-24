@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
@@ -37,6 +38,7 @@ import (
 	"github.com/afterdarksys/sahinit/internal/cgroup"
 	"github.com/afterdarksys/sahinit/internal/fail"
 	"github.com/afterdarksys/sahinit/internal/graph"
+	"github.com/afterdarksys/sahinit/internal/journal"
 	"github.com/afterdarksys/sahinit/internal/sandbox"
 	"github.com/afterdarksys/sahinit/internal/unit"
 )
@@ -61,6 +63,8 @@ type Row struct {
 	Restarts  int    `json:"restarts"`
 	Sandbox   string `json:"sandbox"`
 	LastError string `json:"last_error"`
+	Desired   bool   `json:"desired"`
+	Essential bool   `json:"essential"`
 	// Cgroups is "enabled", "disabled" (--no-cgroups) or "unsupported".
 	Cgroups string `json:"cgroups"`
 	Cgroup  string `json:"cgroup"` // the service cgroup when enabled
@@ -91,17 +95,27 @@ const (
 
 // Supervisor is the userspace service supervisor. It is not PID 1.
 type Supervisor struct {
-	self          string
-	rt            map[string]*runtime
-	mu            sync.Mutex
-	ln            *net.UnixListener
-	bound         string
-	lock          *os.File // flock on bound + ".lock", held while bound
-	serving       atomic.Bool
-	shuttingDown  atomic.Bool
-	RestartBurst  int
-	RestartWindow time.Duration
-	Allow         map[uint32]struct{}
+	catalogMu       sync.RWMutex
+	transaction     sync.RWMutex
+	previous        map[string]*unit.Service
+	previousDesired map[string]bool
+	generation      uint64
+	journal         *journal.Journal
+	admit           func(string, bool) error
+	retired         []*runtime
+	Signed          bool
+	OnActivate      func(context.Context) (CatalogDiff, error)
+	self            string
+	rt              map[string]*runtime
+	mu              sync.Mutex
+	ln              *net.UnixListener
+	bound           string
+	lock            *os.File // flock on bound + ".lock", held while bound
+	serving         atomic.Bool
+	shuttingDown    atomic.Bool
+	RestartBurst    int
+	RestartWindow   time.Duration
+	Allow           map[uint32]struct{}
 	// SocketGID is the socket's group when Allow names a uid other than
 	// the supervisor's own; the socket is then mode 0660.
 	SocketGID    *uint32
@@ -129,6 +143,8 @@ type Supervisor struct {
 }
 
 type runtime struct {
+	// records is the persistent journal (--log-dir), nil without one.
+	records    *journal.Journal
 	stdout     tail
 	stderr     tail
 	events     []Event
@@ -138,6 +154,7 @@ type runtime struct {
 	op         sync.Mutex
 	mu         sync.Mutex
 	state      string
+	desired    bool
 	pid        int
 	ready      bool
 	restarts   int
@@ -259,6 +276,10 @@ func New(svcs map[string]*unit.Service, self string) (*Supervisor, error) {
 // Boot starts each wave in parallel and continues after a wave error.
 // allowEmpty is the boot oneshot path: a socket oneshot still needs an arg.
 func (sup *Supervisor) Boot(ctx context.Context, waves [][]string) error {
+	if !sup.transaction.TryRLock() {
+		return fail.E("busy")
+	}
+	defer sup.transaction.RUnlock()
 	var first error
 	for _, wave := range waves {
 		errs := make([]error, len(wave))
@@ -268,7 +289,7 @@ func (sup *Supervisor) Boot(ctx context.Context, waves [][]string) error {
 			go func(i int, name string) {
 				defer wg.Done()
 				allowEmpty := false
-				if s := sup.rt[name]; s != nil && s.svc.Type == "oneshot" {
+				if s, _ := sup.runtime(name); s != nil && s.svc.Type == "oneshot" {
 					allowEmpty = true
 				}
 				errs[i] = sup.start(ctx, name, "", allowEmpty, true)
@@ -286,11 +307,19 @@ func (sup *Supervisor) Boot(ctx context.Context, waves [][]string) error {
 
 // Start starts a stopped, failed, or exited service. A running service is busy.
 func (sup *Supervisor) Start(ctx context.Context, name string) error {
+	if !sup.transaction.TryRLock() {
+		return fail.E("busy")
+	}
+	defer sup.transaction.RUnlock()
 	return sup.start(ctx, name, "", false, true)
 }
 
 // Oneshot runs a catalog oneshot with one checked arg. The arg is not logged.
 func (sup *Supervisor) Oneshot(ctx context.Context, name, arg string) error {
+	if !sup.transaction.TryRLock() {
+		return fail.E("busy")
+	}
+	defer sup.transaction.RUnlock()
 	s, err := sup.lookup(name)
 	if err != nil {
 		return err
@@ -306,6 +335,14 @@ func (sup *Supervisor) Oneshot(ctx context.Context, name, arg string) error {
 
 // Stop signals the process group. A stopped or exited service stays as it is.
 func (sup *Supervisor) Stop(ctx context.Context, name string) error {
+	if !sup.transaction.TryRLock() {
+		return fail.E("busy")
+	}
+	defer sup.transaction.RUnlock()
+	return sup.stop(ctx, name, true)
+}
+
+func (sup *Supervisor) stop(ctx context.Context, name string, user bool) error {
 	if ctx == nil || ctx.Err() != nil {
 		return fail.E("failed")
 	}
@@ -314,6 +351,16 @@ func (sup *Supervisor) Stop(ctx context.Context, name string) error {
 		return err
 	}
 	if s.svc.Sash != nil {
+		s.mu.Lock()
+		if user {
+			s.desired = false
+		}
+		if s.state == "blocked" {
+			s.state, s.lastError = "stopped", ""
+			s.mu.Unlock()
+			return nil
+		}
+		s.mu.Unlock()
 		return sup.stopSash(ctx, s)
 	}
 	if !s.op.TryLock() {
@@ -322,9 +369,16 @@ func (sup *Supervisor) Stop(ctx context.Context, name string) error {
 	defer s.op.Unlock()
 
 	s.mu.Lock()
+	if user {
+		s.desired = false
+	}
 	state := s.state
 	pid := s.pid
-	if state == "stopped" || state == "exited" {
+	if state == "stopped" || state == "exited" || state == "blocked" {
+		if state == "blocked" {
+			s.state = "stopped"
+			s.lastError = ""
+		}
 		s.mu.Unlock()
 		return nil
 	}
@@ -393,10 +447,14 @@ func (s *runtime) finishStop(gen uint64) error {
 
 // Restart stops and then starts. A user start clears the restart burst.
 func (sup *Supervisor) Restart(ctx context.Context, name string) error {
-	if err := sup.Stop(ctx, name); err != nil {
+	if !sup.transaction.TryRLock() {
+		return fail.E("busy")
+	}
+	defer sup.transaction.RUnlock()
+	if err := sup.stop(ctx, name, true); err != nil {
 		return err
 	}
-	return sup.Start(ctx, name)
+	return sup.start(ctx, name, "", false, true)
 }
 
 // Shutdown stops dependents before their providers, concurrently within waves.
@@ -406,6 +464,8 @@ func (sup *Supervisor) Shutdown(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	sup.shuttingDown.Store(true)
+	sup.transaction.RLock()
+	defer sup.transaction.RUnlock()
 	var wg sync.WaitGroup
 	var errMu sync.Mutex
 	var first error
@@ -419,8 +479,8 @@ func (sup *Supervisor) Shutdown(ctx context.Context) error {
 		}
 		errMu.Unlock()
 	}
-	catalog := make(map[string]*unit.Service, len(sup.rt))
-	for name, s := range sup.rt {
+	catalog := make(map[string]*unit.Service, len(sup.runtimes()))
+	for name, s := range sup.runtimes() {
 		catalog[name] = s.svc
 	}
 	waves, err := graph.ShutdownPlan(catalog)
@@ -428,14 +488,14 @@ func (sup *Supervisor) Shutdown(ctx context.Context) error {
 		// Even a malformed programmatically constructed catalog must stop.
 		note(err)
 		var names []string
-		for name := range sup.rt {
+		for name := range sup.runtimes() {
 			names = append(names, name)
 		}
 		waves = [][]string{names}
 	}
 	for _, wave := range waves {
 		for _, name := range wave {
-			s := sup.rt[name]
+			s, _ := sup.runtime(name)
 			if s.svc.Sash != nil {
 				s.mu.Lock()
 				s.gen++
@@ -517,7 +577,7 @@ func (sup *Supervisor) Shutdown(ctx context.Context) error {
 	// Whatever a service left behind is killed with its cgroup.
 	sup.sweepStrays()
 	if sup.Cgroups != nil {
-		for name, s := range sup.rt {
+		for name, s := range sup.runtimes() {
 			if err := sup.Cgroups.KillAll(name, timeoutOf(s.svc)); err != nil {
 				note(err)
 			}
@@ -532,8 +592,8 @@ func (sup *Supervisor) Shutdown(ctx context.Context) error {
 // Status returns one row, or every row sorted by name when name is empty.
 func (sup *Supervisor) Status(name string) ([]Row, error) {
 	if name == "" {
-		rows := make([]Row, 0, len(sup.rt))
-		for _, s := range sup.rt {
+		rows := make([]Row, 0, len(sup.runtimes()))
+		for _, s := range sup.runtimes() {
 			rows = append(rows, sup.row(s))
 		}
 		sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
@@ -564,8 +624,9 @@ func (sup *Supervisor) row(s *runtime) Row {
 		Restarts:  s.restarts,
 		Sandbox:   sandbox,
 		LastError: s.lastError,
-		Cgroups:   sup.cgroupMode(),
-		Limits:    RowLimits{MemoryMax: l.MemoryMax, CPUMax: l.CPUMax(), PidsMax: l.PidsMax},
+		Desired:   s.desired, Essential: s.svc.Essential,
+		Cgroups: sup.cgroupMode(),
+		Limits:  RowLimits{MemoryMax: l.MemoryMax, CPUMax: l.CPUMax(), PidsMax: l.PidsMax},
 
 		CgroupTrusted: unit.CgroupTrusted(s.svc),
 		Sash:          s.sashRowLocked(),
@@ -594,7 +655,7 @@ func (sup *Supervisor) lookup(name string) (*runtime, error) {
 	if !unit.NameOK(name) {
 		return nil, fail.E("not_found")
 	}
-	s, ok := sup.rt[name]
+	s, ok := sup.runtime(name)
 	if !ok || s == nil || s.svc == nil {
 		return nil, fail.E("not_found")
 	}
@@ -621,18 +682,30 @@ func (sup *Supervisor) startLocked(ctx context.Context, s *runtime, arg string, 
 		return fail.E("failed")
 	}
 	s.mu.Lock()
+	if user {
+		s.desired = true
+	}
 	state := s.state
 	s.mu.Unlock()
 	if state == "running" || state == "starting" || state == "stopping" {
 		return fail.E("busy")
 	}
-	if err := sup.needsGate(s); err != nil {
-		if fail.Token(err) == "needs_failed" {
+	if sup.admit != nil {
+		if err := sup.admit(s.svc.Name, false); err != nil {
 			s.mu.Lock()
-			s.state = "failed"
+			s.state, s.lastError, s.ready = "failed", fail.Token(err), false
+			s.eventLocked("admission_denied", s.lastError, nil)
+			s.mu.Unlock()
+			return err
+		}
+	}
+	if err := sup.needsGate(s); err != nil {
+		if fail.Token(err) == "needs_failed" || fail.Token(err) == "needs_not_ready" {
+			s.mu.Lock()
+			s.state = "blocked"
 			s.ready = false
 			s.pid = 0
-			s.lastError = "needs_failed"
+			s.lastError = fail.Token(err)
 			s.sandbox = ""
 			s.mu.Unlock()
 		}
@@ -703,7 +776,7 @@ func (sup *Supervisor) needsGate(s *runtime) error {
 	failedNeed := false
 	notReady := false
 	for _, dep := range s.svc.Needs {
-		other, ok := sup.rt[dep]
+		other, ok := sup.runtime(dep)
 		if !ok {
 			notReady = true
 			continue
@@ -764,7 +837,7 @@ func (sup *Supervisor) launch(ctx context.Context, s *runtime, argv []string, ge
 		return err
 	}
 	notify := s.svc.Ready == "notify"
-	cmd, claim, notifyR, err := sandbox.Launch(ctx, sup.self, argv, s.svc.Sandbox, notify, timeoutOf(s.svc), sandbox.Options{Path: s.svc.Path, Execution: s.svc.Execution, Stdout: &s.stdout, Stderr: &s.stderr, Cgroup: grp})
+	cmd, claim, notifyR, err := sandbox.Launch(ctx, sup.self, argv, s.svc.Sandbox, notify, timeoutOf(s.svc), sandbox.Options{Path: s.svc.Path, SHA256: s.svc.SHA256, Execution: s.svc.Execution, Stdout: &s.stdout, Stderr: &s.stderr, Cgroup: grp})
 	if err != nil {
 		sup.dropCgroup(s)
 		if notifyR != nil {
@@ -841,7 +914,10 @@ func (sup *Supervisor) lifetime(s *runtime, cmd *exec.Cmd, notifyR *os.File, pro
 	if s.svc.Ready == "notify" && notifyR != nil {
 		var buf [1]byte
 		n, rerr := notifyR.Read(buf[:])
-		cerr := notifyR.Close()
+		var cerr error
+		if s.svc.Watchdog == 0 || rerr != nil || n == 0 {
+			cerr = notifyR.Close()
+		}
 		published := false
 		if rerr == nil && n >= 1 && cerr == nil {
 			s.mu.Lock()
@@ -855,6 +931,11 @@ func (sup *Supervisor) lifetime(s *runtime, cmd *exec.Cmd, notifyR *os.File, pro
 			s.mu.Unlock()
 			if published {
 				close(readyCh)
+				if s.svc.Watchdog > 0 {
+					go sup.watchdog(s, notifyR, procDone, gen)
+				}
+			} else if s.svc.Watchdog > 0 {
+				notifyR.Close()
 			}
 		} else if rerr == nil && n >= 1 && cerr != nil {
 			if err := s.signalGroup(cmd.Process.Pid, syscall.SIGKILL); err != nil {
@@ -893,6 +974,43 @@ func (sup *Supervisor) lifetime(s *runtime, cmd *exec.Cmd, notifyR *os.File, pro
 		ok = false
 	}
 	sup.onExit(s, procDone, gen, ok)
+}
+
+func (sup *Supervisor) watchdog(s *runtime, pipe *os.File, done chan struct{}, gen uint64) {
+	defer pipe.Close()
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-done:
+			pipe.Close()
+		case <-finished:
+		}
+	}()
+	for {
+		pipe.SetReadDeadline(time.Now().Add(s.svc.Watchdog))
+		var b [1]byte
+		if _, err := pipe.Read(b[:]); err == nil {
+			continue
+		}
+		select {
+		case <-done:
+			return
+		default:
+		}
+		s.mu.Lock()
+		live := s.gen == gen && !s.stopReq && !s.exiting && !sup.shuttingDown.Load()
+		pid := s.pid
+		if live {
+			s.lastError = "watchdog"
+			s.eventLocked("watchdog", "watchdog", nil)
+		}
+		s.mu.Unlock()
+		if live {
+			_ = s.signalGroup(pid, syscall.SIGKILL)
+		}
+		return
+	}
 }
 
 func (sup *Supervisor) onExit(s *runtime, procDone chan struct{}, gen uint64, exitedOK bool) {
@@ -1029,6 +1147,15 @@ func allowRestartWith(s *runtime, burst int, window time.Duration) bool {
 }
 
 func (sup *Supervisor) relaunch(s *runtime, gen uint64) {
+	s.mu.Lock()
+	delay := restartDelay(s.svc, len(s.restartsAt))
+	s.mu.Unlock()
+	time.Sleep(delay)
+	sup.transaction.RLock()
+	defer sup.transaction.RUnlock()
+	if current, ok := sup.runtime(s.svc.Name); !ok || current != s {
+		return
+	}
 	s.op.Lock()
 	defer s.op.Unlock()
 	s.mu.Lock()
@@ -1037,10 +1164,40 @@ func (sup *Supervisor) relaunch(s *runtime, gen uint64) {
 		return
 	}
 	s.mu.Unlock()
+	if sup.admit != nil {
+		if err := sup.admit(s.svc.Name, true); err != nil {
+			sup.failLaunch(s, gen, err)
+			return
+		}
+	}
+	if err := sup.needsGate(s); err != nil {
+		s.mu.Lock()
+		s.state, s.ready, s.lastError = "blocked", false, fail.Token(err)
+		s.mu.Unlock()
+		return
+	}
 	argv := append([]string{}, s.svc.Exec...)
 	if err := sup.launch(context.Background(), s, argv, gen); err != nil {
 		return
 	}
+}
+
+func restartDelay(svc *unit.Service, attempts int) time.Duration {
+	base, cap := svc.RestartDelay, svc.RestartMaxDelay
+	if base <= 0 {
+		base = 100 * time.Millisecond
+	}
+	if cap <= 0 {
+		cap = 30 * time.Second
+	}
+	for i := 1; i < attempts && base < cap; i++ {
+		base *= 2
+	}
+	if base > cap {
+		base = cap
+	}
+	// Jitter stays within the configured maximum, including at the cap.
+	return base*4/5 + time.Duration(rand.Int64N(int64(base/5)+1))
 }
 
 func (sup *Supervisor) waitReady(ctx context.Context, s *runtime, procDone chan struct{}, readyCh chan struct{}, gen uint64) error {
@@ -1168,8 +1325,8 @@ func (sup *Supervisor) sweepStrays() {
 		return
 	}
 	defer sup.launching.Unlock()
-	running := make(map[string]bool, len(sup.rt))
-	for name, s := range sup.rt {
+	running := make(map[string]bool, len(sup.runtimes()))
+	for name, s := range sup.runtimes() {
 		s.mu.Lock()
 		running[name] = s.pid > 0 || s.state == "starting" || s.state == "running" || s.state == "stopping"
 		s.mu.Unlock()

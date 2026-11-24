@@ -89,7 +89,7 @@ func wantExact(t *testing.T, path, payload, exact string) {
 }
 
 func stoppedRow(name, sandbox string) string {
-	return `{"name":"` + name + `","state":"stopped","pid":0,"ready":false,"restarts":0,"sandbox":"` + sandbox + `","last_error":"","cgroups":"disabled","cgroup":"","cgroup_trusted":true,"limits":{"memory_max":0,"cpu_max":"","pids_max":0}}`
+	return `{"name":"` + name + `","state":"stopped","pid":0,"ready":false,"restarts":0,"sandbox":"` + sandbox + `","last_error":"","desired":false,"essential":false,"cgroups":"disabled","cgroup":"","cgroup_trusted":true,"limits":{"memory_max":0,"cpu_max":"","pids_max":0}}`
 }
 
 func exactErr(token string) string {
@@ -964,7 +964,7 @@ func TestBootNeedsFailedSkipsDependent(t *testing.T) {
 	}
 	absent(t, bOut)
 	row := rowOf(t, sup, "b")
-	if row.State != "failed" || row.LastError != "needs_failed" || row.Pid != 0 {
+	if row.State != "blocked" || row.LastError != "needs_failed" || row.Pid != 0 {
 		t.Fatalf("%+v", row)
 	}
 }

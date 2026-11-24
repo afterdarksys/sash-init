@@ -481,7 +481,7 @@ func TestNeedsFailed(t *testing.T) {
 		t.Fatalf("marker %v", statErr)
 	}
 	row := rowOf(t, sup, "agent")
-	if row.State != "failed" || row.LastError != "needs_failed" || row.Pid != 0 {
+	if row.State != "blocked" || row.LastError != "needs_failed" || row.Pid != 0 {
 		t.Fatalf("%+v", row)
 	}
 	if laterRow := rowOf(t, sup, "later"); laterRow.State != "stopped" {
@@ -503,7 +503,7 @@ func TestNeedsNotReady(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 	row := rowOf(t, sup, "agent")
-	if row.State != "stopped" || row.LastError != "" || row.Pid != 0 {
+	if row.State != "blocked" || row.LastError != "needs_not_ready" || row.Pid != 0 {
 		t.Fatalf("%+v", row)
 	}
 	if _, statErr := os.Stat(mark); !os.IsNotExist(statErr) {

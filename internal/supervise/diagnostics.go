@@ -3,6 +3,8 @@
 package supervise
 
 import (
+	"encoding/json"
+	"github.com/afterdarksys/sahinit/internal/journal"
 	"sync"
 	"time"
 )
@@ -15,6 +17,7 @@ type tail struct {
 	mu    sync.Mutex
 	data  [logCapacity]byte
 	total uint64
+	emit  func([]byte)
 }
 
 func (t *tail) Write(p []byte) (int, error) {
@@ -29,6 +32,9 @@ func (t *tail) Write(p []byte) (int, error) {
 		t.data[(t.total+uint64(i))%logCapacity] = p[i]
 	}
 	t.total += uint64(n)
+	if t.emit != nil {
+		t.emit(p)
+	}
 	return n, nil
 }
 
@@ -67,12 +73,13 @@ type Exit struct {
 }
 
 type Diagnostics struct {
-	LastExit *Exit   `json:"last_exit,omitempty"`
-	Name     string  `json:"name"`
-	Cgroups  string  `json:"cgroups"`
-	Stdout   LogTail `json:"stdout"`
-	Stderr   LogTail `json:"stderr"`
-	Events   []Event `json:"events"`
+	LastExit *Exit         `json:"last_exit,omitempty"`
+	Name     string        `json:"name"`
+	Cgroups  string        `json:"cgroups"`
+	Stdout   LogTail       `json:"stdout"`
+	Stderr   LogTail       `json:"stderr"`
+	Events   []Event       `json:"events"`
+	Journal  journal.Stats `json:"journal"`
 }
 
 // eventLocked requires runtime.mu; events never include argv or environment.
@@ -85,6 +92,10 @@ func (s *runtime) eventLocked(kind, code string, exit *Exit) {
 	} else {
 		s.events = append(s.events, e)
 	}
+	if s.records != nil {
+		raw, _ := json.Marshal(e)
+		s.records.Emit(journal.Record{Unit: s.svc.Name, Stream: "event", Event: raw})
+	}
 }
 
 func (sup *Supervisor) Diagnostics(name string) (*Diagnostics, error) {
@@ -96,5 +107,26 @@ func (sup *Supervisor) Diagnostics(name string) (*Diagnostics, error) {
 	events := append([]Event{}, s.events...)
 	lastExit := s.lastExit
 	s.mu.Unlock()
-	return &Diagnostics{Name: name, Cgroups: sup.cgroupMode(), Stdout: s.stdout.snapshot(), Stderr: s.stderr.snapshot(), Events: events, LastExit: lastExit}, nil
+	return &Diagnostics{Name: name, Cgroups: sup.cgroupMode(), Stdout: s.stdout.snapshot(), Stderr: s.stderr.snapshot(), Events: events, LastExit: lastExit, Journal: s.records.Stats()}, nil
+}
+
+// SetJournal is called before starting services. The journal is owned by the
+// caller so it can outlive catalog transactions and be closed after shutdown.
+func (sup *Supervisor) SetJournal(j *journal.Journal) {
+	sup.journal = j
+	for name, s := range sup.runtimes() {
+		s.records = j
+		for stream, tail := range map[string]*tail{"stdout": &s.stdout, "stderr": &s.stderr} {
+			tail.emit = func(p []byte) {
+				for len(p) > 0 {
+					n := len(p)
+					if n > 8192 {
+						n = 8192
+					}
+					j.Emit(journal.Record{Unit: name, Stream: stream, Data: p[:n]})
+					p = p[n:]
+				}
+			}
+		}
+	}
 }

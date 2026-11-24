@@ -12,23 +12,28 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/afterdarksys/sahinit/internal/cgroup"
+	"github.com/afterdarksys/sahinit/internal/deploy"
 	"github.com/afterdarksys/sahinit/internal/fail"
 	"github.com/afterdarksys/sahinit/internal/graph"
 	"github.com/afterdarksys/sahinit/internal/hostinit"
+	"github.com/afterdarksys/sahinit/internal/journal"
 	"github.com/afterdarksys/sahinit/internal/sandbox"
 	"github.com/afterdarksys/sahinit/internal/supervise"
 	"github.com/afterdarksys/sahinit/internal/unit"
 )
 
 const usageText = policyUsage + sashUsage +
-	"usage: sahinit init [--dir DIR] [--socket PATH] [--recovery EXECUTABLE] [--shutdown-timeout DURATION] [--sash PATH] [--sash-fleet-pub PATH] [--sash-floor-dir DIR]\n" +
-	"usage: sahinit ctl --socket PATH status|diagnostics|start|stop|restart|reload|check [NAME]\n" +
+	"usage: sahinit init [--dir DIR] [--socket PATH] [--recovery EXECUTABLE] [--shutdown-timeout DURATION] [--log-dir DIR] [--deployment-root DIR --trust FILE [--trust-system-clock]] [--sash PATH] [--sash-fleet-pub PATH] [--sash-floor-dir DIR]\n" +
+	"usage: sahinit ctl --socket PATH status|diagnostics|explain|start|stop|restart|reload|check|rollback|activate [NAME]\n" +
+	"usage: sahinit ctl --socket PATH --dir DIR diff|apply\n" +
 	"usage: sahinit plan --dir DIR\n" +
-	"usage: sahinit supervise --dir DIR --socket PATH [--uid UID]... [--gid GID] [--no-cgroups] [--cgroup-sweep DURATION] [--boot-strict] [--sash PATH] [--sash-fleet-pub PATH] [--sash-floor-dir DIR]\n" +
+	"usage: sahinit validate --dir DIR\n" +
+	"usage: sahinit supervise --dir DIR --socket PATH [--deployment-root DIR --trust FILE [--trust-system-clock]] [--uid UID]... [--gid GID] [--no-cgroups] [--cgroup-sweep DURATION] [--boot-strict] [--log-dir DIR] [--sash PATH] [--sash-fleet-pub PATH] [--sash-floor-dir DIR]\n" +
 	"usage: sahinit migrate --from FORMAT --source DIR [--out NEW_DIR] [--boot]\n"
 
 func main() {
@@ -54,6 +59,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return sandbox.ApplyCLI(args)
 	}
 	switch args[0] {
+	case "deploy":
+		return runDeploy(args[1:], stdout, stderr)
+	case "host":
+		return runHost(args[1:], stdout, stderr)
+	case "logs", "events":
+		return runLogs(args[0], args[1:], stdout, stderr)
 	case "init":
 		if err := hostinit.Run(args[1:]); err != nil {
 			fmt.Fprintln(stderr, err)
@@ -70,6 +81,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runMigrate(args[1:], stdout, stderr)
 	case "plan":
 		return runPlan(args[1:], stdout, stderr)
+	case "validate":
+		return runValidate(args[1:], stdout, stderr)
 	case "supervise":
 		return runSupervise(args[1:], stdout, stderr)
 	default:
@@ -186,6 +199,10 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 	sock := fs.String("socket", "", "")
 	noCgroups := fs.Bool("no-cgroups", false, "")
 	strict := fs.Bool("boot-strict", false, "exit to the PID 1 recovery loop if boot fails")
+	logDir := fs.String("log-dir", "", "bounded persistent journal directory")
+	deploymentRoot := fs.String("deployment-root", "", "")
+	trustPath := fs.String("trust", "", "")
+	trustClock := fs.Bool("trust-system-clock", false, "")
 	sweep := fs.Duration("cgroup-sweep", 30*time.Second, "")
 	var sf sashFlags
 	fs.StringVar(&sf.binary, "sash", "/usr/bin/sash", "")
@@ -212,13 +229,27 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		gid = &g
 		return nil
 	})
-	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || *dir == "" || *sock == "" || *sweep < 0 {
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || (*dir == "") == (*deploymentRoot == "") || (*deploymentRoot == "" && (*trustPath != "" || *trustClock)) || *sock == "" || *sweep < 0 {
 		fmt.Fprint(stderr, usageText)
 		return 2
 	}
 	var svcs map[string]*unit.Service
 	var err error
-	if *strict {
+	var manager *deploy.Manager
+	var active *deploy.Catalog
+	if *deploymentRoot != "" {
+		manager, err = deployment(*deploymentRoot, *trustPath, *trustClock)
+		if err == nil {
+			var state deploy.State
+			state, err = manager.State()
+			if err == nil {
+				active, err = manager.Load(state.Active)
+			}
+		}
+		if err == nil {
+			svcs = active.Units
+		}
+	} else if *strict {
 		var refused map[string]string
 		svcs, refused, err = unit.Load(*dir)
 		if len(refused) > 0 && err == nil {
@@ -242,7 +273,7 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, fail.Token(err))
 		return 2
 	}
-	if *strict && len(svcs) != beforeLimits {
+	if (*strict || manager != nil) && len(svcs) != beforeLimits {
 		fmt.Fprintln(stderr, "boot_refused")
 		return 2
 	}
@@ -273,11 +304,52 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, fail.Token(err))
 		return 2
 	}
+	var bootReady atomic.Bool
 	sup.SocketGID = gid
 	sup.Sash = sashCfg
 	if sashCfg != nil {
 		// Mounts a previous sahinit made for sash services and left.
 		sup.CleanSashMounts()
+	}
+	if manager != nil {
+		sup.SetAdmission(func(name string, restart bool) error { return manager.Admit(active, name, restart) })
+		sup.OnActivate = func(ctx context.Context) (supervise.CatalogDiff, error) {
+			if !bootReady.Load() {
+				return supervise.CatalogDiff{}, fail.E("boot_in_progress")
+			}
+			lock, err := manager.Lock()
+			if err != nil {
+				return supervise.CatalogDiff{}, err
+			}
+			defer lock.Close()
+			state, err := manager.State()
+			if err != nil {
+				return supervise.CatalogDiff{}, err
+			}
+			if state.Pending == "" {
+				return supervise.CatalogDiff{}, fail.E("deployment_no_pending")
+			}
+			candidate, err := manager.Load(state.Pending)
+			if err != nil {
+				return supervise.CatalogDiff{}, err
+			}
+			if err := candidate.Document.CheckFresh(manager.Clock); err != nil {
+				return supervise.CatalogDiff{}, err
+			}
+			return sup.ApplyAuthorized(ctx, candidate.Units, func(name string, restart bool) error { return manager.Admit(candidate, name, restart) }, func() error { return manager.CommitActive(candidate.ID) })
+		}
+	}
+	if *logDir != "" {
+		// The journal is optional: a read-only or unusable directory is
+		// reported and the supervisor runs with the in-memory tails only,
+		// so a bad log disk never fails the boot.
+		if j, err := journal.Open(*logDir, 1024*1024, 4); err != nil {
+			fmt.Fprintln(stderr, "journal_unavailable", fail.Token(err))
+		} else {
+			defer j.Close()
+			sup.SetJournal(j)
+			j.Emit(journal.Record{Unit: "sahinit", Stream: "event", Event: []byte(`{"kind":"supervisor_started"}`)})
+		}
 	}
 	sup.Cgroups, sup.CgroupMode = root, mode
 	sup.Log = stderr
@@ -324,37 +396,42 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 	bootFailed := false
 	if err := sup.Boot(ctx, waves); err != nil && ctx.Err() == nil {
 		fmt.Fprintln(stderr, fail.Token(err))
-		if *strict {
+	}
+	// In host boot mode a boot unit is essential unless its unit says
+	// "essential": false. An essential unit that failed, stopped on its own
+	// or was never ready, or that needs one that did, returns control to
+	// PID 1; an optional unit's failure stays its own.
+	if *strict && ctx.Err() == nil {
+		if name := sup.EssentialFailure(true); name != "" {
+			fmt.Fprintln(stderr, "boot_service_failed", name)
 			bootFailed = true
 			cancel()
 		}
 	}
-	if *strict && !bootFailed {
-		// In host boot mode every boot unit is essential. A failed unit or
-		// an unexpectedly exited long-running unit returns control to PID 1.
-		tick := time.NewTicker(200 * time.Millisecond)
-	monitor:
-		for {
-			select {
-			case <-ctx.Done():
-				break monitor
-			case <-tick.C:
-				rows, _ := sup.Status("")
-				for _, row := range rows {
-					svc := svcs[row.Name]
-					if svc != nil && svc.Boot && (row.State == "failed" || (row.State == "exited" && svc.Type != "oneshot")) {
-						fmt.Fprintln(stderr, "boot_service_failed", row.Name)
-						bootFailed = true
-						cancel()
-						break monitor
-					}
+	if !bootFailed && ctx.Err() == nil {
+		bootReady.Store(true)
+	}
+	tick := time.NewTicker(200 * time.Millisecond)
+monitor:
+	for {
+		select {
+		case <-ctx.Done():
+			break monitor
+		case <-tick.C:
+			if err := sup.Reconcile(ctx); err != nil {
+				fmt.Fprintln(stderr, fail.Token(err))
+			}
+			if *strict {
+				if name := sup.EssentialFailure(false); name != "" {
+					fmt.Fprintln(stderr, "boot_service_failed", name)
+					bootFailed = true
+					cancel()
+					break monitor
 				}
 			}
 		}
-		tick.Stop()
-	} else {
-		<-ctx.Done()
 	}
+	tick.Stop()
 	var serveErr error
 	select {
 	case serveErr = <-errc:
@@ -363,6 +440,7 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 	if serveErr != nil {
 		fmt.Fprintln(stderr, fail.Token(serveErr))
 	}
+	bootReady.Store(false)
 	if err := sup.Shutdown(context.Background()); err != nil {
 		fmt.Fprintln(stderr, fail.Token(err))
 	}
