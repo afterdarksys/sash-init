@@ -266,7 +266,9 @@ func TestSashMountForgotten(t *testing.T) {
 	srv, sup, _, _, m1, _, _ := mountServer(t, "fgt")
 	var log syncBuf
 	sup.Log = &log
-	mount := func(s *sash.Server, a ...string) sash.Response { return s.Handle(sash.Request{Key: "fs.mount", Argv: a}) }
+	mount := func(s *sash.Server, a ...string) sash.Response {
+		return s.Handle(sash.Request{Key: "fs.mount", Argv: a})
+	}
 	if r := mount(srv, "mount", "tmpfs", m1, "type", "tmpfs", "opts", "nosuid,nodev"); r.Error != "" {
 		t.Fatal(r)
 	}
