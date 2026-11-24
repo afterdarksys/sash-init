@@ -2,7 +2,12 @@
 
 package unit
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/afterdarksys/sahinit/internal/fail"
+)
 
 func TestLifecyclePolicy(t *testing.T) {
 	base := `{"name":"a","exec":["/bin/true"],"type":"simple","ready":"exec"`
@@ -25,5 +30,16 @@ func TestEssentialDefault(t *testing.T) {
 		if s := mustParse(t, base+extra+`}`, "a"); s.Essential != want {
 			t.Fatalf("%s: essential %v", extra, s.Essential)
 		}
+	}
+}
+
+// watchdog needs notify readiness: nothing else writes heartbeats.
+func TestWatchdogNeedsNotify(t *testing.T) {
+	base := `{"name":"a","exec":["/bin/true"],"type":"simple","watchdog":"1s"`
+	if s := mustParse(t, base+`,"ready":"notify"}`, "a"); s.Watchdog != time.Second {
+		t.Fatalf("%+v", s)
+	}
+	if _, err := Parse([]byte(base+`,"ready":"exec"}`), "a"); fail.Token(err) != "watchdog_invalid" {
+		t.Fatalf("exec readiness: %v", err)
 	}
 }

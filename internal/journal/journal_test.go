@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/afterdarksys/sahinit/internal/fail"
 )
 
 func TestRotationRecoveryAndSequence(t *testing.T) {
@@ -81,5 +83,26 @@ func TestJournalRefusesLinksAndConcurrentWriter(t *testing.T) {
 	j.Emit(Record{})
 	if j.Stats().Dropped != 1 {
 		t.Fatal("overflow invisible")
+	}
+}
+
+// A journal file with a second hard link is refused: the link could be a
+// name somebody else reads or replaces.
+func TestHardLinkedFileRefused(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0700)
+	j, err := Open(dir, 64*1024, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.Close()
+	if err := os.Link(filepath.Join(dir, "current.jsonl"), filepath.Join(dir, "other")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(dir, 64*1024, 1); fail.Token(err) != "journal_perm" {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := Read(dir); fail.Token(err) != "journal_perm" {
+		t.Fatalf("read: %v", err)
 	}
 }

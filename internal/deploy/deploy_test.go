@@ -237,3 +237,21 @@ func TestJobsAndSashRefused(t *testing.T) {
 		})
 	}
 }
+
+// exec[0] must be the @/ form naming a manifest artifact; a bare bundle path
+// to the same artifact is refused, as is an absolute host path.
+func TestExecNeedsArtifactPrefix(t *testing.T) {
+	for _, exec := range []string{"artifacts/app", "/bin/true"} {
+		f := setup(t)
+		u := []byte(`{"name":"app","type":"simple","ready":"exec","exec":["` + exec + `"],"boot":true}`)
+		os.WriteFile(filepath.Join(f.bundle, "units/app.json"), u, 0600)
+		var m Manifest
+		json.Unmarshal(f.manifest, &m)
+		m.Units[0].SHA256 = Hash(u)
+		f.manifest, _ = json.Marshal(m)
+		f.p.CatalogSHA256 = Hash(f.manifest)
+		if _, err := f.m.Stage(f.sign(), f.manifest, f.bundle); fail.Token(err) != "manifest_exec" {
+			t.Fatalf("%s: %v", exec, err)
+		}
+	}
+}
