@@ -1,6 +1,7 @@
 package sash
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net"
@@ -329,7 +330,7 @@ func TestServeWire(t *testing.T) {
 	defer a.Close()
 	s, _ := newServer()
 	done := make(chan error, 1)
-	go func() { done <- Serve(b, s) }()
+	go func() { done <- Serve(context.Background(), b, s) }()
 	send := func(body string) string {
 		t.Helper()
 		if err := WriteFrame(a, []byte(body)); err != nil {
@@ -364,4 +365,48 @@ func TestServeWire(t *testing.T) {
 func b64(s string) string {
 	out, _ := json.Marshal([]byte(s))
 	return strings.Trim(string(out), `"`)
+}
+
+// A wait blocked on a long-lived process ends when the peer closes the
+// socket, when the session's context ends, and at the session's deadline,
+// so it cannot hold stop, the cgroup kill or shutdown.
+func TestWaitEndsWithTheSession(t *testing.T) {
+	for _, how := range []string{"close", "cancel", "deadline"} {
+		s, _ := newServer()
+		if _, err := s.Table.Reserve("main"); err != nil {
+			t.Fatal(err)
+		}
+		if how == "deadline" {
+			s.Deadline = time.Now().Add(100 * time.Millisecond)
+		}
+		a, b := net.Pipe()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- Serve(ctx, b, s) }()
+		if err := WriteFrame(a, []byte(`{"key":"svc.wait","argv":["wait","main","timeout","24h"],"path":"","body":""}`)); err != nil {
+			t.Fatal(err)
+		}
+		switch how {
+		case "close":
+			time.Sleep(50 * time.Millisecond)
+			a.Close()
+			b.Close()
+		case "cancel":
+			time.Sleep(50 * time.Millisecond)
+			cancel()
+			b.Close()
+		case "deadline":
+			out, err := ReadFrame(a)
+			if err != nil || string(out) != `{"error":"timeout"}` {
+				t.Fatalf("deadline: %s %v", out, err)
+			}
+			a.Close()
+		}
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: Serve still blocked on the wait", how)
+		}
+		cancel()
+	}
 }

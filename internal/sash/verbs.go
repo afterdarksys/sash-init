@@ -23,6 +23,7 @@ package sash
 // tokens).
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/netip"
@@ -97,6 +98,13 @@ type Server struct {
 	CapCeiling []string
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
+	// Deadline, when set, is when the session's entry runs out: no wait
+	// outlasts it.
+	Deadline time.Time
+
+	// ctx ends when the session does (Serve sets it); a blocked wait
+	// returns then.
+	ctx context.Context
 }
 
 // verbKeys are the batch 1 keys and whether each mutates.
@@ -204,11 +212,25 @@ func (s *Server) handle(req Request) (Response, error) {
 		if err != nil {
 			return Response{}, err
 		}
+		if !s.Deadline.IsZero() {
+			if left := s.Deadline.Sub(s.now()); left < d {
+				d = left
+			}
+		}
+		if d <= 0 {
+			return Response{}, fail.E("timeout")
+		}
+		ctx := s.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
 		t := time.NewTimer(d)
 		defer t.Stop()
 		select {
 		case <-p.Done():
 		case <-t.C:
+			return Response{}, fail.E("timeout")
+		case <-ctx.Done():
 			return Response{}, fail.E("timeout")
 		}
 		code, sig, at := p.Result()
@@ -521,9 +543,9 @@ func (s *Server) spawn(req Request) (Response, error) {
 			plan.Stderr = st
 		}
 	}
-	p, ok := s.Table.Reserve(plan.Name)
-	if !ok {
-		return Response{}, fail.E("name_in_use")
+	p, err := s.Table.Reserve(plan.Name)
+	if err != nil {
+		return Response{}, err
 	}
 	if err := s.Host.Spawn(plan, p); err != nil {
 		s.Table.Release(p)
@@ -587,16 +609,44 @@ func decodeObject(raw []byte, dst any) error {
 	return nil
 }
 
-// Serve answers frames on rw until it closes, a frame is too long, or a
-// write fails.
-func Serve(rw io.ReadWriter, s *Server) error {
-	for {
-		body, err := ReadFrame(rw)
-		if err == io.EOF {
-			return nil
+// Serve answers frames on rw until it closes, ctx ends, a frame is too
+// long, or a write fails. Frames are read by a goroutine of their own, so a
+// verb that blocks (wait) ends as soon as the peer closes the socket or ctx
+// ends; the caller closes rw to stop the reader.
+func Serve(ctx context.Context, rw io.ReadWriter, s *Server) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	s.ctx = ctx
+	frames := make(chan []byte)
+	readErr := make(chan error, 1) // the reader's error, before it cancels
+	go func() {
+		for {
+			body, err := ReadFrame(rw)
+			if err != nil {
+				readErr <- err
+				cancel()
+				return
+			}
+			select {
+			case frames <- body:
+			case <-ctx.Done():
+				return
+			}
 		}
-		if err != nil {
-			return err
+	}()
+	for {
+		var body []byte
+		select {
+		case body = <-frames:
+		case <-ctx.Done():
+			select {
+			case err := <-readErr:
+				if err != io.EOF {
+					return err
+				}
+			default:
+			}
+			return nil
 		}
 		var resp Response
 		if req, derr := DecodeRequest(body); derr != nil {

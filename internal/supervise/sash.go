@@ -64,7 +64,11 @@ const (
 
 // sashState is a sash unit's runtime, beside runtime's common fields.
 type sashState struct {
-	table   *sash.Table
+	table *sash.Table
+	// sessions cancels each running session: stop and shutdown end them,
+	// so a blocked verb or entry never holds the cgroup kill.
+	sessions map[uint64]context.CancelFunc
+	nextSess uint64
 	serial  uint64
 	entries map[string]EntryResult
 	order   []string
@@ -284,15 +288,26 @@ func (sup *Supervisor) session(ctx context.Context, s *runtime, entry string, ch
 	keep = append(keep, theirs)
 	defer mine.Close()
 	pass = append(pass, theirs)
-	srv := &sash.Server{G: g, Table: s.sashTable(), Host: &sashHost{sup: sup, s: s}, Check: check, CapCeiling: svc.Sandbox.Caps}
-	served := make(chan struct{})
-	go func() {
-		sash.Serve(mine, srv)
-		close(served)
-	}()
-	errb := &capBuffer{max: 4096}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	id := s.addSession(cancel)
+	defer s.dropSession(id)
+	srv := &sash.Server{G: g, Table: s.sashTable(), Host: &sashHost{sup: sup, s: s}, Check: check, CapCeiling: svc.Sandbox.Caps, Deadline: time.Now().Add(timeout)}
+	served := make(chan struct{})
+	go func() {
+		sash.Serve(ctx, mine, srv)
+		close(served)
+	}()
+	// The verb server ends with the session; never wait on it for long.
+	endServe := func() {
+		cancel()
+		mine.Close()
+		select {
+		case <-served:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	errb := &capBuffer{max: 4096}
 	argv := []string{sup.Sash.Binary, "--session", "--entry", entry, svc.Sash.File}
 	sup.launching.RLock()
 	cmd, _, _, err := sandbox.Launch(ctx, sup.self, argv, svc.Sandbox, false, timeoutOf(svc), sandbox.Options{
@@ -305,8 +320,7 @@ func (sup *Supervisor) session(ctx context.Context, s *runtime, entry string, ch
 	}
 	keep = nil
 	if err != nil {
-		mine.Close()
-		<-served
+		endServe()
 		return -1, fail.Token(err)
 	}
 	s.mu.Lock()
@@ -315,8 +329,7 @@ func (sup *Supervisor) session(ctx context.Context, s *runtime, entry string, ch
 	}
 	s.mu.Unlock()
 	code, _ := waitBounded(ctx, cmd)
-	mine.Close()
-	<-served
+	endServe()
 	s.mu.Lock()
 	if s.pid == cmd.Process.Pid {
 		s.pid = 0
@@ -326,6 +339,42 @@ func (sup *Supervisor) session(ctx context.Context, s *runtime, entry string, ch
 	tok := stderrToken.FindString(line)
 	s.recordEntry(entry, code, tok)
 	return code, tok
+}
+
+func (s *runtime) addSession(cancel context.CancelFunc) uint64 {
+	s.sashTable()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sash.sessions == nil {
+		s.sash.sessions = map[uint64]context.CancelFunc{}
+	}
+	s.sash.nextSess++
+	s.sash.sessions[s.sash.nextSess] = cancel
+	return s.sash.nextSess
+}
+
+func (s *runtime) dropSession(id uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sash != nil {
+		delete(s.sash.sessions, id)
+	}
+}
+
+// cancelSessions ends every running session of this service: sash is
+// killed and its verb server returns.
+func (s *runtime) cancelSessions() {
+	s.mu.Lock()
+	var all []context.CancelFunc
+	if s.sash != nil {
+		for _, c := range s.sash.sessions {
+			all = append(all, c)
+		}
+	}
+	s.mu.Unlock()
+	for _, c := range all {
+		c()
+	}
 }
 
 func (s *runtime) sashTable() *sash.Table {
@@ -390,9 +439,10 @@ func (sup *Supervisor) startSashLocked(ctx context.Context, s *runtime, gen uint
 	}
 	s.cg = sup.Cgroups
 	old := s.sash
-	s.sash = &sashState{table: table, serial: g.Serial, entries: map[string]EntryResult{}}
+	s.sash = &sashState{table: table, serial: g.Serial, entries: map[string]EntryResult{}, sessions: map[uint64]context.CancelFunc{}}
 	if old != nil {
 		s.sash.entries, s.sash.order = old.entries, old.order
+		s.sash.sessions, s.sash.nextSess = old.sessions, old.nextSess
 	}
 	s.mu.Unlock()
 	entry := d.Entry()
@@ -411,7 +461,7 @@ func (sup *Supervisor) startSashLocked(ctx context.Context, s *runtime, gen uint
 	default:
 		return sup.sashFail(s, gen, "failed", false)
 	}
-	if !sup.sashReady(ctx, s, g, d) {
+	if !sup.sashReady(ctx, s, gen, g, d) {
 		if s.lost(gen, sup) {
 			return fail.E("failed")
 		}
@@ -443,7 +493,7 @@ func (s *runtime) lost(gen uint64, sup *Supervisor) bool {
 // process (or, without one, any spawned process) saying it is ready, and
 // none means ready at once, unless the file has a check entry, which is
 // then run, read-only, until it exits 0.
-func (sup *Supervisor) sashReady(ctx context.Context, s *runtime, g sash.Grant, d *sash.Description) bool {
+func (sup *Supervisor) sashReady(ctx context.Context, s *runtime, gen uint64, g sash.Grant, d *sash.Description) bool {
 	kind, target, timeout := "none", "", unit.DefaultTimeout
 	if d.Ready != nil {
 		kind, target = d.Ready.Kind, d.Ready.Target
@@ -496,7 +546,7 @@ func (sup *Supervisor) sashReady(ctx context.Context, s *runtime, g sash.Grant, 
 		if probe() {
 			return true
 		}
-		if time.Now().After(deadline) || ctx.Err() != nil {
+		if time.Now().After(deadline) || ctx.Err() != nil || s.lost(gen, sup) {
 			return false
 		}
 		time.Sleep(readyPoll)
@@ -604,6 +654,34 @@ func stopTimeoutOf(svc *unit.Service) time.Duration {
 	return timeoutOf(svc)
 }
 
+// stopSash is Stop for a sash unit. A start still running its entry or
+// waiting on readiness is interrupted: it is marked lost, its sessions are
+// ended, and the stop proceeds once the start lets go.
+func (sup *Supervisor) stopSash(ctx context.Context, s *runtime) error {
+	if !s.op.TryLock() {
+		s.mu.Lock()
+		starting := s.state == "starting"
+		if starting {
+			s.gen++
+			s.stopReq = true
+		}
+		s.mu.Unlock()
+		if !starting {
+			return fail.E("busy")
+		}
+		s.cancelSessions()
+		deadline := time.Now().Add(stopTimeoutOf(s.svc) + 5*time.Second)
+		for !s.op.TryLock() {
+			if time.Now().After(deadline) || ctx.Err() != nil {
+				return fail.E("busy")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	defer s.op.Unlock()
+	return sup.stopSashLocked(ctx, s)
+}
+
 // stopSashLocked stops a sash unit: the stop entry with the stop timeout,
 // or the stop signal to every spawned process, then the cgroup kill.
 // Caller holds s.op.
@@ -627,6 +705,7 @@ func (sup *Supervisor) stopSashLocked(ctx context.Context, s *runtime) error {
 
 func (sup *Supervisor) stopSashBody(ctx context.Context, s *runtime) error {
 	svc := s.svc
+	s.cancelSessions()
 	timeout := stopTimeoutOf(svc)
 	table := s.sashTable()
 	if table.Running() > 0 {

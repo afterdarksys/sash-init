@@ -509,3 +509,49 @@ func TestSashRestartPolicyEndToEnd(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// A start blocked in a long wait (the verb server holding it) does not hold
+// stop: stop ends the session and kills the cgroup at once.
+func TestSashStopDuringBlockedWait(t *testing.T) {
+	e := newSashEnv(t)
+	e.add("hang", "service {\n  name hang\n  user nobody\n  group nogroup\n}\n\nfn start() {\n  spawn main /usr/bin/sleep 300\n  wait main timeout 24h\n}\n",
+		e2eGrant("hang", []string{"/usr/bin/sleep"}, []string{}), e.fleet)
+	var log syncBuf
+	sup, refused := e.load(&log)
+	if len(refused) != 0 {
+		t.Fatalf("refused %v", refused)
+	}
+	started := make(chan error, 1)
+	go func() { started <- sup.Start(context.Background(), "hang") }()
+	var pid int
+	deadline := time.Now().Add(10 * time.Second)
+	for pid == 0 {
+		if r := rowOf(t, sup, "hang"); r.Sash != nil && len(r.Sash.Procs) == 1 && r.Sash.Procs[0].Pid > 0 {
+			pid = r.Sash.Procs[0].Pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("main never spawned: %+v", rowOf(t, sup, "hang"))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond) // sash is now in wait
+	begin := time.Now()
+	if err := sup.Stop(t.Context(), "hang"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if took := time.Since(begin); took > 10*time.Second {
+		t.Fatalf("stop took %v", took)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("start still blocked")
+	}
+	waitGone(t, pid)
+	if r := rowOf(t, sup, "hang"); r.State != "stopped" {
+		t.Fatalf("after stop %+v", r)
+	}
+	if _, err := os.Stat(filepath.Join("/sys/fs/cgroup", e.root.Path("hang"))); err == nil {
+		t.Fatal("cgroup left")
+	}
+}

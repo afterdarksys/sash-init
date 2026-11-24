@@ -306,13 +306,13 @@ func (sup *Supervisor) Stop(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	if s.svc.Sash != nil {
+		return sup.stopSash(ctx, s)
+	}
 	if !s.op.TryLock() {
 		return fail.E("busy")
 	}
 	defer s.op.Unlock()
-	if s.svc.Sash != nil {
-		return sup.stopSashLocked(ctx, s)
-	}
 
 	s.mu.Lock()
 	state := s.state

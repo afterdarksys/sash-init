@@ -3,6 +3,8 @@ package sash
 import (
 	"sync"
 	"time"
+
+	"github.com/afterdarksys/sahinit/internal/fail"
 )
 
 // Table is one service's name-to-process table: the only handle a script
@@ -47,20 +49,27 @@ type Proc struct {
 	table   *Table
 }
 
-// Reserve binds name to a new process record, or is false when a process
-// of this service already holds it and is still running.
-func (t *Table) Reserve(name string) (*Proc, bool) {
+// MaxNames is the most process names one service may bind.
+const MaxNames = 64
+
+// Reserve binds name to a new process record. It is name_in_use when a
+// process of this service holds the name and still runs, and
+// too_many_names past MaxNames.
+func (t *Table) Reserve(name string) (*Proc, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if p := t.procs[name]; p != nil && !p.Ended() {
-		return nil, false
+		return nil, fail.E("name_in_use")
+	}
+	if _, ok := t.procs[name]; !ok && len(t.procs) >= MaxNames {
+		return nil, fail.E("too_many_names")
 	}
 	p := &Proc{Name: name, done: make(chan struct{}), Stdout: NewTail(), Stderr: NewTail(), table: t}
 	if _, ok := t.procs[name]; !ok {
 		t.order = append(t.order, name)
 	}
 	t.procs[name] = p
-	return p, true
+	return p, nil
 }
 
 // Release drops a reservation whose spawn failed.
