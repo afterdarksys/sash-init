@@ -614,3 +614,88 @@ func TestDescribeOutputCap(t *testing.T) {
 		}
 	}
 }
+
+// Stop interrupts a start waiting on readiness (a tcp port nobody opens)
+// at once, and kills the cgroup.
+func TestSashStopDuringReadyWait(t *testing.T) {
+	e := newSashEnv(t)
+	e.add("never", "service {\n  name never\n  user nobody\n  group nogroup\n  ready tcp 127.0.0.1:1 timeout 60s\n}\n\nfn start() {\n  spawn main /usr/bin/sleep 300\n}\n",
+		e2eGrant("never", []string{"/usr/bin/sleep"}, []string{}), e.fleet)
+	var log syncBuf
+	sup, refused := e.load(&log)
+	if len(refused) != 0 {
+		t.Fatalf("refused %v", refused)
+	}
+	started := make(chan error, 1)
+	go func() { started <- sup.Start(context.Background(), "never") }()
+	pid := waitMain(t, sup, "never")
+	time.Sleep(300 * time.Millisecond) // the start session ended; readiness is polled
+	begin := time.Now()
+	if err := sup.Stop(t.Context(), "never"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if took := time.Since(begin); took > 3*time.Second {
+		t.Fatalf("stop took %v", took)
+	}
+	<-started
+	waitGone(t, pid)
+	if r := rowOf(t, sup, "never"); r.State != "stopped" {
+		t.Fatalf("after stop %+v", r)
+	}
+	if _, err := os.Stat(filepath.Join("/sys/fs/cgroup", e.root.Path("never"))); err == nil {
+		t.Fatal("cgroup left")
+	}
+}
+
+// Stop interrupts a reload session that holds the service (a long wait):
+// the reload's sash is killed, the stop entry then runs, and the cgroup is
+// killed.
+func TestSashStopDuringReload(t *testing.T) {
+	e := newSashEnv(t)
+	e.add("slow", "service {\n  name slow\n  user nobody\n  group nogroup\n}\n\nfn start() {\n  spawn main /usr/bin/sleep 300\n}\n\nfn reload() {\n  wait main timeout 1h\n}\n\nfn stop() {\n  signal main TERM\n}\n",
+		e2eGrant("slow", []string{"/usr/bin/sleep"}, []string{}), e.fleet)
+	var log syncBuf
+	sup, refused := e.load(&log)
+	if len(refused) != 0 {
+		t.Fatalf("refused %v", refused)
+	}
+	if err := sup.Start(t.Context(), "slow"); err != nil {
+		t.Fatal(err)
+	}
+	pid := waitMain(t, sup, "slow")
+	reloaded := make(chan error, 1)
+	go func() { reloaded <- sup.Reload(context.Background(), "slow") }()
+	time.Sleep(500 * time.Millisecond) // sash is in wait
+	if gone(pid) {
+		t.Fatal("main ended before stop")
+	}
+	begin := time.Now()
+	if err := sup.Stop(t.Context(), "slow"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if took := time.Since(begin); took > 5*time.Second {
+		t.Fatalf("stop took %v", took)
+	}
+	if err := <-reloaded; err == nil {
+		t.Fatal("interrupted reload succeeded")
+	}
+	waitGone(t, pid)
+	r := rowOf(t, sup, "slow")
+	if r.State != "stopped" || r.Sash.Procs[0].Signal != "TERM" {
+		t.Fatalf("after stop %+v %+v", r, r.Sash.Procs)
+	}
+}
+
+func waitMain(t *testing.T, sup *Supervisor, name string) int {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if r := rowOf(t, sup, name); r.Sash != nil && len(r.Sash.Procs) == 1 && r.Sash.Procs[0].Pid > 0 {
+			return r.Sash.Procs[0].Pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("main never spawned: %+v", rowOf(t, sup, name))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

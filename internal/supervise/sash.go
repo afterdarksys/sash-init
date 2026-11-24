@@ -665,14 +665,18 @@ func stopTimeoutOf(svc *unit.Service) time.Duration {
 // ended, and the stop proceeds once the start lets go.
 func (sup *Supervisor) stopSash(ctx context.Context, s *runtime) error {
 	if !s.op.TryLock() {
+		// A start, or a reload or check session of a running service,
+		// holds s.op: its sessions are ended (the sash process is killed;
+		// the spawned processes are left to the stop that follows).
 		s.mu.Lock()
 		starting := s.state == "starting"
 		if starting {
 			s.gen++
 			s.stopReq = true
 		}
+		inEntry := s.state == "running" && s.sash != nil && len(s.sash.sessions) > 0
 		s.mu.Unlock()
-		if !starting {
+		if !starting && !inEntry {
 			return fail.E("busy")
 		}
 		s.cancelSessions()
