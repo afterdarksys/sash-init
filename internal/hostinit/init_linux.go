@@ -51,7 +51,7 @@ func Run(args []string) error {
 		if setupErr != nil {
 			return
 		}
-		manager, err = start(self, []string{"supervise", "--dir", c.Units, "--socket", c.Socket, "--boot-strict"}, false, true)
+		manager, err = start(self, c.SuperviseArgs(), false, true)
 		if err != nil {
 			log("recovery: supervisor start: %v", err)
 		} else {

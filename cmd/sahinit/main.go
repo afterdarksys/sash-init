@@ -23,7 +23,7 @@ import (
 )
 
 const usageText = policyUsage + sashUsage +
-	"usage: sahinit init [--dir DIR] [--socket PATH] [--recovery EXECUTABLE] [--shutdown-timeout DURATION]\n" +
+	"usage: sahinit init [--dir DIR] [--socket PATH] [--recovery EXECUTABLE] [--shutdown-timeout DURATION] [--sash PATH] [--sash-fleet-pub PATH] [--sash-floor-dir DIR]\n" +
 	"usage: sahinit ctl --socket PATH status|diagnostics|start|stop|restart|reload|check [NAME]\n" +
 	"usage: sahinit plan --dir DIR\n" +
 	"usage: sahinit supervise --dir DIR --socket PATH [--uid UID]... [--gid GID] [--no-cgroups] [--cgroup-sweep DURATION] [--boot-strict] [--sash PATH] [--sash-fleet-pub PATH] [--sash-floor-dir DIR]\n" +
