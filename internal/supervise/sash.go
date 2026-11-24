@@ -162,20 +162,24 @@ func Describe(ctx context.Context, root *cgroup.Root, self, binary string, svc *
 	return sash.ParseDescribe(out.Bytes())
 }
 
-// capBuffer keeps at most max bytes and notes more.
+// capBuffer keeps at most max bytes and notes more. It is not a
+// bytes.Buffer: io.Copy would use Buffer.ReadFrom and pass the cap by.
 type capBuffer struct {
-	bytes.Buffer
+	buf  bytes.Buffer
 	max  int
 	over bool
 }
 
 func (c *capBuffer) Write(p []byte) (int, error) {
-	if c.Len()+len(p) > c.max {
+	if c.buf.Len()+len(p) > c.max {
 		c.over = true
 		return len(p), nil
 	}
-	return c.Buffer.Write(p)
+	return c.buf.Write(p)
 }
+
+func (c *capBuffer) Bytes() []byte  { return c.buf.Bytes() }
+func (c *capBuffer) String() string { return c.buf.String() }
 
 // waitBounded waits for cmd until ctx ends, then kills it (the caller's
 // unreaped child, so its pid is still its) and collects it. It returns the
