@@ -332,15 +332,21 @@ func TestSignalDuringBoot(t *testing.T) {
 	putUnit(t, units, map[string]any{"name": "slow", "exec": []string{"/bin/sh", script, marker}, "type": "simple", "ready": "notify", "timeout": "30s"})
 	cmd := exec.Command(os.Args[0], "-test.run=^TestBootSignalHelper$")
 	cmd.Env = append(os.Environ(), "SAHINIT_BOOT_SIGNAL_HELPER=1", "SAHINIT_TEST_UNITS="+units, "SAHINIT_TEST_SOCKET="+sock)
+	var helperErr bytes.Buffer
+	cmd.Stderr = &helperErr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	defer cmd.Process.Kill()
-	deadline := time.Now().Add(5 * time.Second)
+	// The launch is done when the service writes its pid, and failed when
+	// the helper exits first. Starting a race-built helper under load is
+	// not what is tested, so the bound is only a backstop, the unit's
+	// timeout.
+	deadline := time.Now().Add(30 * time.Second)
 	var pid int
-	for time.Now().Before(deadline) {
+	for pid == 0 {
 		b, err := os.ReadFile(marker)
 		if err == nil {
 			pid, _ = strconv.Atoi(strings.TrimSpace(string(b)))
@@ -348,10 +354,15 @@ func TestSignalDuringBoot(t *testing.T) {
 				break
 			}
 		}
+		select {
+		case err := <-done:
+			t.Fatalf("helper exited before the service launched: %v %q", err, helperErr.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("service never launched")
+		}
 		time.Sleep(10 * time.Millisecond)
-	}
-	if pid == 0 {
-		t.Fatal("service never launched")
 	}
 	defer syscall.Kill(-pid, syscall.SIGKILL)
 	c, err := net.DialTimeout("unix", sock, time.Second)
@@ -372,7 +383,7 @@ func TestSignalDuringBoot(t *testing.T) {
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("unclean shutdown: %v", err)
+			t.Fatalf("unclean shutdown: %v %q", err, helperErr.String())
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("shutdown blocked on boot")

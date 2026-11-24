@@ -103,12 +103,16 @@ func ctxFor(t *testing.T, d time.Duration) (context.Context, context.CancelFunc)
 	return context.WithTimeout(context.Background(), d)
 }
 
+// The restart scripts exec their long sleep instead of forking it: on macOS
+// a group SIGTERM sent while the shell is forking can miss the new child
+// (Linux makes such a fork restart), which then lives until the stop
+// timeout escalates to SIGKILL, past these tests' stop deadline.
 func TestRestartAlwaysClean(t *testing.T) {
 	log := marker(t)
 	gate := marker(t)
 	script := writeScript(t, `printf 'x\n' >> "$1"
 if [ -f "$2" ]; then
-  /bin/sleep 30
+  exec /bin/sleep 30
 else
   : > "$2"
   exit 0
@@ -140,7 +144,7 @@ func TestRestartOnFailureCrash(t *testing.T) {
 	slept := marker(t)
 	script := writeScript(t, `if [ -f "$1" ]; then
   printf 'slept\n' > "$2"
-  /bin/sleep 30
+  exec /bin/sleep 30
 else
   : > "$1"
   exit 1
@@ -252,7 +256,7 @@ func TestRestartNotifyAfterReady(t *testing.T) {
 	script := writeScript(t, `printf '\n' >&3
 printf 'x\n' >> "$1"
 if [ -f "$2" ]; then
-  /bin/sleep 30
+  exec /bin/sleep 30
 else
   : > "$2"
   exit 1
