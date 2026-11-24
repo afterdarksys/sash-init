@@ -166,7 +166,7 @@ holds the policy token) and, for sash units, `sash_start`, `sash_run`, `sash_sto
 | `deployment_sash` | A deployment unit is a sash unit. Deployments carry exec units only. | Deploy sash units through `--dir`. |
 | `deployment_no_pending` | `ctl activate` with no pending generation. | `deploy stage` first. |
 | `deployment_not_configured` | `ctl activate` on a supervisor without `--deployment-root`. | |
-| `boot_in_progress` | `ctl activate` before the boot waves ended, or after boot failed. | Wait for boot. |
+| `boot_in_progress` | `ctl apply`, `rollback` or `activate` before the boot waves ended, after a strict boot failed, or while the supervisor stops. | Wait for boot. |
 | `bootstrap_refused` | `deploy bootstrap` with an active generation already, or no pending one. | Use `ctl activate` for later changes. |
 | `manifest_read` | The manifest file could not be read (missing, wrong owner or mode, over 256 KiB). | |
 | `manifest_shape` | Wrong `version`, missing arrays, no units, over 256 units or artifacts, or nesting too deep. | See [the bundle format](../deployments.md#bundle-format). |

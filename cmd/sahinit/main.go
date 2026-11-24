@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -304,7 +303,6 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, fail.Token(err))
 		return 2
 	}
-	var bootReady atomic.Bool
 	sup.SocketGID = gid
 	sup.Sash = sashCfg
 	if sashCfg != nil {
@@ -313,31 +311,7 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 	}
 	if manager != nil {
 		sup.SetAdmission(func(name string, restart bool) error { return manager.Admit(active, name, restart) })
-		sup.OnActivate = func(ctx context.Context) (supervise.CatalogDiff, error) {
-			if !bootReady.Load() {
-				return supervise.CatalogDiff{}, fail.E("boot_in_progress")
-			}
-			lock, err := manager.Lock()
-			if err != nil {
-				return supervise.CatalogDiff{}, err
-			}
-			defer lock.Close()
-			state, err := manager.State()
-			if err != nil {
-				return supervise.CatalogDiff{}, err
-			}
-			if state.Pending == "" {
-				return supervise.CatalogDiff{}, fail.E("deployment_no_pending")
-			}
-			candidate, err := manager.Load(state.Pending)
-			if err != nil {
-				return supervise.CatalogDiff{}, err
-			}
-			if err := candidate.Document.CheckFresh(manager.Clock); err != nil {
-				return supervise.CatalogDiff{}, err
-			}
-			return sup.ApplyAuthorized(ctx, candidate.Units, func(name string, restart bool) error { return manager.Admit(candidate, name, restart) }, func() error { return manager.CommitActive(candidate.ID) })
-		}
+		sup.OnActivate = activator(manager, sup)
 	}
 	if *logDir != "" {
 		// The journal is optional: a read-only or unusable directory is
@@ -409,7 +383,7 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if !bootFailed && ctx.Err() == nil {
-		bootReady.Store(true)
+		sup.SetBooted(true)
 	}
 	tick := time.NewTicker(200 * time.Millisecond)
 monitor:
@@ -440,7 +414,7 @@ monitor:
 	if serveErr != nil {
 		fmt.Fprintln(stderr, fail.Token(serveErr))
 	}
-	bootReady.Store(false)
+	sup.SetBooted(false)
 	if err := sup.Shutdown(context.Background()); err != nil {
 		fmt.Fprintln(stderr, fail.Token(err))
 	}

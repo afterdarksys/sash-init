@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,9 +13,42 @@ import (
 	"github.com/afterdarksys/sahinit/internal/bootpolicy"
 	"github.com/afterdarksys/sahinit/internal/deploy"
 	"github.com/afterdarksys/sahinit/internal/fail"
+	"github.com/afterdarksys/sahinit/internal/supervise"
 )
 
 const deployUsage = "usage: sahinit deploy stage|status|bootstrap --root DIR --trust FILE [--trust-system-clock] [--bundle DIR --manifest FILE --document FILE]"
+
+// activator is ctl activate for a supervisor running a deployment: after
+// boot, under the deployment lock, the pending generation is loaded (and so
+// re-verified), checked fresh, admitted unit by unit and applied; the active
+// pointer moves only after the apply succeeded.
+func activator(manager *deploy.Manager, sup *supervise.Supervisor) func(context.Context) (supervise.CatalogDiff, error) {
+	return func(ctx context.Context) (supervise.CatalogDiff, error) {
+		if !sup.Booted() {
+			return supervise.CatalogDiff{}, fail.E("boot_in_progress")
+		}
+		lock, err := manager.Lock()
+		if err != nil {
+			return supervise.CatalogDiff{}, err
+		}
+		defer lock.Close()
+		state, err := manager.State()
+		if err != nil {
+			return supervise.CatalogDiff{}, err
+		}
+		if state.Pending == "" {
+			return supervise.CatalogDiff{}, fail.E("deployment_no_pending")
+		}
+		candidate, err := manager.Load(state.Pending)
+		if err != nil {
+			return supervise.CatalogDiff{}, err
+		}
+		if err := candidate.Document.CheckFresh(manager.Clock); err != nil {
+			return supervise.CatalogDiff{}, err
+		}
+		return sup.ApplyAuthorized(ctx, candidate.Units, func(name string, restart bool) error { return manager.Admit(candidate, name, restart) }, func() error { return manager.CommitActive(candidate.ID) })
+	}
+}
 
 func deployment(root, trustPath string, trustClock bool) (*deploy.Manager, error) {
 	raw, err := policyFile(trustPath, 64*1024, true)

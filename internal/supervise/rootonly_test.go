@@ -31,6 +31,19 @@ func TestCatalogOpsRootOnly(t *testing.T) {
 		t.Fatalf("status: %s", raw)
 	}
 	rootUID = euid
+	// Until boot has finished, a root apply or rollback waits too.
+	units := t.TempDir()
+	os.Chmod(units, 0o700)
+	os.WriteFile(units+"/agent.json", []byte(`{"name":"agent","exec":["/bin/sleep","31"],"type":"simple","ready":"exec","boot":false}`), 0o600)
+	for _, req := range []string{`{"op":"apply","arg":"` + units + `"}`, `{"op":"rollback"}`} {
+		if resp, raw := rpc(t, path, req); resp.Error != "boot_in_progress" {
+			t.Fatalf("before boot %s: %s", req, raw)
+		}
+	}
+	if resp, raw := rpc(t, path, `{"op":"apply","arg":"relative/dir"}`); resp.Error != "catalog_path" {
+		t.Fatalf("relative dir: %s", raw)
+	}
+	sup.SetBooted(true)
 	for op, want := range map[string]string{"diff": "", "apply": "", "rollback": "no_previous_catalog", "activate": "deployment_not_configured"} {
 		resp, raw := rpc(t, path, `{"op":"`+op+`","arg":"/nonexistent"}`)
 		if resp.Error == "root_required" || (want != "" && resp.Error != want) {

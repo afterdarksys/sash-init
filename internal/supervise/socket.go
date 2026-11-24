@@ -364,6 +364,9 @@ func (sup *Supervisor) dispatch(op, name, arg string) response {
 			return response{Error: fail.Token(err)}
 		}
 		diff := Diff(sup.Catalog(), next)
+		if op == "apply" && !sup.Booted() {
+			return response{Error: "boot_in_progress", Diff: &diff}
+		}
 		if op == "apply" {
 			ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 			defer cancel()
@@ -371,6 +374,9 @@ func (sup *Supervisor) dispatch(op, name, arg string) response {
 		}
 		return response{OK: err == nil, Error: fail.Token(err), Diff: &diff}
 	case "rollback":
+		if !sup.Booted() {
+			return response{Error: "boot_in_progress"}
+		}
 		ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
 		diff, err := sup.Rollback(ctx)
