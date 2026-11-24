@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/afterdarksys/sahinit/internal/fail"
 	"github.com/afterdarksys/sahinit/internal/sash"
 )
 
@@ -185,6 +186,7 @@ func TestSashFileAndMountHostRechecks(t *testing.T) {
 	os.Symlink(outside, work+"/sub")
 	os.Link(victim, work+"/h")
 	os.WriteFile(work+"/secret", []byte("s"), 0o600)
+	os.Mkdir(work+"/rootdir", 0o755)
 	os.WriteFile(work+"/mine", []byte("m"), 0o644)
 	os.Chown(work+"/mine", 65534, 65534)
 	srv := &sash.Server{G: g, Table: s.sashTable(), Host: &sashHost{sup: sup, s: s}}
@@ -204,6 +206,9 @@ func TestSashFileAndMountHostRechecks(t *testing.T) {
 		"root file chown":   {file("chown", work+"/secret", "nobody:nogroup"), "denied"},
 		"root file chmod":   {file("chmod", work+"/secret", "0644"), "denied"},
 		"root file rm":      {file("rm", work+"/secret"), "denied"},
+		"root file touch":   {file("touch", work+"/secret"), "denied"},
+		"root dir mode":     {file("mkdir", work+"/rootdir", "mode", "0777"), "denied"},
+		"symlink last":      {file("chmod", work+"/sub", "0777"), "symlink"},
 		"dotdot":            {file("touch", work+"/../rawout/x"), "denied"},
 		"chown to root":     {file("chown", work+"/mine", "root:root"), "denied"},
 		"setuid":            {file("chmod", work+"/mine", "4755"), "denied"},
@@ -219,6 +224,17 @@ func TestSashFileAndMountHostRechecks(t *testing.T) {
 			t.Errorf("%s: %+v, want %s", name, c.r, c.want)
 		}
 	}
+	// The host refuses a mount without nosuid and nodev, whatever the
+	// server let through.
+	if err := (&sashHost{sup: sup, s: s}).Mount(sash.MountPlan{Src: "tmpfs", Dir: m1, Type: "tmpfs", Flags: []string{"nodev"}}); fail.Token(err) != "mount_opt_refused" {
+		t.Errorf("host mount without nosuid: %v", err)
+	}
+	// A grant identity that is not the unit's uid and gid owns nothing.
+	srv.G.User, srv.G.Group = "daemon", "daemon"
+	if r := file("chown", work+"/mine", "daemon:daemon"); r.Error != "denied" {
+		t.Errorf("another account: %+v", r)
+	}
+	srv.G.User, srv.G.Group = "nobody", "nogroup"
 	// A good tmpfs with a size, remounted read-only, then unmounted.
 	if r := mount("mount", "tmpfs", m1, "type", "tmpfs", "opts", "size=1m,mode=0750,nosuid,nodev"); r.Error != "" {
 		t.Fatalf("tmpfs: %+v", r)
