@@ -75,7 +75,9 @@ func (sup *Supervisor) Reconcile(ctx context.Context) error {
 }
 
 // EssentialFailure identifies terminal failures, including failed transitive
-// needs. A provider in its restart delay is transient, not a host failure.
+// needs. After boot (boot false) a unit or provider in its restart delay is
+// transient, not a host failure; at the end of boot (boot true) an
+// essential unit waiting out a delay after a crash counts as not ready.
 func (sup *Supervisor) EssentialFailure(boot bool) string {
 	if !sup.transaction.TryRLock() {
 		return ""

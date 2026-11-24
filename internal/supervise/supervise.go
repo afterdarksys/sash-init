@@ -118,9 +118,9 @@ type Supervisor struct {
 	booted        atomic.Bool
 	RestartBurst  int
 	RestartWindow time.Duration
-	// StableFor replaces the 10 s minimum a run must stay ready to reset
+	// stableMin replaces the 10 s minimum a run must stay ready to reset
 	// the crash count (tests only).
-	StableFor time.Duration
+	stableMin time.Duration
 	Allow     map[uint32]struct{}
 	// SocketGID is the socket's group when Allow names a uid other than
 	// the supervisor's own; the socket is then mode 0660.
@@ -734,6 +734,7 @@ func (sup *Supervisor) startLocked(ctx context.Context, s *runtime, arg string, 
 			s.restarts = 0
 			s.restartsAt = nil
 			s.crashes = 0
+			s.backoff = false
 		}
 		gen := s.gen
 		s.eventLocked("starting", "", nil)
@@ -771,6 +772,7 @@ func (sup *Supervisor) startLocked(ctx context.Context, s *runtime, arg string, 
 		s.restarts = 0
 		s.restartsAt = nil
 		s.crashes = 0
+		s.backoff = false
 	}
 	gen := s.gen
 	s.eventLocked("starting", "", nil)
@@ -1137,12 +1139,12 @@ func (sup *Supervisor) onExit(s *runtime, procDone chan struct{}, gen uint64, ex
 var clock = time.Now
 
 // stableFor is how long a run must stay ready before its crash count is
-// forgotten: at least 10 s (sup.StableFor, for tests), or the unit's
+// forgotten: at least 10 s (sup.stableMin, for tests), or the unit's
 // timeout when longer.
 func (sup *Supervisor) stableFor(svc *unit.Service) time.Duration {
 	min := 10 * time.Second
-	if sup.StableFor > 0 {
-		min = sup.StableFor
+	if sup.stableMin > 0 {
+		min = sup.stableMin
 	}
 	if t := timeoutOf(svc); t > min {
 		return t
@@ -1156,7 +1158,14 @@ func (sup *Supervisor) stableFor(svc *unit.Service) time.Duration {
 // whose backoff spreads five restarts over more than 30 s). Caller holds
 // s.mu.
 func (sup *Supervisor) allowRestart(s *runtime) bool {
-	burst := sup.RestartBurst
+	return sup.allowCrashRestart(s, sup.RestartBurst, sup.RestartWindow)
+}
+
+// allowCrashRestart is the restart decision for exec and sash units alike:
+// the sliding window (burst in window) and the consecutive-crash count
+// (burst crashes without a run that stayed ready for stableFor). Caller
+// holds s.mu.
+func (sup *Supervisor) allowCrashRestart(s *runtime, burst int, window time.Duration) bool {
 	if burst <= 0 {
 		burst = defaultBurst
 	}
@@ -1166,7 +1175,7 @@ func (sup *Supervisor) allowRestart(s *runtime) bool {
 	if s.crashes >= burst {
 		return false
 	}
-	if !allowRestartWith(s, burst, sup.RestartWindow) {
+	if !allowRestartWith(s, burst, window) {
 		return false
 	}
 	s.crashes++

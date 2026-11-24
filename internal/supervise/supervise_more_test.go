@@ -337,7 +337,7 @@ func TestRestartWindowPrune(t *testing.T) {
 	sup.RestartWindow = 50 * time.Millisecond
 	// Each run stays ready for 200 ms, longer than this, so the crash
 	// count resets and only the window decides.
-	sup.StableFor = 100 * time.Millisecond
+	sup.stableMin = 100 * time.Millisecond
 	ctx, cancel := ctxFor(t, 5*time.Second)
 	defer cancel()
 	if err := sup.Start(ctx, "agent"); err != nil {

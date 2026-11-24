@@ -488,6 +488,7 @@ func (sup *Supervisor) startSashLocked(ctx context.Context, s *runtime, gen uint
 		return fail.E("failed")
 	}
 	s.state, s.ready, s.lastError = "running", true, ""
+	s.readyAt = clock()
 	s.eventLocked("ready", "", nil)
 	s.mu.Unlock()
 	// A start that left nothing running has ended already.
@@ -609,17 +610,21 @@ func (sup *Supervisor) sashFinish(s *runtime, gen uint64, ok bool, tok string, n
 		}
 		delay = r.Delay
 	}
-	if !allowRestartWith(s, burst, window) {
+	if !sup.allowCrashRestart(s, burst, window) {
 		s.state, s.lastError = "failed", "restart_limit"
 		s.eventLocked("restart_limit", "restart_limit", nil)
 		return
 	}
 	s.state, s.lastError = "starting", ""
+	s.backoff = true
 	go sup.sashRelaunch(s, gen, delay)
 }
 
 func (sup *Supervisor) sashRelaunch(s *runtime, gen uint64, delay time.Duration) {
 	time.Sleep(delay)
+	s.mu.Lock()
+	s.backoff = false
+	s.mu.Unlock()
 	s.op.Lock()
 	defer s.op.Unlock()
 	if s.lost(gen, sup) {
