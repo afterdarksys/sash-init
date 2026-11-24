@@ -189,7 +189,7 @@ func TestSashFileAndMountHostRechecks(t *testing.T) {
 	os.Mkdir(work+"/rootdir", 0o755)
 	os.Mkdir(work+"/real", 0o755)
 	os.Chown(work+"/real", 65534, 65534)
-	os.Symlink(work+"/real", work+"/inner") // a link that stays beneath the root
+	os.Symlink("real", work+"/inner") // a relative link that stays beneath the root
 	os.WriteFile(work+"/dfile", nil, 0o644)
 	os.Chown(work+"/dfile", 1, 1) // daemon's
 	os.WriteFile(work+"/mine", []byte("m"), 0o644)
