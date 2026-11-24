@@ -37,9 +37,9 @@ const (
 	fdPass = 8
 	// fdHigh is where the exec and status fds move when passed fds take
 	// their places.
-	fdHigh = 64
-	maxSpec  = 64 * 1024
-	maxLine  = 1024
+	fdHigh  = 64
+	maxSpec = 64 * 1024
+	maxLine = 1024
 
 	// execPathFD runs a script's exec fd on a direct launch.
 	execPathFD = "/proc/self/fd/4"
