@@ -187,6 +187,11 @@ func TestSashFileAndMountHostRechecks(t *testing.T) {
 	os.Link(victim, work+"/h")
 	os.WriteFile(work+"/secret", []byte("s"), 0o600)
 	os.Mkdir(work+"/rootdir", 0o755)
+	os.Mkdir(work+"/real", 0o755)
+	os.Chown(work+"/real", 65534, 65534)
+	os.Symlink(work+"/real", work+"/inner") // a link that stays beneath the root
+	os.WriteFile(work+"/dfile", nil, 0o644)
+	os.Chown(work+"/dfile", 1, 1) // daemon's
 	os.WriteFile(work+"/mine", []byte("m"), 0o644)
 	os.Chown(work+"/mine", 65534, 65534)
 	srv := &sash.Server{G: g, Table: s.sashTable(), Host: &sashHost{sup: sup, s: s}}
@@ -209,6 +214,7 @@ func TestSashFileAndMountHostRechecks(t *testing.T) {
 		"root file touch":   {file("touch", work+"/secret"), "denied"},
 		"root dir mode":     {file("mkdir", work+"/rootdir", "mode", "0777"), "denied"},
 		"symlink last":      {file("chmod", work+"/sub", "0777"), "symlink"},
+		"symlink inside":    {file("touch", work+"/inner/x"), "symlink"},
 		"dotdot":            {file("touch", work+"/../rawout/x"), "denied"},
 		"chown to root":     {file("chown", work+"/mine", "root:root"), "denied"},
 		"setuid":            {file("chmod", work+"/mine", "4755"), "denied"},
@@ -231,10 +237,19 @@ func TestSashFileAndMountHostRechecks(t *testing.T) {
 	}
 	// A grant identity that is not the unit's uid and gid owns nothing.
 	srv.G.User, srv.G.Group = "daemon", "daemon"
-	if r := file("chown", work+"/mine", "daemon:daemon"); r.Error != "denied" {
+	if r := file("chown", work+"/dfile", "daemon:daemon"); r.Error != "denied" {
 		t.Errorf("another account: %+v", r)
 	}
 	srv.G.User, srv.G.Group = "nobody", "nogroup"
+	// probe file does not count a symlink as the file.
+	srv.G.Entitlements = append(srv.G.Entitlements, "svc.probe")
+	srv.G.FileRead = []string{work}
+	if r := srv.Handle(sash.Request{Key: "svc.probe", Argv: []string{"probe", "file", work + "/inner"}}); r.Error != "" || r.Exit != 1 {
+		t.Errorf("probe file through a link: %+v", r)
+	}
+	if r := srv.Handle(sash.Request{Key: "svc.probe", Argv: []string{"probe", "file", work + "/real"}}); r.Error != "" || r.Exit != 0 {
+		t.Errorf("probe file: %+v", r)
+	}
 	// A good tmpfs with a size, remounted read-only, then unmounted.
 	if r := mount("mount", "tmpfs", m1, "type", "tmpfs", "opts", "size=1m,mode=0750,nosuid,nodev"); r.Error != "" {
 		t.Fatalf("tmpfs: %+v", r)
