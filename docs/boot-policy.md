@@ -97,7 +97,8 @@ owned by root or the effective user and not writable by group/others; the comman
 a symlink at its final component. Ancestor directories must be administrator
 controlled. The trust input is never loaded from an issuer response. Key rotation
 is not implemented: removing a key needed to verify the cache makes it unusable
-and prevents normal replacement. Keep required old keys during planned migration.
+and prevents normal replacement. Keep required old keys during planned migration;
+the procedure is in [operations](reference/operations.md#rotating-boot-policy-keys).
 
 A complete **test-only** example is
 [`trust.json`](../internal/bootpolicy/testdata/trust.json). Its private seed is public

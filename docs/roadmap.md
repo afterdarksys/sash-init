@@ -1,5 +1,18 @@
 # Service-manager roadmap
 
+The [reference documentation](reference/README.md) describes what exists today;
+this page is what does not, yet. Current scope, stated plainly:
+
+- `supervise` under an existing init is the supported mode.
+- PID 1 mode is experimental: initramfs QEMU boots only, no persistent-disk
+  teardown proof, no switch-root, storage discovery or watchdog.
+- Boot policy is metadata only: nothing admits or refuses a unit from it,
+  and there is no SystemAPI issuer.
+- sash services (batches 1 and 2) work against test-made grants and floors;
+  there is no fleet signer, the grant's `host` is not checked, and spawned
+  processes cannot receive capabilities.
+- Sandboxed units cannot hold capabilities, and the network is not confined.
+
 The userspace supervisor now has an experimental Linux PID 1 parent for an
 already available local root. See [host init](host-init.md) for scope and VM tests.
 Broader machine/storage integration and production qualification remain.

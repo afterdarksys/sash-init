@@ -31,7 +31,7 @@ The mode is part of the **signed** policy (`lifetime: "never"` or `"renew"`), so
 - **Floor.** A separate document, `sahinit-boot-floor/1`, in the same envelope, signed over the domain `sahinit-boot-floor-v1\n` (policies use `sahinit-boot-policy-v1\n`). Fields: `version`, `tenant_id`, `host_id`, `enrollment_id`, `min_sequence`, `issued_at`. Sequences at or above `min_sequence` are admitted. A lower floor is `policy_floor_rollback`, the same `min_sequence` with different bytes is `policy_floor_conflict`. Stored as `floor.json` beside `policy.json` with the same atomic write. A corrupt floor fails closed.
 - **Trust cap.** `max_lifetime` is optional in the trust file and defaults to `never` (both allowed). In code, `Trust.Validate` requires it to be set explicitly; only `DecodeTrust` applies the default.
 - **CLI.** `sahinit policy floor-install|floor-show`. `status` reports `lifetime` and `floor_min_sequence`, and reports a revoked cache as `state: revoked`, exit 1.
-- **Open.** The floor shares the anti-rollback limits of the policy cache: deleting the cache directory or restoring a snapshot removes it. Key rotation (audit item 10) is still not documented.
+- **Open.** The floor shares the anti-rollback limits of the policy cache: deleting the cache directory or restoring a snapshot removes it. Key rotation (audit item 10) is documented as an operator procedure in `docs/reference/operations.md`; there is no versioned trust metadata yet.
 
 ## Step 3 decisions (2026-11-23)
 

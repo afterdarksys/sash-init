@@ -120,8 +120,8 @@ instead. Off Linux there are no cgroups, which behaves like
 `--no-cgroups`. Status rows and diagnostics report `cgroups` as `enabled`,
 `disabled` or `unsupported`; it is never silent.
 
-sahinit does not mount cgroup2 or enable controllers above its root;
-that is for PID 1, a later milestone. Under systemd, run it with
+`supervise` does not mount cgroup2 or enable controllers above its root;
+under [PID 1](host-init.md) the init parent does that. Under systemd, run it with
 `Delegate=yes`, for example:
 
 ```ini
@@ -186,7 +186,8 @@ sahinit ctl --socket /run/sahinit.sock diagnostics worker
 sahinit ctl --socket /run/sahinit.sock restart worker
 ```
 
-`ctl` supports `status`, `diagnostics`, `start`, `stop`, and `restart`. Only status
+`ctl` supports `status`, `diagnostics`, `start`, `stop`, `restart`, and, for sash
+units, `reload` and `check`. Only status
 allows an omitted service name. It prints the JSON response and exits 0 for success,
 1 for transport or operation failure, and 2 for invalid usage. The existing socket
 mode and peer UID authorization apply to every operation, including diagnostics.

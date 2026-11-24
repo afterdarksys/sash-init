@@ -1,5 +1,17 @@
 # SAHINIT
 
+**Reference documentation:** [docs/reference](docs/reference/README.md): every
+command and flag, the unit schema, environment, files, every refusal code,
+operations (install, PID 1, sash services, key rotation, upgrade, recovery,
+troubleshooting) and the security model.
+
+**Current scope.** `supervise` under an existing init with a delegated cgroup
+v2 is the supported mode. PID 1 mode is **experimental** (QEMU initramfs boots
+only). Boot policy is **metadata only**: verified and cached, never enforced.
+sash services run with test-made grants and floors: there is no fleet signer
+and no policy issuer yet. Sandboxed units cannot hold capabilities and the
+network is not confined. There are no packaged releases.
+
 A Go userspace service supervisor with strict JSON units, dependency boot waves,
 readiness checks, restart limits, explicit execution identities, bounded output tails,
 a Unix control socket, optional Linux sandboxing, and a cgroup v2 cgroup per

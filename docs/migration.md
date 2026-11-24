@@ -3,7 +3,8 @@
 The executable is currently named `sahinit` (module `github.com/afterdarksys/sahinit`).
 The migration command handles **standalone service definitions**, not replacement
 of a running machine's PID 1. Never uninstall the existing init system based only
-on a successful conversion. SAHINIT is currently a userspace supervisor.
+on a successful conversion. SAHINIT is a userspace supervisor with an experimental
+PID 1 mode ([host init](host-init.md)).
 
 ```sh
 go build -o /tmp/sahinit ./cmd/sahinit
@@ -49,8 +50,9 @@ migration host's filesystem.
 This is a conservative first converter, **not a claim of behavioral equivalence**.
 Even supported units use SAHINIT's clean PATH-only environment, `/` working directory,
 bounded in-memory service output tails, five-second default timeout, and bounded restart policy.
-Systemd simple readiness becomes exec readiness. SAHINIT `After` orders boot only;
-shutdown ordering and runtime dependency propagation are not implemented.
+Systemd simple readiness becomes exec readiness. SAHINIT `After` orders boot, and
+shutdown stops units in the reverse order; runtime dependency propagation (stopping
+a dependent when its provider fails) is not implemented.
 Daemontools originally runs in its service directory and retries indefinitely.
 OpenRC can load `conf.d`, `rc.conf`, multiplexed settings and runlevel configuration;
 these external files are not discovered or evaluated. Export self-contained scripts
