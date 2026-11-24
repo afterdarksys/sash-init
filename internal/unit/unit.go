@@ -47,6 +47,7 @@ var unitKeys = map[string]struct{}{
 	"after": {}, "needs": {}, "wants": {}, "timeout": {}, "boot": {},
 	"sandbox": {}, "execution": {},
 	"memory_max": {}, "cpu_max": {}, "pids_max": {},
+	"sash": {},
 }
 
 var sandboxKeys = map[string]struct{}{
@@ -84,6 +85,8 @@ type Service struct {
 	// Path is Exec[0] resolved and checked by Load. It is empty when that
 	// failed at load; the launch then resolves and checks Exec[0] itself.
 	Path string
+	// Sash is set for a sash service unit (sash.go), which has no Exec.
+	Sash *Sash
 }
 
 // Sandbox is present only when the unit named a sandbox object.
@@ -337,6 +340,17 @@ func Load(dir string) (svcs map[string]*Service, refused map[string]string, err 
 		if _, exists := out[svc.Name]; exists {
 			return nil, nil, fail.E("duplicate_field")
 		}
+		if svc.Sash != nil {
+			if tok := checkSashFiles(svc); tok != "" {
+				refused[name] = tok
+				continue
+			}
+			if err := resolveSandbox(svc.Sandbox); err != nil {
+				return nil, nil, err
+			}
+			out[svc.Name] = svc
+			continue
+		}
 		if resolved, err := ResolveExec(svc.Exec[0]); err == nil {
 			svc.Path = resolved
 		}
@@ -414,6 +428,9 @@ func Parse(raw []byte, stem string) (*Service, error) {
 	obj, err := jsonobj.Decode(raw, unitKeys)
 	if err != nil {
 		return nil, err
+	}
+	if _, ok := obj["sash"]; ok {
+		return parseSashUnit(obj, stem)
 	}
 	for _, key := range []string{"name", "exec", "type", "ready"} {
 		if _, ok := obj[key]; !ok {
