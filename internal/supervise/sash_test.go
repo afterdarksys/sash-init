@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -222,4 +223,31 @@ func (l *syncLog) String() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.b.String()
+}
+
+// A busy floor store fails the start as a transient error: the restart
+// policy still applies, unlike a grant error.
+func TestSashFloorBusyIsTransient(t *testing.T) {
+	g := sash.SampleGrant("app", "app", "app")
+	sup, s, store, _ := grantSup(t, signed(t, g, testKey("fleet")))
+	store.SetLockWait(20 * time.Millisecond)
+	held, err := os.OpenFile(filepath.Join(filepath.Dir(s.svc.Sash.Grant), "floors", "lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	s.svc.Restart = "on-failure"
+	if err := sup.Start(t.Context(), "app"); fail.Token(err) != "sash_floor_busy" {
+		t.Fatalf("start: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for rowOf(t, sup, "app").Restarts < 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("not retried: %+v", rowOf(t, sup, "app"))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

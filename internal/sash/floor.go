@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/afterdarksys/sahinit/internal/bootpolicy"
 	"github.com/afterdarksys/sahinit/internal/fail"
@@ -134,6 +135,22 @@ type FloorStore struct {
 	fleet      ed25519.PublicKey
 	failed     bool
 	checkpoint func(string) error // test-only fault injection
+	// wait is how long a busy lock is retried; 0 is two seconds.
+	wait time.Duration
+}
+
+// SetLockWait sets how long a busy lock is retried (tests).
+func (s *FloorStore) SetLockWait(d time.Duration) {
+	s.mu.Lock()
+	s.wait = d
+	s.mu.Unlock()
+}
+
+func (s *FloorStore) lockWait() time.Duration {
+	if s.wait > 0 {
+		return s.wait
+	}
+	return 2 * time.Second
 }
 
 // OpenFloorStore opens dir, which must be a directory (not a link) owned by
@@ -175,9 +192,20 @@ func (s *FloorStore) lock() (*os.File, error) {
 		f.Close()
 		return nil, fail.E("sash_floor_store_failed")
 	}
-	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		f.Close()
-		return nil, fail.E("sash_floor_busy")
+	// A busy store (a floor-install in progress) is waited for briefly;
+	// still busy, it is sash_floor_busy, which a start treats as
+	// transient.
+	deadline := time.Now().Add(s.lockWait())
+	for {
+		err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if err != unix.EWOULDBLOCK || time.Now().After(deadline) {
+			f.Close()
+			return nil, fail.E("sash_floor_busy")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	return f, nil
 }

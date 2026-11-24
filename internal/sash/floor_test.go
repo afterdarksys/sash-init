@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/afterdarksys/sahinit/internal/fail"
 )
@@ -205,5 +207,30 @@ func TestFloorGoldenVector(t *testing.T) {
 	}
 	if hex.EncodeToString(pub) != loadVectors(t).FleetPub {
 		t.Fatal("floor vector key is not sash's golden fleet key")
+	}
+}
+
+// A busy store is waited for briefly, then sash_floor_busy.
+func TestFloorBusyIsRetried(t *testing.T) {
+	s, dir, _ := newFloorStore(t)
+	s.SetLockWait(300 * time.Millisecond)
+	held, err := os.OpenFile(filepath.Join(dir, "lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Admit("app", 1); fail.Token(err) != "sash_floor_busy" {
+		t.Fatalf("held: %v", err)
+	}
+	fd := int(held.Fd())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		syscall.Flock(fd, syscall.LOCK_UN)
+	}()
+	if err := s.Admit("app", 1); err != nil {
+		t.Fatalf("released while waiting: %v", err)
 	}
 }

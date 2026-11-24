@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -453,6 +454,10 @@ func TestSashHostRechecks(t *testing.T) {
 	pid, _ := strconv.Atoi(r.Rows[0]["pid"])
 	if cg := cgroupOf(t, pid); !strings.HasSuffix(cg, "/app.service") {
 		t.Fatalf("spawned into %s", cg)
+	}
+	// No limit was asked for, and the child still has no core dumps.
+	if raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/limits"); err != nil || !regexp.MustCompile(`Max core file size\s+0\s+0\s`).Match(raw) {
+		t.Fatalf("core limit: %s %v", raw, err)
 	}
 	if st, err := os.Stat(work + "/out.log"); err != nil || st.Mode().Perm() != 0o640 || st.Sys().(*syscall.Stat_t).Uid != 65534 {
 		t.Fatalf("stream file %v %v", st, err)

@@ -176,12 +176,18 @@ func (h *sashHost) Spawn(plan sash.SpawnPlan, p *sash.Proc) error {
 			return err
 		}
 	}
+	// A spawned child never dumps core: a dump could carry a secret from
+	// its environment.
+	limits := map[string]uint64{"core": 0}
+	for k, v := range plan.Limits {
+		limits[k] = v
+	}
 	sb := *svc.Sandbox
 	sb.Caps = append([]string{}, plan.Caps...)
 	opts := sandbox.Options{
 		Path:      resolved,
 		Execution: unit.Execution{UID: &uid, GID: &gid, Groups: []uint32{}, Directory: plan.Cwd, Environment: env},
-		Rlimits:   plan.Limits,
+		Rlimits:   limits,
 	}
 	opts.Stdout, opts.Stderr = out, errw
 	// A file stream is opened by the helper, as the child, beneath its
