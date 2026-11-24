@@ -481,3 +481,73 @@ func TestOpenOwnCgroupMovesIntoLeaf(t *testing.T) {
 		t.Fatalf("%q %v", raw, err)
 	}
 }
+
+// Join opens the service cgroup as it is: a second child joins the first
+// without the first being killed. A missing cgroup is cgroup_join.
+func TestJoinKeepsMembers(t *testing.T) {
+	r := openRoot(t, cgtest.Dir(t))
+	if _, err := r.Join("svc"); fail.Token(err) != "cgroup_join" {
+		t.Fatalf("missing: %v", err)
+	}
+	g, err := r.Prepare("svc", unit.Limits{}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := startIn(t, g, "sleep", "30")
+	g.Close()
+	j, err := r.Join("svc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := startIn(t, j, "sleep", "30")
+	j.Close()
+	pids := members(t, r.dir+"/svc.service", 2)
+	sort.Ints(pids)
+	want := []int{first.Process.Pid, second.Process.Pid}
+	sort.Ints(want)
+	if fmt.Sprint(pids) != fmt.Sprint(want) {
+		t.Fatalf("members %v, want %v", pids, want)
+	}
+	if err := r.KillAll("svc", time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A scratch cgroup is fresh each time and DropScratch empties and removes
+// it; the stray sweep removes one left behind.
+func TestScratch(t *testing.T) {
+	r := openRoot(t, cgtest.Dir(t))
+	g, err := r.PrepareScratch("app", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startIn(t, g, "sleep", "30")
+	g.Close()
+	if g2, err := r.PrepareScratch("app", time.Second); err != nil {
+		t.Fatal(err)
+	} else {
+		if pids := members(t, r.dir+"/app.scratch", 0); len(pids) != 0 {
+			t.Fatalf("scratch not fresh: %v", pids)
+		}
+		g2.Close()
+	}
+	if err := r.DropScratch("app", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(r.dir + "/app.scratch"); !os.IsNotExist(err) {
+		t.Fatalf("scratch left: %v", err)
+	}
+	g, err = r.PrepareScratch("app", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startIn(t, g, "sleep", "30")
+	g.Close()
+	sw := r.SweepStrays(map[string]bool{})
+	if len(sw.Cgroups) != 1 || !strings.HasSuffix(sw.Cgroups[0], "/app.scratch") {
+		t.Fatalf("sweep %+v", sw)
+	}
+	if _, err := r.PrepareScratch("../x", time.Second); err == nil {
+		t.Fatal("bad tag")
+	}
+}

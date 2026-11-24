@@ -59,4 +59,6 @@ const (
 	// control is where systemd runs ExecReload and similar for a unit with
 	// Delegate=yes; it is the outer manager's, like the root itself.
 	control = ".control"
+	// scratch is the suffix of a throwaway cgroup (PrepareScratch).
+	scratch = ".scratch"
 )

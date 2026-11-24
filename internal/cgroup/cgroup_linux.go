@@ -344,6 +344,62 @@ func (r *Root) Prepare(name string, l unit.Limits, timeout time.Duration) (*Grou
 	return g, nil
 }
 
+// Join opens the service cgroup as it is, without emptying it, for another
+// child to join: a sash service's later sessions and the processes it
+// spawns all live in the one service cgroup. A cgroup that does not exist
+// is cgroup_join.
+func (r *Root) Join(name string) (*Group, error) {
+	dir, err := r.svcDir(name)
+	if err != nil {
+		return nil, err
+	}
+	return openGroup(dir)
+}
+
+// PrepareScratch makes a fresh throwaway cgroup, TAG.scratch, for a short
+// run that is not a service (sash --describe at load). Whatever an earlier
+// one left is killed first. DropScratch empties and removes it; the stray
+// sweep removes one left behind.
+func (r *Root) PrepareScratch(tag string, timeout time.Duration) (*Group, error) {
+	if !unit.NameOK(tag) {
+		return nil, fail.E("failed")
+	}
+	dir := filepath.Join(r.dir, tag+scratch)
+	if err := r.killAllDir(dir, timeout); err != nil {
+		return nil, err
+	}
+	if err := unix.Mkdir(dir, 0o755); err != nil {
+		return nil, fail.E("cgroup_unavailable")
+	}
+	g, err := setUp(dir, unit.Limits{})
+	if err != nil {
+		removeTree(dir)
+		return nil, err
+	}
+	return g, nil
+}
+
+// DropScratch kills everything in TAG.scratch and removes it.
+func (r *Root) DropScratch(tag string, timeout time.Duration) error {
+	if !unit.NameOK(tag) {
+		return fail.E("failed")
+	}
+	return r.killAllDir(filepath.Join(r.dir, tag+scratch), timeout)
+}
+
+func openGroup(dir string) (*Group, error) {
+	dfd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fail.E("cgroup_join")
+	}
+	pfd, err := unix.Open(dir+"/cgroup.procs", unix.O_WRONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		unix.Close(dfd)
+		return nil, fail.E("cgroup_join")
+	}
+	return &Group{Dir: os.NewFile(uintptr(dfd), dir), Procs: os.NewFile(uintptr(pfd), dir+"/cgroup.procs")}, nil
+}
+
 func setUp(dir string, l unit.Limits) (*Group, error) {
 	if err := unix.Chmod(dir, 0o755); err != nil {
 		return nil, fail.E("failed")

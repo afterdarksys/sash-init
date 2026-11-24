@@ -27,6 +27,14 @@ func (*Root) Prepare(string, unit.Limits, time.Duration) (*Group, error) {
 	return nil, fail.E("cgroup_unavailable")
 }
 
+func (*Root) Join(string) (*Group, error) { return nil, fail.E("cgroup_unavailable") }
+
+func (*Root) PrepareScratch(string, time.Duration) (*Group, error) {
+	return nil, fail.E("cgroup_unavailable")
+}
+
+func (*Root) DropScratch(string, time.Duration) error { return fail.E("cgroup_unavailable") }
+
 func (*Root) KillAll(string, time.Duration) error { return fail.E("cgroup_unavailable") }
 
 func (*Root) Kill(string) error { return fail.E("cgroup_unavailable") }

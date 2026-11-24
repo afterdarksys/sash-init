@@ -31,6 +31,13 @@ const (
 	fdSpec   = 5
 	fdStatus = 6
 	fdCgroup = 7 // sync pipe: one byte once the parent moved the helper into its cgroup
+	// fdPass is where Options.Pass sits in the helper; it is moved to fd 3
+	// and up just before exec. fds 3 to 7 are always filled when passing,
+	// so nothing the Go runtime opens can sit where a passed fd goes.
+	fdPass = 8
+	// fdHigh is where the exec and status fds move when passed fds take
+	// their places.
+	fdHigh = 64
 	maxSpec  = 64 * 1024
 	maxLine  = 1024
 
@@ -84,9 +91,16 @@ var errExec = errors.New("exec")
 
 var errLines map[string][]byte
 
+// statusFD and execFD are fdStatus and fdExec until passed fds take those
+// numbers (placePass); the helper is single-threaded by then.
+var (
+	statusFD = fdStatus
+	execFD   = fdExec
+)
+
 var specKeys = map[string]struct{}{
 	"no_new_privs": {}, "read_only_paths": {}, "read_write_paths": {}, "caps": {},
-	"notify": {}, "sandbox": {}, "cgroup": {},
+	"notify": {}, "sandbox": {}, "cgroup": {}, "pass": {}, "umask": {},
 }
 
 var childTokens = map[string]struct{}{
@@ -158,6 +172,16 @@ func ApplyCLI(args []string) int {
 	if notify && !isFIFO(fdReady) {
 		return writeStatus("failed")
 	}
+	pass, umask, err := decodeExtra(raw)
+	if err != nil || pass > 0 && (notify || sb == nil) {
+		return writeStatus("failed")
+	}
+	for fd := fdPass; fd < fdPass+pass; fd++ {
+		var st unix.Stat_t
+		if unix.Fstat(fd, &st) != nil {
+			return writeStatus("failed")
+		}
+	}
 	if join {
 		if err := joinCgroup(); err != nil {
 			return writeStatus("cgroup_join")
@@ -190,10 +214,18 @@ func ApplyCLI(args []string) int {
 		}
 		status = okLine(abi)
 	}
-	if err := writeFD(fdStatus, status); err != nil {
+	if umask >= 0 {
+		unix.Umask(umask)
+	}
+	if pass > 0 {
+		if err := placePass(pass); err != nil {
+			return writeStatus("failed")
+		}
+	}
+	if err := writeFD(statusFD, status); err != nil {
 		return 1
 	}
-	if err := execTarget(argv, env); err == errExec {
+	if err := execTarget(argv, env, pass == 0); err == errExec {
 		return writeStatus("failed")
 	}
 	return 1
@@ -286,7 +318,52 @@ func writeErr(token string) error {
 	if !ok {
 		line = errLines["failed"]
 	}
-	return writeFD(fdStatus, line)
+	return writeFD(statusFD, line)
+}
+
+// decodeExtra reads the optional pass count and umask (-1 when absent).
+func decodeExtra(raw []byte) (int, int, error) {
+	obj, err := jsonobj.Decode(raw, specKeys)
+	if err != nil {
+		return 0, -1, err
+	}
+	pass, umask := 0, -1
+	if v, ok := obj["pass"]; ok {
+		if err := jsonobj.Unmarshal(v, &pass); err != nil || pass < 1 || pass > MaxPass {
+			return 0, -1, fail.E("failed")
+		}
+	}
+	if v, ok := obj["umask"]; ok {
+		if err := jsonobj.Unmarshal(v, &umask); err != nil || umask < 0 || umask > 0o777 {
+			return 0, -1, fail.E("failed")
+		}
+	}
+	return pass, umask, nil
+}
+
+// placePass moves the exec and status fds out of the way, closes the spec
+// pipe, and puts the n passed fds on fds 3 and up, not close-on-exec. The
+// copies at fdPass stay close-on-exec (cloexecFrom), so the target holds
+// each passed fd once.
+func placePass(n int) error {
+	ex, err := unix.FcntlInt(uintptr(fdExec), unix.F_DUPFD_CLOEXEC, fdHigh)
+	if err != nil {
+		return err
+	}
+	st, err := unix.FcntlInt(uintptr(fdStatus), unix.F_DUPFD_CLOEXEC, fdHigh)
+	if err != nil {
+		return err
+	}
+	if err := unix.Close(fdSpec); err != nil {
+		return err
+	}
+	execFD, statusFD = ex, st
+	for i := 0; i < n; i++ {
+		if err := unix.Dup3(fdPass+i, fdReady+i, 0); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func writeFD(fd int, buf []byte) error {
@@ -385,9 +462,11 @@ func decodeSandbox(obj map[string]json.RawMessage) (*unit.Sandbox, error) {
 
 // execTarget runs the fd on fdExec. The status pipe is close-on-exec, so it
 // stays open until exec succeeds; on failure the caller sends an error.
-func execTarget(argv, env []string) error {
-	if err := unix.Close(fdSpec); err != nil {
-		return errExec
+func execTarget(argv, env []string, closeSpec bool) error {
+	if closeSpec {
+		if err := unix.Close(fdSpec); err != nil {
+			return errExec
+		}
 	}
 	argvp, err := syscall.SlicePtrFromStrings(argv)
 	if err != nil {
@@ -400,13 +479,13 @@ func execTarget(argv, env []string) error {
 	// With a close-on-exec fd the kernel runs a binary but refuses a script
 	// with ENOENT before the point of no return, since the interpreter could
 	// not open /dev/fd/4. Only then is the fd kept for the interpreter.
-	if execveat(fdExec, argvp, envp) != unix.ENOENT {
+	if execveat(execFD, argvp, envp) != unix.ENOENT {
 		return errExec
 	}
-	if _, err := unix.FcntlInt(fdExec, unix.F_SETFD, 0); err != nil {
+	if _, err := unix.FcntlInt(uintptr(execFD), unix.F_SETFD, 0); err != nil {
 		return errExec
 	}
-	execveat(fdExec, argvp, envp)
+	execveat(execFD, argvp, envp)
 	return errExec
 }
 
@@ -668,6 +747,11 @@ func closeHeld(h *held) error {
 // marshalSpec writes the helper's spec. A nil sb is a helper that only
 // joins the cgroup (join must then be set).
 func marshalSpec(sb *unit.Sandbox, notify, join bool) ([]byte, error) {
+	return marshalSpecPass(sb, notify, join, 0, nil)
+}
+
+// marshalSpecPass is marshalSpec with a count of passed fds and a umask.
+func marshalSpecPass(sb *unit.Sandbox, notify, join bool, pass int, umask *int) ([]byte, error) {
 	if sb == nil && !join {
 		return nil, fail.E("failed")
 	}
@@ -683,7 +767,11 @@ func marshalSpec(sb *unit.Sandbox, notify, join bool) ([]byte, error) {
 		Notify     bool     `json:"notify"`
 		Sandbox    bool     `json:"sandbox"`
 		Cgroup     bool     `json:"cgroup"`
+		Pass       int      `json:"pass,omitempty"`
+		Umask      *int     `json:"umask,omitempty"`
 	}{
+		Pass:       pass,
+		Umask:      umask,
 		Notify:     notify,
 		Sandbox:    !none,
 		Cgroup:     join,
@@ -722,7 +810,10 @@ func launchHelper(ctx context.Context, self string, argv []string, execF *os.Fil
 	if join && (opts.Cgroup == nil || opts.Cgroup.Procs == nil) {
 		return nil, "", nil, fail.E("failed")
 	}
-	spec, err := marshalSpec(sb, notify, join)
+	if len(opts.Pass) > 0 && (sb == nil || notify || len(opts.Pass) > MaxPass) {
+		return nil, "", nil, fail.E("failed")
+	}
+	spec, err := marshalSpecPass(sb, notify, join, len(opts.Pass), opts.Umask)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -765,10 +856,19 @@ func launchHelper(ctx context.Context, self string, argv []string, execF *os.Fil
 	// fdReady, fdExec, fdSpec, fdStatus, fdCgroup. A nil entry is closed in
 	// the child.
 	extra := []*os.File{notifyW, execF, specR, statusW}
+	if len(opts.Pass) > 0 {
+		extra[0] = null
+	}
 	clone := opts.Cgroup
 	if join {
 		extra = append(extra, syncR)
 		clone = nil
+	}
+	if len(opts.Pass) > 0 {
+		if !join {
+			extra = append(extra, null)
+		}
+		extra = append(extra, opts.Pass...)
 	}
 	cmd := &exec.Cmd{
 		Path:        self,
@@ -812,6 +912,12 @@ func launchHelper(ctx context.Context, self string, argv []string, execF *os.Fil
 			reap(cmd)
 			return nil, "", nil, fail.E("cgroup_join")
 		}
+	}
+	if err := setRlimits(cmd.Process.Pid, opts.Rlimits); err != nil {
+		closePair(specW, statusR)
+		closePair(notifyR, nil)
+		reap(cmd)
+		return nil, "", nil, err
 	}
 	if err := writeFull(specW, spec); err != nil {
 		specW.Close()
@@ -952,4 +1058,25 @@ func parseStatus(line []byte, sandboxed bool) (string, error) {
 		return "", fail.E(st.Error)
 	}
 	return "", fail.E("failed")
+}
+
+var rlimitOf = map[string]int{
+	"nofile": unix.RLIMIT_NOFILE, "nproc": unix.RLIMIT_NPROC, "core": unix.RLIMIT_CORE, "memlock": unix.RLIMIT_MEMLOCK,
+	"stack": unix.RLIMIT_STACK, "as": unix.RLIMIT_AS, "cpu": unix.RLIMIT_CPU, "fsize": unix.RLIMIT_FSIZE,
+}
+
+// setRlimits sets each limit, soft and hard, on the helper while it waits
+// for its spec, so they hold before it execs the target.
+func setRlimits(pid int, limits map[string]uint64) error {
+	for name, v := range limits {
+		res, ok := rlimitOf[name]
+		if !ok {
+			return fail.E("failed")
+		}
+		lim := unix.Rlimit{Cur: v, Max: v}
+		if err := unix.Prlimit(pid, res, &lim, nil); err != nil {
+			return fail.E("failed")
+		}
+	}
+	return nil
 }

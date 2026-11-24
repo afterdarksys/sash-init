@@ -107,6 +107,12 @@ func Launch(ctx context.Context, self string, argv []string, sb *unit.Sandbox, n
 		return nil, "", nil, fail.E("cgroup_unavailable")
 	}
 	join := opts.Cgroup != nil && noClone.Load()
+	if (len(opts.Pass) > 0 || opts.Umask != nil || len(opts.Rlimits) > 0) && sb == nil {
+		return nil, "", nil, fail.E("failed")
+	}
+	if len(opts.Pass) > MaxPass || len(opts.Pass) > 0 && notify {
+		return nil, "", nil, fail.E("failed")
+	}
 	if sb != nil || join {
 		cmd, claim, notifyR, err := launchHelper(ctx, self, argv, execF, sb, notify, timeout, opts, join)
 		if err == errNoClone {
@@ -354,7 +360,20 @@ type Options struct {
 	// its own pid to cgroup.procs where clone3 cannot. A child that cannot
 	// join is cgroup_join.
 	Cgroup *cgroup.Group
+	// Pass are fds the target receives as fds 3, 4, ... (at most
+	// MaxPass), open and not close-on-exec; every other fd is closed at
+	// exec as always. Only a sandboxed launch without notify passes fds.
+	Pass []*os.File
+	// Umask, when not nil, is the target's umask.
+	Umask *int
+	// Rlimits are set on the child, soft and hard, before it execs:
+	// resource name (nofile, nproc, core, memlock, stack, as, cpu, fsize)
+	// to value. Only a sandboxed launch sets them.
+	Rlimits map[string]uint64
 }
+
+// MaxPass is the most fds Options.Pass may hold.
+const MaxPass = 4
 
 func (o Options) configure(cmd *exec.Cmd) {
 	if o.Execution.Directory != "" {
