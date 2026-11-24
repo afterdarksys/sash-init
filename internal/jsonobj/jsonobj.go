@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package jsonobj decodes one JSON object and rejects duplicate keys.
 // encoding/json keeps the last duplicate, which is the systemd failure mode
 // this supervisor exists to refuse.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package frame is the sash-shaped control frame: a big-endian uint32 length
 // followed by that many JSON bytes. The length is checked before allocation.
 package frame

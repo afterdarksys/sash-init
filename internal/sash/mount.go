@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 package sash
 
 // The mount allowlists, copied from sash's internal/grant/policy.go

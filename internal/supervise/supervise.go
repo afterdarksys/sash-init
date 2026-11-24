@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package supervise runs a static service catalog in the calling process.
 //
 // Threats: the control socket is local and uid-gated. A denied peer is

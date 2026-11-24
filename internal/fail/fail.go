@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package fail is the closed error vocabulary for sahinit.
 // Error text is the token and nothing else, so a caller cannot leak a path,
 // a request id, or an OS error string onto the control socket.

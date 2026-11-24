@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package migrate converts explicit, offline service catalogs. It never executes
 // source scripts, reads the host service-manager state, or switches init systems.
 package migrate

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 package supervise
 
 // Running sash services (docs/design/sash-services-1.md).

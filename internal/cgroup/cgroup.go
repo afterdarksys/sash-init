@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package cgroup gives each service its own cgroup v2 below a delegated root.
 //
 // A service is its cgroup: children that call setsid or fork twice stay in

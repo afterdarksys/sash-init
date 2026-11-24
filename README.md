@@ -67,3 +67,7 @@ Signed boot-policy metadata can be verified, cached, and inspected with
 from a provisioned HTTPS endpoint. See [boot-policy metadata](docs/boot-policy.md)
 for the wire contract and scope; there is no issuer yet, and policy is not
 enforced (metadata only).
+
+## License
+
+sahinit is free software, licensed under the GNU General Public License, version 3 or (at your option) any later version (GPL-3.0-or-later). See [LICENSE](LICENSE). Every Go source file carries an `SPDX-License-Identifier: GPL-3.0-or-later` header.

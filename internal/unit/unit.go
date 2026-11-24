@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package unit loads the static service catalog.
 //
 // Threats: a unit file is untrusted input. Unknown fields, duplicate keys,

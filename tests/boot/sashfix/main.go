@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // A VM fixture generator, never included in the installed init binary. It
 // makes a throwaway fleet key in memory and writes, into DIR, the public key,
 // the signed sash/2 grants for the boot test's services and a signed floor

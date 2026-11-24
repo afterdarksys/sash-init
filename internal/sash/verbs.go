@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 package sash
 
 // The verb server: sahinit's side of the verb socket for one sash session

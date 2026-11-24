@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 package sash
 
 // The signed per-service floor, sahinit-sash-floor/1: a sash/2 grant whose

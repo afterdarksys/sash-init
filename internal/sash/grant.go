@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package sash is sahinit's side of running sash services
 // (docs/design/sash-services-1.md): the sash/2 boot grant, the signed
 // per-service floor, the verb frames, the describe document and the verb

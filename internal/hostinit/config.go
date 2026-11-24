@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package hostinit implements the small Linux PID 1 parent. The service
 // supervisor runs in a separate process so its exec.Cmd waits cannot race
 // with PID 1's collection of adopted orphans.

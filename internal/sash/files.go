@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 package sash
 
 // The file verbs and mount (batch 2, docs/design/sash-services-2.md): the

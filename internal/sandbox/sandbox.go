@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package sandbox starts a service process.
 //
 // Threats: sandbox setup runs in a fresh process so a multithreaded parent

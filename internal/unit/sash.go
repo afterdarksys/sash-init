@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 package unit
 
 // A sash service unit (docs/design/sash-services-1.md, "Unit"):

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 package sash
 
 // The verb frames between sash and its parent: a big-endian uint32 length

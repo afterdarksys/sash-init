@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 package sash
 
 // The sash-describe/1 document (sash cmd/sash --describe, golden

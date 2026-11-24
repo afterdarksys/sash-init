@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //go:build !linux
 
 // Package cgtest prepares delegated cgroups for tests; cgroups are Linux

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package graph plans the boot waves of a static catalog.
 // needs, after, and wants are the only edges. A cycle is a boot error.
 package graph

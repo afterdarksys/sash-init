@@ -24,3 +24,7 @@ Design records and narrative guides: [execution and diagnostics](../execution.md
 [host init](../host-init.md), [boot policy](../boot-policy.md),
 [migration](../migration.md), [roadmap](../roadmap.md), and the contracts in
 [design/](../design/).
+
+## License
+
+sahinit and this documentation are licensed GPL-3.0-or-later; see the repository LICENSE.

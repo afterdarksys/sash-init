@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package bootpolicy verifies and caches signed boot-policy metadata. A verified
 // document is not proof that its catalog or executable artifacts have been checked.
 package bootpolicy

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //go:build linux
 
 // A purpose-built VM fixture, never included in the installed init binary.
