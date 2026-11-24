@@ -63,7 +63,7 @@ SASH
   echo '{"name":"sashcheck","exec":["/probe","sashlaunch"],"type":"oneshot","ready":"exit","boot":true,"timeout":"10s"}' > "$r/etc/sahinit/units/sashcheck.json"
 }
 
-for scenario in poweroff reboot badconfig bootfail runtimefail crash stuck retry sash; do
+for scenario in poweroff reboot badconfig bootfail runtimefail crash stuck retry sash notify; do
   root=/tmp/root-$scenario
   mkdir -p "$root/etc/sahinit/units" "$root/dev" "$root/proc" "$root/sys" "$root/run"
   cp /assets/sahinit "$root/init"
@@ -79,6 +79,36 @@ EOF
   if [ "$scenario" = bootfail ]; then
     echo '{"name":"app","exec":["/probe","fail"],"type":"oneshot","ready":"exit","boot":true}' > "$root/etc/sahinit/units/app.json"
   fi
+  if [ "$scenario" = notify ]; then
+    # Opted out of essential: the watchdog kill it provokes must not send
+    # the host to recovery.
+    echo '{"name":"app","exec":["/init","host","notify-adapter","--watchdog","500ms","--","/probe","sdnotify"],"type":"simple","ready":"notify","watchdog":"500ms","boot":true,"essential":false,"needs":["provider"],"timeout":"5s"}' > "$root/etc/sahinit/units/app.json"
+  fi
   if [ "$scenario" = sash ]; then sash_root "$root"; fi
   (cd "$root" && find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -1) > "/out/$scenario.cpio.gz"
 done
+
+# An ext4 root image plus an initramfs that actually checks and switches root.
+root=/tmp/disk-root
+mkdir -p "$root/etc/sahinit/units" "$root/sbin" "$root/dev" "$root/proc" "$root/sys" "$root/run" "$root/var/lib/sahinit"
+cp /assets/sahinit "$root/sbin/sahinit"
+cp /assets/probe "$root/probe"
+echo persistent > "$root/scenario"
+echo '{"name":"disk","exec":["/probe","disk"],"type":"simple","ready":"exec","boot":true}' > "$root/etc/sahinit/units/disk.json"
+truncate -s 192M /out/root.ext4
+mkfs.ext4 -q -F -d "$root" /out/root.ext4
+initrd=/tmp/disk-initrd
+mkdir -p "$initrd/bin" "$initrd/sbin" "$initrd/dev" "$initrd/proc" "$initrd/sys" "$initrd/newroot"
+cp /bin/busybox "$initrd/bin/busybox"
+for cmd in sh mkdir mount cat modprobe sleep switch_root; do ln -s busybox "$initrd/bin/$cmd"; done
+cp /assets/sahinit "$initrd/sahinit"
+cp /root-init "$initrd/init"
+chmod 0755 "$initrd/init"
+cp /sbin/e2fsck "$initrd/sbin/e2fsck"
+# Copy e2fsck's runtime loader and libraries, preserving absolute paths.
+ldd /sbin/e2fsck | awk '{for(i=1;i<=NF;i++) if($i ~ /^\//) print $i}' | while read -r lib; do
+  mkdir -p "$initrd$(dirname "$lib")"
+  cp "$lib" "$initrd$lib"
+done
+cp -a /lib/modules "$initrd/lib/"
+(cd "$initrd" && find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -1) > /out/persistent.cpio.gz

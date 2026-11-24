@@ -10,10 +10,11 @@ COPY --from=sash . /sash-src
 RUN cd /sash-src && CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -o /sash ./cmd/sash
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends linux-image-cloud-amd64 cpio && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends linux-image-cloud-amd64 cpio busybox-static e2fsprogs && rm -rf /var/lib/apt/lists/*
 COPY --from=build /sahinit /assets/sahinit
 COPY --from=build /probe /assets/probe
 COPY --from=build /sashfix /assets/sashfix
 COPY --from=build /sash /assets/sash
 COPY tests/boot/make-images.sh /make-images.sh
+COPY contrib/initramfs/init /root-init
 ENTRYPOINT ["sh", "/make-images.sh"]

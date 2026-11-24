@@ -10,7 +10,7 @@ import tempfile
 parser = argparse.ArgumentParser()
 parser.add_argument("--assets", type=Path, help="reuse an existing image directory")
 parser.add_argument("--timeout", type=int, default=90)
-scenarios = ("poweroff", "reboot", "badconfig", "bootfail", "runtimefail", "crash", "stuck", "retry", "sash")
+scenarios = ("poweroff", "reboot", "badconfig", "bootfail", "runtimefail", "crash", "stuck", "retry", "sash", "notify", "persistent")
 parser.add_argument("--scenario", action="append", choices=scenarios, help="run only these (repeatable)")
 parser.add_argument("--sash-src", type=Path, help="sash repository to build sash from (SASH_SRC, default ../sash-initp1)")
 args = parser.parse_args()
@@ -27,7 +27,10 @@ qemu = shutil.which("qemu-system-x86_64")
 if not qemu:
     raise SystemExit("qemu-system-x86_64 is required")
 print(f"VM assets and serial logs: {assets}", flush=True)
-for scenario in args.scenario or scenarios:
+selected = args.scenario or scenarios
+for scenario in selected:
+    if scenario == "persistent":
+        continue
     init_args = "--recovery /probe --shutdown-timeout 8s"
     if scenario == "sash":
         init_args += " --sash /sash --sash-fleet-pub /etc/sahinit/fleet.pub --sash-floor-dir /var/lib/sahinit/sash"
@@ -56,8 +59,33 @@ for scenario in args.scenario or scenarios:
         required += ["BOOTTEST: sash driver detached", "BOOTTEST: sash service ready", "BOOTTEST: sash spawn in cgroup sahinit/svc.service as 65534",
                      "BOOTTEST: sash file verbs", "BOOTTEST: sash tmpfs mount", "sash_grant revoked sash_grant_revoked", "BOOTTEST: sash grant below floor refused",
                      "BOOTTEST: sash stop entry", "BOOTTEST: sash cgroup killed", "BOOTTEST: sash mounts removed"]
+    if scenario == "notify":
+        required += ["BOOTTEST: sd_notify ready", "BOOTTEST: sd_notify heartbeats stopped", "BOOTTEST: watchdog killed unresponsive service"]
     required += ["Restarting system" if scenario == "reboot" else "Power down"]
     missing = [text for text in required if text not in log]
     if result.returncode or missing or "BOOTTEST: FAIL" in log or "Kernel panic" in log:
         raise SystemExit(f"FAIL {scenario}: exit={result.returncode}, missing={missing}; see {assets / (scenario+'.log')}")
     print(f"PASS {scenario}", flush=True)
+
+if "persistent" in selected:
+    disk = assets / "persistent-run.ext4"
+    shutil.copyfile(assets / "root.ext4", disk)
+    for boot in (1, 2):
+        command = [qemu, "-machine", "q35", "-accel", "tcg", "-m", "512", "-smp", "2", "-nographic", "-monitor", "none", "-no-reboot", "-nic", "none", "-kernel", str(assets / "kernel"), "-initrd", str(assets / "persistent.cpio.gz"), "-drive", f"file={disk},format=raw,if=virtio", "-append", "console=ttyS0 panic=1 rdinit=/init sahinit.root=/dev/vda"]
+        try:
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=args.timeout)
+        except subprocess.TimeoutExpired as exc:
+            (assets / f"persistent-{boot}.log").write_bytes(exc.stdout or b"")
+            raise SystemExit(f"FAIL persistent boot {boot}: timeout; see {assets}")
+        log = result.stdout.decode(errors="replace")
+        (assets / f"persistent-{boot}.log").write_text(log)
+        required = ["sahinit-root: checked ext4 root; handing off", "sahinit-init: started pid=1", f"BOOTTEST: persistent boot {boot}", "Power down"]
+        missing = [text for text in required if text not in log]
+        if result.returncode or missing or "Kernel panic" in log or "BOOTTEST: FAIL" in log or "unmount/remount /:" in log:
+            raise SystemExit(f"FAIL persistent boot {boot}: {missing}; see {assets}")
+        subprocess.run(["docker", "run", "--rm", "--network", "none", "--entrypoint", "/sbin/e2fsck", "-v", f"{assets}:/out:ro", "sahinit-boot-test", "-fn", "/out/persistent-run.ext4"], check=True)
+        print(f"PASS persistent boot {boot}: filesystem clean after shutdown", flush=True)
+    result = subprocess.run(["docker", "run", "--rm", "--network", "none", "--entrypoint", "/sbin/debugfs", "-v", f"{assets}:/out:ro", "sahinit-boot-test", "-R", "cat /var/lib/sahinit/boots", "/out/persistent-run.ext4"], capture_output=True, text=True, check=True)
+    if result.stdout.strip() != "2":
+        raise SystemExit("FAIL persistent marker did not survive two boots")
+    print("PASS persistent data across two boots", flush=True)

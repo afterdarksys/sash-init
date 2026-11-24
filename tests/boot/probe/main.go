@@ -8,6 +8,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -50,6 +51,34 @@ func main() {
 		mode = os.Args[1]
 	}
 	switch mode {
+	case "sdnotify":
+		c, err := net.Dial("unixgram", os.Getenv("NOTIFY_SOCKET"))
+		if err != nil {
+			fatal("notify socket")
+		}
+		defer c.Close()
+		if os.Getenv("WATCHDOG_USEC") != "500000" {
+			fatal("watchdog environment")
+		}
+		os.WriteFile("/run/notify-pid", []byte(strconv.Itoa(os.Getpid())), 0600)
+		c.Write([]byte("READY=1"))
+		mark("sd_notify ready")
+		for i := 0; i < 3; i++ {
+			time.Sleep(100 * time.Millisecond)
+			c.Write([]byte("WATCHDOG=1"))
+		}
+		mark("sd_notify heartbeats stopped")
+		park()
+	case "disk":
+		b, _ := os.ReadFile("/var/lib/sahinit/boots")
+		n, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+		n++
+		if err := os.WriteFile("/var/lib/sahinit/boots", []byte(strconv.Itoa(n)+"\n"), 0600); err != nil {
+			fatal("persistent write")
+		}
+		mark("persistent boot " + strconv.Itoa(n))
+		syscall.Kill(1, syscall.SIGTERM)
+		park()
 	case "fail":
 		os.Exit(17)
 	case "recovery":
@@ -92,6 +121,21 @@ func main() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGTERM)
 		os.WriteFile("/run/provider-ready", nil, 0600)
+		if scenario() == "notify" {
+			for end := time.Now().Add(10 * time.Second); ; {
+				if b, e := os.ReadFile("/run/notify-pid"); e == nil {
+					if _, e := os.Stat("/proc/" + string(b)); os.IsNotExist(e) {
+						mark("watchdog killed unresponsive service")
+						syscall.Kill(1, syscall.SIGTERM)
+						break
+					}
+				}
+				if time.Now().After(end) {
+					fatal("watchdog failed")
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
 		<-sig
 		if s := scenario(); s == "poweroff" || s == "reboot" || s == "retry" {
 			if _, err := os.Stat("/run/app-stopped"); err != nil {
