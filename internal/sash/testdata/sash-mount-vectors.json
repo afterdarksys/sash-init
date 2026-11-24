@@ -363,6 +363,36 @@
       ],
       "bind": false,
       "err": "mount_opt_refused"
+    },
+    {
+      "src": "overlay",
+      "type": "overlay",
+      "opts": [
+        "nosuid",
+        "nodev"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "ext4",
+      "type": "ext4",
+      "opts": [
+        "nosuid",
+        "nodev"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
+    },
+    {
+      "src": "bpf",
+      "type": "bpf",
+      "opts": [
+        "nosuid",
+        "nodev"
+      ],
+      "bind": false,
+      "err": "mount_opt_refused"
     }
   ],
   "source": "sash internal/grant/policy.go at f28285b (feat/init-phase1): CheckMountOpts, AllowsMountSource and MountForcedOpts; sahinit internal/sash/testdata/sash-mount-vectors.json",

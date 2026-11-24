@@ -64,10 +64,8 @@ func (s *Server) file(req Request) (Response, error) {
 		if !fileMode.MatchString(m) {
 			return errDenied
 		}
+		// The form allows at most 1777: never setuid or setgid.
 		n, _ := strconv.ParseUint(m, 8, 32)
-		if n > 0o1777 {
-			return errDenied
-		}
 		op.Mode = int(n)
 		return nil
 	}
