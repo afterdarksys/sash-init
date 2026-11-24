@@ -124,9 +124,9 @@ Where the contract left a choice, or where sash's code differs from this documen
 15. **Stop.** stop runs the `stop` entry when the file has one and the grant still verifies. Otherwise it sends the block's stop signal (TERM by default) to each running process and waits up to the stop timeout. Either way the cgroup kill follows. Shutdown does the same.
 16. **Control.** There are new `ctl` operations: `reload NAME` runs the reload entry and `check NAME` runs the check entry. A failing check is `unhealthy`. Either answers `no_entry` without the entry and `not_running` unless the service is running. sahinit itself refuses a check session's `svc.spawn` and `svc.signal` (`check_read_only`).
 17. **Fd passing.** The sandbox helper got `Options.Pass` (at most 4 fds), `Umask` and `Rlimits`. Passed fds sit at the helper's fds 8 and up, and its fds 3 to 7 are always filled, so nothing the Go runtime opens sits where a passed fd will go. Just before exec the exec and status fds move to 64 and up, and the passed fds are put on 3 and up without close-on-exec. Every other fd is still closed at exec.
+18. **Cgroups.** Describe runs in a throwaway cgroup, `NAME.scratch`, which the stray sweep also removes. Later sessions and every spawn join the existing service cgroup (`Root.Join`); only a start makes it fresh.
 19. **Floor store busy.** A floor-install holding the store's lock is waited for two seconds. Still busy, the start fails with `sash_floor_busy`, which the restart policy may retry; it is not a grant error.
 20. **Describe output cap.** The review's test for it found that the cap did not hold: the capped buffer embedded `bytes.Buffer`, so `io.Copy` read through `ReadFrom` past it. It no longer embeds it.
-18. **Cgroups.** Describe runs in a throwaway cgroup, `NAME.scratch`, which the stray sweep also removes. Later sessions and every spawn join the existing service cgroup (`Root.Join`); only a start makes it fresh.
 
 **Not done in batch 1:**
 - **Grant host binding:** the grant's `host` is not checked.
