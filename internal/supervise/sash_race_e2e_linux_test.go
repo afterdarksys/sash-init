@@ -152,3 +152,55 @@ func TestSashCreatesAsService(t *testing.T) {
 		os.Remove(p)
 	}
 }
+
+// mkdir's mode goes only to the directory it made: a racer swapping one of
+// root's directories into the name never gets root's directory chmodded.
+func TestSashMkdirModeRace(t *testing.T) {
+	srv, work := raceServer(t, "rmm")
+	d, rd := filepath.Join(work, "d"), filepath.Join(work, "rd")
+	if err := os.Mkdir(rd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var stop atomic.Bool
+	n := 0
+	done := racer(&stop, func() {
+		n++
+		unix.Rename(d, filepath.Join(work, "junk"+strconv.Itoa(n%16)))
+		unix.Rename(rd, d)
+		unix.Rename(d, rd)
+	})
+	rootChanged := func() bool {
+		entries, _ := os.ReadDir(work)
+		for _, e := range entries {
+			var st syscall.Stat_t
+			if syscall.Lstat(filepath.Join(work, e.Name()), &st) == nil && st.Uid == 0 && st.Mode&0o777 == 0o777 {
+				return true
+			}
+		}
+		return false
+	}
+	deadline := time.Now().Add(25 * time.Second)
+	for i := 0; i < 100000 && time.Now().Before(deadline); i++ {
+		srv.Handle(sash.Request{Key: "file.write", Argv: []string{"mkdir", d, "mode", "0777"}, Path: d})
+		if rootChanged() {
+			stop.Store(true)
+			<-done
+			t.Fatalf("root's directory was chmodded after %d attempts", i+1)
+		}
+		junk, _ := filepath.Glob(filepath.Join(work, "junk*"))
+		for _, j := range junk {
+			var st syscall.Stat_t
+			if syscall.Lstat(j, &st) == nil && st.Uid == 0 {
+				os.Rename(j, rd)
+				continue
+			}
+			syscall.Rmdir(j)
+		}
+		var st syscall.Stat_t
+		if syscall.Lstat(d, &st) == nil && st.Uid == 65534 {
+			syscall.Rmdir(d)
+		}
+	}
+	stop.Store(true)
+	<-done
+}

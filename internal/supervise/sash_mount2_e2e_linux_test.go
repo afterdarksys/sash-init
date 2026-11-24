@@ -147,6 +147,21 @@ func TestSashMountIdentity(t *testing.T) {
 	if mountOpts(t, m1) == "" || strings.HasPrefix(mountOpts(t, m1), "ro") {
 		t.Fatalf("the admin's mount was touched: %q", mountOpts(t, m1))
 	}
+	// A mount still in use is busy, and stays; then it unmounts.
+	if r := mount("mount", "tmpfs", m2, "type", "tmpfs", "opts", "nosuid,nodev"); r.Error != "" {
+		t.Fatal(r)
+	}
+	held, err := os.Create(m2 + "/held")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := mount("umount", m2); r.Error != "busy" || mountOpts(t, m2) == "" {
+		t.Fatalf("umount in use: %+v %q", r, mountOpts(t, m2))
+	}
+	held.Close()
+	if r := mount("umount", m2); r.Error != "" {
+		t.Fatalf("umount: %+v", r)
+	}
 	// Another service may not take a point this one holds.
 	if r := mount("mount", "tmpfs", m2, "type", "tmpfs", "opts", "nosuid,nodev"); r.Error != "" {
 		t.Fatal(r)
