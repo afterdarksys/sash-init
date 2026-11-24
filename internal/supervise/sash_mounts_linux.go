@@ -89,15 +89,35 @@ func (r *mountRegistry) under(dir string) bool {
 	return false
 }
 
-func (r *mountRegistry) add(rec mountRec) error {
+// reserve claims dir for service with a pending record (ID 0), or is
+// false when any record holds it. The check and the claim are one step.
+func (r *mountRegistry) reserve(service, dir string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.recs = append(r.recs, rec)
-	if err := r.persistLocked(); err != nil {
-		r.recs = r.recs[:len(r.recs)-1]
-		return err
+	for _, m := range r.recs {
+		if m.Dir == dir {
+			return false
+		}
 	}
-	return nil
+	r.recs = append(r.recs, mountRec{Service: service, Dir: dir})
+	return true
+}
+
+// record fills in a reserved mount and persists the table.
+func (r *mountRegistry) record(rec mountRec) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, m := range r.recs {
+		if m.Dir == rec.Dir && m.Service == rec.Service && m.ID == 0 {
+			r.recs[i] = rec
+			if err := r.persistLocked(); err != nil {
+				r.recs[i].ID = 0
+				return err
+			}
+			return nil
+		}
+	}
+	return fail.E("failed")
 }
 
 func (r *mountRegistry) remove(dir string) {
@@ -166,15 +186,24 @@ func mountID(dir string) (uint64, int, error) {
 	}
 	// The unique ID (Linux 6.8) is never reused; the old one is reused as
 	// soon as a mount is gone, so a mount made in its place could match.
+	id, err := statMountID(fd)
+	if err != nil {
+		unix.Close(fd)
+		return 0, -1, err
+	}
+	return id, fd, nil
+}
+
+// statMountID is the ID of the mount fd is on; a test may replace it.
+var statMountID = func(fd int) (uint64, error) {
 	var stx unix.Statx_t
 	if err := unix.Statx(fd, "", unix.AT_EMPTY_PATH, unix.STATX_MNT_ID_UNIQUE, &stx); err == nil && stx.Mask&unix.STATX_MNT_ID_UNIQUE != 0 {
-		return stx.Mnt_id, fd, nil
+		return stx.Mnt_id, nil
 	}
 	if err := unix.Statx(fd, "", unix.AT_EMPTY_PATH, unix.STATX_MNT_ID, &stx); err != nil || stx.Mask&unix.STATX_MNT_ID == 0 {
-		unix.Close(fd)
-		return 0, -1, fail.E("unsupported")
+		return 0, fail.E("unsupported")
 	}
-	return stx.Mnt_id, fd, nil
+	return stx.Mnt_id, nil
 }
 
 // unmountRec unmounts rec after checking it is still the mount sahinit

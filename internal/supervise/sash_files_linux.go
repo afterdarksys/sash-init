@@ -291,12 +291,9 @@ func (h *sashHost) Mount(m sash.MountPlan) error {
 	}
 	reg := h.sup.mounts()
 	name := h.s.svc.Name
-	if rec, held := reg.get(m.Dir); held && (rec.Service != name || !m.Remount) {
-		return fail.E("exists")
-	}
 	if m.Remount {
 		rec, ok := reg.get(m.Dir)
-		if !ok || len(m.Data) > 0 {
+		if !ok || rec.Service != name || rec.ID == 0 || len(m.Data) > 0 {
 			return fail.E("not_mounted")
 		}
 		id, fd, err := mountID(m.Dir)
@@ -305,6 +302,7 @@ func (h *sashHost) Mount(m sash.MountPlan) error {
 		}
 		defer unix.Close(fd)
 		if id != rec.ID {
+			h.forget(rec)
 			return fail.E("not_mounted")
 		}
 		if err := unix.Mount("", fdPath(fd), "", flags|unix.MS_REMOUNT|unix.MS_BIND, ""); err != nil {
@@ -318,6 +316,16 @@ func (h *sashHost) Mount(m sash.MountPlan) error {
 		return pathErr(err)
 	}
 	defer unix.Close(dfd)
+	// Without mount IDs a mount could never be checked again, so none is
+	// made.
+	if _, err := statMountID(dfd); err != nil {
+		return fail.E("unsupported")
+	}
+	// The point is reserved before mounting, under one lock with the
+	// check, so two services cannot both mount it.
+	if !reg.reserve(name, m.Dir) {
+		return fail.E("exists")
+	}
 	kind := "type"
 	if m.Bind {
 		kind = "bind"
@@ -325,22 +333,24 @@ func (h *sashHost) Mount(m sash.MountPlan) error {
 			kind = "rbind"
 		}
 		if err := bindMount(m, dfd, attr, flags); err != nil {
+			reg.remove(m.Dir)
 			return err
 		}
 	} else if err := unix.Mount(m.Type, fdPath(dfd), m.Type, flags, strings.Join(m.Data, ",")); err != nil {
+		reg.remove(m.Dir)
 		return fail.E("failed")
 	}
 	id, nfd, err := mountID(m.Dir)
 	if err == nil {
 		unix.Close(nfd)
-		err = reg.add(mountRec{Service: name, Dir: m.Dir, Kind: kind, ID: id})
+		err = reg.record(mountRec{Service: name, Dir: m.Dir, Kind: kind, ID: id})
 	}
 	if err != nil {
-		// Not recorded, so not kept.
-		if _, fd, ierr := mountID(m.Dir); ierr == nil {
-			unix.Unmount(fdPath(fd), unix.MNT_DETACH)
-			unix.Close(fd)
-		}
+		// Not recorded, so not kept: detached by its path (nothing else
+		// is there, the point being reserved), without asking for its ID
+		// again.
+		unix.Unmount(m.Dir, unix.MNT_DETACH|unix.UMOUNT_NOFOLLOW)
+		reg.remove(m.Dir)
 		return fail.E("failed")
 	}
 	return nil
@@ -411,10 +421,21 @@ func legacyBind(sfd, dfd int, m sash.MountPlan, flags uintptr) error {
 func (h *sashHost) Umount(dir string) error {
 	reg := h.sup.mounts()
 	rec, ok := reg.get(dir)
-	if !ok || rec.Service != h.s.svc.Name {
+	if !ok || rec.Service != h.s.svc.Name || rec.ID == 0 {
 		return fail.E("not_mounted")
 	}
-	return reg.unmountRec(rec)
+	err := reg.unmountRec(rec)
+	if fail.Token(err) == "not_mounted" {
+		h.forget(rec)
+	}
+	return err
+}
+
+// forget drops a record whose mount is no longer the one sahinit made, so
+// the point is free again, and says so.
+func (h *sashHost) forget(rec mountRec) {
+	h.sup.mounts().remove(rec.Dir)
+	h.sup.logf("sash_mount_forgotten %s %s", rec.Service, rec.Dir)
 }
 
 // unmountAll unmounts every mount the service made, newest first, when it

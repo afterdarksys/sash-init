@@ -3,9 +3,11 @@
 package supervise
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/afterdarksys/sahinit/internal/sash"
@@ -185,5 +187,108 @@ func TestSashMountIdentity(t *testing.T) {
 	}
 	if mountOpts(t, m1) == "" {
 		t.Fatal("cleanup removed a mount it did not make")
+	}
+}
+
+func otherServer(sup *Supervisor, g sash.Grant, name string) *sash.Server {
+	uid := uint32(65534)
+	svc := &unit.Service{Name: name, Execution: unit.Execution{UID: &uid, GID: &uid}}
+	return &sash.Server{G: g, Table: sash.NewTable(), Host: &sashHost{sup: sup, s: &runtime{svc: svc}}}
+}
+
+// Two services mounting one point at once: exactly one wins, the other is
+// exists; nothing is stacked.
+func TestSashConcurrentMountOnePoint(t *testing.T) {
+	srv, sup, _, _, m1, _, _ := mountServer(t, "cca")
+	a, b := srv, otherServer(sup, srv.G, "ccb")
+	req := sash.Request{Key: "fs.mount", Argv: []string{"mount", "tmpfs", m1, "type", "tmpfs", "opts", "nosuid,nodev"}}
+	for round := 0; round < 40; round++ {
+		var ra, rb sash.Response
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); ra = a.Handle(req) }()
+		go func() { defer wg.Done(); rb = b.Handle(req) }()
+		wg.Wait()
+		ok := 0
+		for _, r := range []sash.Response{ra, rb} {
+			if r.Error == "" {
+				ok++
+			} else if r.Error != "exists" {
+				t.Fatalf("round %d: %+v", round, r)
+			}
+		}
+		if ok != 1 {
+			t.Fatalf("round %d: %d mounts succeeded", round, ok)
+		}
+		for _, s := range []*sash.Server{a, b} {
+			if s.Table.Mounted(m1) {
+				if r := s.Handle(sash.Request{Key: "fs.mount", Argv: []string{"umount", m1}}); r.Error != "" {
+					t.Fatalf("umount: %+v", r)
+				}
+			}
+		}
+		if mountOpts(t, m1) != "" {
+			t.Fatalf("round %d: stacked mounts left", round)
+		}
+	}
+}
+
+// Without mount IDs no mount is made; and a mount whose ID cannot be read
+// afterwards is detached, not left untracked.
+func TestSashMountWithoutIDs(t *testing.T) {
+	srv, sup, _, _, m1, _, _ := mountServer(t, "nid")
+	real := statMountID
+	defer func() { statMountID = real }()
+	req := sash.Request{Key: "fs.mount", Argv: []string{"mount", "tmpfs", m1, "type", "tmpfs", "opts", "nosuid,nodev"}}
+	statMountID = func(int) (uint64, error) { return 0, errors.New("no STATX_MNT_ID") }
+	if r := srv.Handle(req); r.Error != "unsupported" || mountOpts(t, m1) != "" {
+		t.Fatalf("no IDs: %+v %q", r, mountOpts(t, m1))
+	}
+	calls := 0
+	statMountID = func(fd int) (uint64, error) {
+		calls++
+		if calls > 1 {
+			return 0, errors.New("gone")
+		}
+		return real(fd)
+	}
+	if r := srv.Handle(req); r.Error != "failed" || mountOpts(t, m1) != "" {
+		t.Fatalf("ID lost after mounting: %+v %q", r, mountOpts(t, m1))
+	}
+	if _, held := sup.mounts().get(m1); held || srv.Table.Mounted(m1) {
+		t.Fatal("record left")
+	}
+}
+
+// A mount no longer the one sahinit made is forgotten when found: logged,
+// and the point is free again.
+func TestSashMountForgotten(t *testing.T) {
+	srv, sup, _, _, m1, _, _ := mountServer(t, "fgt")
+	var log syncBuf
+	sup.Log = &log
+	mount := func(s *sash.Server, a ...string) sash.Response { return s.Handle(sash.Request{Key: "fs.mount", Argv: a}) }
+	if r := mount(srv, "mount", "tmpfs", m1, "type", "tmpfs", "opts", "nosuid,nodev"); r.Error != "" {
+		t.Fatal(r)
+	}
+	unix.Unmount(m1, 0)
+	if err := unix.Mount("tmpfs", m1, "tmpfs", 0, "size=1m"); err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Unmount(m1, unix.MNT_DETACH)
+	if r := mount(srv, "umount", m1); r.Error != "not_mounted" {
+		t.Fatalf("umount: %+v", r)
+	}
+	if !strings.Contains(log.String(), "sash_mount_forgotten fgt "+m1) {
+		t.Fatalf("not audited: %s", log.String())
+	}
+	if _, held := sup.mounts().get(m1); held || srv.Table.Mounted(m1) {
+		t.Fatal("stale record kept")
+	}
+	other := otherServer(sup, srv.G, "fgu")
+	if r := mount(other, "mount", "tmpfs", m1, "type", "tmpfs", "opts", "nosuid,nodev"); r.Error != "" {
+		t.Fatalf("point still held: %+v", r)
+	}
+	if r := mount(other, "umount", m1); r.Error != "" {
+		t.Fatalf("umount: %+v", r)
 	}
 }

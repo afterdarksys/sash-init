@@ -153,6 +153,10 @@ func (s *Server) mount(a []string) (Response, error) {
 			return Response{}, fail.E("not_mounted")
 		}
 		if err := s.Host.Umount(dir); err != nil {
+			if fail.Token(err) == "not_mounted" {
+				// Not the mount made here any more: forgotten.
+				s.Table.Unmounted(dir)
+			}
 			return Response{}, hostErr(err)
 		}
 		s.Table.Unmounted(dir)
@@ -233,6 +237,9 @@ func (s *Server) mount(a []string) (Response, error) {
 		return Response{}, fail.E("exists")
 	}
 	if err := s.Host.Mount(m); err != nil {
+		if m.Remount && fail.Token(err) == "not_mounted" {
+			s.Table.Unmounted(m.Dir)
+		}
 		return Response{}, hostErr(err)
 	}
 	if !m.Remount {
