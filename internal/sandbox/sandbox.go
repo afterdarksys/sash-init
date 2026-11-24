@@ -366,7 +366,8 @@ type Options struct {
 	Pass []*os.File
 	// Umask, when not nil, is the target's umask.
 	Umask *int
-	// Rlimits are set on the child, soft and hard, before it execs:
+	// Rlimits are set by the helper, soft and hard, before it execs (so
+	// they can only lower a limit):
 	// resource name (nofile, nproc, core, memlock, stack, as, cpu, fsize)
 	// to value. Only a sandboxed launch sets them.
 	Rlimits map[string]uint64

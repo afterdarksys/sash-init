@@ -100,7 +100,7 @@ var (
 
 var specKeys = map[string]struct{}{
 	"no_new_privs": {}, "read_only_paths": {}, "read_write_paths": {}, "caps": {},
-	"notify": {}, "sandbox": {}, "cgroup": {}, "pass": {}, "umask": {},
+	"notify": {}, "sandbox": {}, "cgroup": {}, "pass": {}, "umask": {}, "rlimits": {},
 }
 
 var childTokens = map[string]struct{}{
@@ -172,8 +172,8 @@ func ApplyCLI(args []string) int {
 	if notify && !isFIFO(fdReady) {
 		return writeStatus("failed")
 	}
-	pass, umask, err := decodeExtra(raw)
-	if err != nil || pass > 0 && (notify || sb == nil) {
+	pass, umask, limits, err := decodeExtra(raw)
+	if err != nil || pass > 0 && (notify || sb == nil) || len(limits) > 0 && sb == nil {
 		return writeStatus("failed")
 	}
 	for fd := fdPass; fd < fdPass+pass; fd++ {
@@ -216,6 +216,9 @@ func ApplyCLI(args []string) int {
 	}
 	if umask >= 0 {
 		unix.Umask(umask)
+	}
+	if err := setRlimits(limits); err != nil {
+		return writeStatus("failed")
 	}
 	if pass > 0 {
 		if err := placePass(pass); err != nil {
@@ -321,24 +324,36 @@ func writeErr(token string) error {
 	return writeFD(statusFD, line)
 }
 
-// decodeExtra reads the optional pass count and umask (-1 when absent).
-func decodeExtra(raw []byte) (int, int, error) {
+// decodeExtra reads the optional pass count, umask (-1 when absent) and
+// rlimits.
+func decodeExtra(raw []byte) (int, int, map[string]uint64, error) {
 	obj, err := jsonobj.Decode(raw, specKeys)
 	if err != nil {
-		return 0, -1, err
+		return 0, -1, nil, err
 	}
 	pass, umask := 0, -1
+	var limits map[string]uint64
 	if v, ok := obj["pass"]; ok {
 		if err := jsonobj.Unmarshal(v, &pass); err != nil || pass < 1 || pass > MaxPass {
-			return 0, -1, fail.E("failed")
+			return 0, -1, nil, fail.E("failed")
 		}
 	}
 	if v, ok := obj["umask"]; ok {
 		if err := jsonobj.Unmarshal(v, &umask); err != nil || umask < 0 || umask > 0o777 {
-			return 0, -1, fail.E("failed")
+			return 0, -1, nil, fail.E("failed")
 		}
 	}
-	return pass, umask, nil
+	if v, ok := obj["rlimits"]; ok {
+		if err := jsonobj.Unmarshal(v, &limits); err != nil {
+			return 0, -1, nil, fail.E("failed")
+		}
+		for name := range limits {
+			if _, known := rlimitOf[name]; !known {
+				return 0, -1, nil, fail.E("failed")
+			}
+		}
+	}
+	return pass, umask, limits, nil
 }
 
 // placePass moves the exec and status fds out of the way, closes the spec
@@ -747,11 +762,12 @@ func closeHeld(h *held) error {
 // marshalSpec writes the helper's spec. A nil sb is a helper that only
 // joins the cgroup (join must then be set).
 func marshalSpec(sb *unit.Sandbox, notify, join bool) ([]byte, error) {
-	return marshalSpecPass(sb, notify, join, 0, nil)
+	return marshalSpecPass(sb, notify, join, 0, nil, nil)
 }
 
-// marshalSpecPass is marshalSpec with a count of passed fds and a umask.
-func marshalSpecPass(sb *unit.Sandbox, notify, join bool, pass int, umask *int) ([]byte, error) {
+// marshalSpecPass is marshalSpec with a count of passed fds, a umask and
+// rlimits.
+func marshalSpecPass(sb *unit.Sandbox, notify, join bool, pass int, umask *int, limits map[string]uint64) ([]byte, error) {
 	if sb == nil && !join {
 		return nil, fail.E("failed")
 	}
@@ -760,16 +776,18 @@ func marshalSpecPass(sb *unit.Sandbox, notify, join bool, pass int, umask *int) 
 		sb = &unit.Sandbox{NoNewPrivs: true}
 	}
 	body := struct {
-		NoNewPrivs bool     `json:"no_new_privs"`
-		ReadOnly   []string `json:"read_only_paths"`
-		ReadWrite  []string `json:"read_write_paths"`
-		Caps       []string `json:"caps"`
-		Notify     bool     `json:"notify"`
-		Sandbox    bool     `json:"sandbox"`
-		Cgroup     bool     `json:"cgroup"`
-		Pass       int      `json:"pass,omitempty"`
-		Umask      *int     `json:"umask,omitempty"`
+		NoNewPrivs bool              `json:"no_new_privs"`
+		ReadOnly   []string          `json:"read_only_paths"`
+		ReadWrite  []string          `json:"read_write_paths"`
+		Caps       []string          `json:"caps"`
+		Notify     bool              `json:"notify"`
+		Sandbox    bool              `json:"sandbox"`
+		Cgroup     bool              `json:"cgroup"`
+		Pass       int               `json:"pass,omitempty"`
+		Umask      *int              `json:"umask,omitempty"`
+		Rlimits    map[string]uint64 `json:"rlimits,omitempty"`
 	}{
+		Rlimits:    limits,
 		Pass:       pass,
 		Umask:      umask,
 		Notify:     notify,
@@ -813,7 +831,7 @@ func launchHelper(ctx context.Context, self string, argv []string, execF *os.Fil
 	if len(opts.Pass) > 0 && (sb == nil || notify || len(opts.Pass) > MaxPass) {
 		return nil, "", nil, fail.E("failed")
 	}
-	spec, err := marshalSpecPass(sb, notify, join, len(opts.Pass), opts.Umask)
+	spec, err := marshalSpecPass(sb, notify, join, len(opts.Pass), opts.Umask, opts.Rlimits)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -912,12 +930,6 @@ func launchHelper(ctx context.Context, self string, argv []string, execF *os.Fil
 			reap(cmd)
 			return nil, "", nil, fail.E("cgroup_join")
 		}
-	}
-	if err := setRlimits(cmd.Process.Pid, opts.Rlimits); err != nil {
-		closePair(specW, statusR)
-		closePair(notifyR, nil)
-		reap(cmd)
-		return nil, "", nil, err
 	}
 	if err := writeFull(specW, spec); err != nil {
 		specW.Close()
@@ -1065,16 +1077,16 @@ var rlimitOf = map[string]int{
 	"stack": unix.RLIMIT_STACK, "as": unix.RLIMIT_AS, "cpu": unix.RLIMIT_CPU, "fsize": unix.RLIMIT_FSIZE,
 }
 
-// setRlimits sets each limit, soft and hard, on the helper while it waits
-// for its spec, so they hold before it execs the target.
-func setRlimits(pid int, limits map[string]uint64) error {
+// setRlimits sets each limit, soft and hard, in the helper before it execs
+// the target. It runs as the target's uid, so a limit can only be lowered.
+func setRlimits(limits map[string]uint64) error {
 	for name, v := range limits {
 		res, ok := rlimitOf[name]
 		if !ok {
 			return fail.E("failed")
 		}
 		lim := unix.Rlimit{Cur: v, Max: v}
-		if err := unix.Prlimit(pid, res, &lim, nil); err != nil {
+		if err := unix.Setrlimit(res, &lim); err != nil {
 			return fail.E("failed")
 		}
 	}
