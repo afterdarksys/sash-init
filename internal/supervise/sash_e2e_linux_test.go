@@ -567,3 +567,50 @@ func TestSashStopDuringBlockedWait(t *testing.T) {
 		t.Fatal("cgroup left")
 	}
 }
+
+// Describe reads at most 1 MiB: a valid document followed by more output
+// than that is sash_describe, though the first MiB alone would parse. A
+// fake sash stands in, so this runs without SAHINIT_SASH_BIN.
+func TestDescribeOutputCap(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to run describe as uid 65534")
+	}
+	r, err := cgroup.Open(cgtest.Dir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	base, err := os.MkdirTemp("/tmp", "sahdesc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(base)
+	os.Chmod(base, 0o755)
+	self := filepath.Join(base, "sahinit")
+	exe, _ := os.Executable()
+	copyExec(t, exe, self)
+	doc := `{"v":"sash-describe/1","service":{"name":"app","description":"","requires":[],"after":[],"wants":[],"user":"nobody","group":"nogroup","run":[],"ready":null,"stop":null,"restart":null},"entries":["start"],"needs":{},"complete":true}`
+	uid := uint32(65534)
+	svc := &unit.Service{Name: "app", Sandbox: &unit.Sandbox{NoNewPrivs: true, ReadOnly: []string{"/"}}, Execution: unit.Execution{UID: &uid, GID: &uid},
+		Sash: &unit.Sash{File: filepath.Join(base, "app.sash")}}
+	for _, c := range []struct {
+		pad  int
+		want string
+	}{{0, ""}, {sash.MaxDescribe, "sash_describe"}} {
+		fake := filepath.Join(base, "sash"+strconv.Itoa(c.pad))
+		script := "#!/bin/sh\nprintf '%s' '" + doc + "'\n"
+		if c.pad > 0 {
+			script += "head -c " + strconv.Itoa(c.pad) + " /dev/zero | tr '\\000' ' '\n"
+		}
+		if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		d, err := Describe(context.Background(), r, self, fake, svc)
+		if tok := fail.Token(err); tok == "landlock_unavailable" || tok == "openat2_unavailable" {
+			t.Skipf("kernel lacks sandbox: %v", err)
+		}
+		if fail.Token(err) != c.want || (c.want == "" && (d == nil || d.Name != "app")) {
+			t.Errorf("pad %d: %v %+v, want %q", c.pad, err, d, c.want)
+		}
+	}
+}
