@@ -134,7 +134,7 @@ func (s *Server) file(req Request) (Response, error) {
 // failed.
 func hostErr(err error) error {
 	switch tok := fail.Token(err); tok {
-	case "denied", "symlink", "hardlink", "exists", "not_empty", "not_found", "not_mounted", "mount_opt_refused", "mount_overlap":
+	case "denied", "symlink", "hardlink", "exists", "not_empty", "not_found", "not_mounted", "mount_opt_refused", "mount_overlap", "busy", "unsupported":
 		return err
 	}
 	return fail.E("failed")
@@ -222,6 +222,12 @@ func (s *Server) mount(a []string) (Response, error) {
 	mounted := s.Table.Mounted(m.Dir)
 	if m.Remount && !mounted {
 		return Response{}, fail.E("not_mounted")
+	}
+	// A remount changes only this mount's own flags (ro, rw, nosuid,
+	// nodev, noexec), never its filesystem: a size, mode or owner would
+	// change a superblock that other mounts, the host's included, share.
+	if m.Remount && len(m.Data) > 0 {
+		return Response{}, fail.E("mount_opt_refused")
 	}
 	if !m.Remount && mounted {
 		return Response{}, fail.E("exists")

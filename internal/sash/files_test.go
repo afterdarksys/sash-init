@@ -122,6 +122,11 @@ func TestMountChecks(t *testing.T) {
 	if r := s.Handle(mountReq("mount", "tmpfs", "/mnt/app", "type", "tmpfs", "opts", "remount,ro,nosuid,nodev")); r.Error != "" || !h.mounts[1].Remount {
 		t.Fatalf("remount: %+v", r)
 	}
+	for _, o := range []string{"size=4k", "nr_inodes=10", "mode=0777", "uid=0", "gid=0"} {
+		if r := s.Handle(mountReq("mount", "tmpfs", "/mnt/app", "type", "tmpfs", "opts", "remount,"+o+",nosuid,nodev")); r.Error != "mount_opt_refused" {
+			t.Errorf("remount %s: %+v", o, r)
+		}
+	}
 	if r := s.Handle(mountReq("umount", "/mnt/app")); r.Error != "" || len(h.umounts) != 1 {
 		t.Fatalf("umount: %+v", r)
 	}
@@ -150,6 +155,7 @@ func TestMountChecks(t *testing.T) {
 		"no nodev":         {mountReq("mount", "tmpfs", "/mnt/app", "type", "tmpfs", "opts", "nosuid"), "mount_opt_refused"},
 		"proc as tmpfs":    {mountReq("mount", "tmpfs", "/mnt/app", "type", "proc", "opts", "nosuid,nodev"), "mount_opt_refused"},
 		"unlisted source":  {mountReq("mount", "sysfs", "/mnt/app", "type", "sysfs", "opts", "nosuid,nodev"), "denied"},
+		"remount size":     {mountReq("mount", "tmpfs", "/mnt/app", "type", "tmpfs", "opts", "remount,size=4k,nosuid,nodev"), "not_mounted"},
 		"remount not ours": {mountReq("mount", "tmpfs", "/mnt/app", "type", "tmpfs", "opts", "remount,nosuid,nodev"), "not_mounted"},
 		"umount not ours":  {mountReq("umount", "/mnt/app"), "not_mounted"},
 		"umount unlisted":  {mountReq("umount", "/proc"), "denied"},

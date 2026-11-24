@@ -43,12 +43,14 @@ func raceServer(t *testing.T, name string) (*sash.Server, string) {
 	return &sash.Server{G: g, Table: s.sashTable(), Host: &sashHost{sup: sup, s: s}}, work
 }
 
-// serviceOwnsSecret reports whether root's secret, under either name,
-// became the service's.
-func serviceOwnsSecret(paths ...string) bool {
-	for _, p := range paths {
+// serviceOwnsSecret reports whether root's secret, under any name in
+// work, became the service's. It is the only regular file there: the
+// service only renames, and sahinit makes links and directories.
+func serviceOwnsSecret(work string) bool {
+	entries, _ := os.ReadDir(work)
+	for _, e := range entries {
 		var st syscall.Stat_t
-		if syscall.Lstat(p, &st) == nil && st.Mode&syscall.S_IFMT == syscall.S_IFREG && st.Uid == 65534 {
+		if syscall.Lstat(filepath.Join(work, e.Name()), &st) == nil && st.Mode&syscall.S_IFMT == syscall.S_IFREG && st.Uid == 65534 {
 			return true
 		}
 	}
@@ -71,10 +73,10 @@ func race(t *testing.T, work, name string, attempt func(), cleanup func()) {
 		unix.Rename(secret, target)
 		unix.Rename(target, secret)
 	})
-	deadline := time.Now().Add(15 * time.Second)
-	for i := 0; i < 20000 && time.Now().Before(deadline); i++ {
+	deadline := time.Now().Add(25 * time.Second)
+	for i := 0; i < 100000 && time.Now().Before(deadline); i++ {
 		attempt()
-		if serviceOwnsSecret(secret, target) {
+		if serviceOwnsSecret(work) {
 			stop.Store(true)
 			<-done
 			t.Fatalf("root's secret was given to the service after %d attempts", i+1)
@@ -82,7 +84,16 @@ func race(t *testing.T, work, name string, attempt func(), cleanup func()) {
 		cleanup()
 		junk, _ := filepath.Glob(filepath.Join(work, "junk*"))
 		for _, j := range junk {
-			os.RemoveAll(j)
+			var st syscall.Stat_t
+			if syscall.Lstat(j, &st) == nil && st.Mode&syscall.S_IFMT == syscall.S_IFREG {
+				os.Rename(j, secret) // root's secret: put it back, never delete it
+				continue
+			}
+			if st.Mode&syscall.S_IFMT == syscall.S_IFLNK {
+				os.Remove(j)
+			} else {
+				syscall.Rmdir(j)
+			}
 		}
 	}
 	stop.Store(true)
