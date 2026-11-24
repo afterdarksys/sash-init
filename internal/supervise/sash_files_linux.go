@@ -22,6 +22,7 @@ package supervise
 import (
 	"errors"
 	"path"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 
@@ -138,23 +139,31 @@ func (h *sashHost) File(op sash.FileOp) error {
 	case "mkdir":
 		created := false
 		if name != "" {
-			err := unix.Mkdirat(dfd, name, 0o755)
+			err := asService(uid, gid, func() error { return unix.Mkdirat(dfd, name, 0o755) })
 			if err != nil && !errors.Is(err, unix.EEXIST) {
 				return pathErr(err)
 			}
 			created = err == nil
 		}
 		if created {
-			// A directory sahinit makes is the service's.
-			fd, err := openNoFollow(dfd, name)
+			// Made as the service, so it is the service's from the
+			// start; the mode is set through an fd checked to be that
+			// new directory.
+			fd, err := openDirNoFollow(dfd, name)
 			if err != nil {
 				return err
 			}
 			defer unix.Close(fd)
-			if err := chown(fd); err != nil {
-				return err
+			var st unix.Stat_t
+			if err := unix.Fstat(fd, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR || int(st.Uid) != uid || st.Nlink != 2 {
+				return fail.E("denied")
 			}
-			return chmod(fd, op.Mode)
+			if op.Mode >= 0 {
+				if err := unix.Fchmod(fd, uint32(op.Mode)); err != nil {
+					return fail.E("failed")
+				}
+			}
+			return nil
 		}
 		if !op.Owner && op.Mode < 0 {
 			// An existing directory, nothing to change: idempotent.
@@ -193,10 +202,16 @@ func (h *sashHost) File(op sash.FileOp) error {
 		return chmod(fd, op.Mode)
 	case "touch":
 		how := unix.OpenHow{Flags: uint64(unix.O_WRONLY | unix.O_CREAT | unix.O_EXCL | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_CLOEXEC), Mode: 0o644, Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS}
-		fd, err := unix.Openat2(dfd, name, &how)
+		var fd int
+		err := asService(uid, gid, func() error {
+			var oerr error
+			fd, oerr = unix.Openat2(dfd, name, &how)
+			return oerr
+		})
 		if err == nil {
-			defer unix.Close(fd)
-			return chown(fd)
+			// Created as the service: nothing to give away.
+			unix.Close(fd)
+			return nil
 		}
 		if !errors.Is(err, unix.EEXIST) {
 			return pathErr(err)
@@ -215,14 +230,13 @@ func (h *sashHost) File(op sash.FileOp) error {
 		}
 		return nil
 	case "ln":
-		if err := unix.Symlinkat(op.Target, dfd, name); err != nil {
+		// Made as the service: the link is its own, and nothing is
+		// chowned by name afterwards.
+		if err := asService(uid, gid, func() error { return unix.Symlinkat(op.Target, dfd, name) }); err != nil {
 			if errors.Is(err, unix.EEXIST) {
 				return fail.E("exists")
 			}
 			return pathErr(err)
-		}
-		if err := unix.Fchownat(dfd, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return fail.E("failed")
 		}
 		return nil
 	case "rm":
@@ -332,12 +346,61 @@ func (h *sashHost) unmountAll(t *sash.Table) {
 	}
 }
 
-// openNoFollow opens name beneath dfd as an O_PATH fd, following nothing.
-func openNoFollow(dfd int, name string) (int, error) {
-	how := unix.OpenHow{Flags: uint64(unix.O_PATH | unix.O_NOFOLLOW | unix.O_CLOEXEC), Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS}
+// openDirNoFollow opens the directory name beneath dfd for fchmod,
+// following nothing.
+func openDirNoFollow(dfd int, name string) (int, error) {
+	how := unix.OpenHow{Flags: uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC), Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS}
 	fd, err := unix.Openat2(dfd, name, &how)
 	if err != nil {
 		return -1, pathErr(err)
 	}
 	return fd, nil
+}
+
+// asService runs f on a locked OS thread whose filesystem uid and gid are
+// the service's, with no supplementary groups, so whatever f creates is
+// the service's own from the start and f gets no more access than the
+// service has. The thread's ids and groups are restored and checked before
+// it is unlocked; a thread that cannot be restored is ended, never reused.
+//
+// Threats: creating as root and then chowning by name lets the service,
+// which owns the directory, rename one of root's files into that name in
+// between and be given it. Created as the service, nothing is given away.
+func asService(uid, gid int, f func() error) error {
+	errc := make(chan error, 1)
+	go func() {
+		goruntime.LockOSThread()
+		groups, gerr := unix.Getgroups()
+		restored := func() bool {
+			if gerr != nil || unix.Setgroups(groups) != nil {
+				return false
+			}
+			unix.Setfsuid(0)
+			unix.Setfsgid(0)
+			u, _ := unix.SetfsuidRetUid(-1)
+			g, _ := unix.SetfsgidRetGid(-1)
+			return u == 0 && g == 0
+		}
+		var err error
+		if gerr != nil || unix.Setgroups([]int{}) != nil {
+			err = fail.E("failed")
+		} else {
+			unix.Setfsgid(gid)
+			unix.Setfsuid(uid)
+			u, _ := unix.SetfsuidRetUid(-1)
+			g, _ := unix.SetfsgidRetGid(-1)
+			if u != uid || g != gid {
+				err = fail.E("failed")
+			} else {
+				err = f()
+			}
+		}
+		if !restored() {
+			errc <- fail.E("failed")
+			goruntime.Goexit() // still locked: the thread ends with it
+		}
+		goruntime.UnlockOSThread()
+		errc <- err
+	}()
+	return <-errc
 }
