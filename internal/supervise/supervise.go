@@ -1048,6 +1048,14 @@ func (sup *Supervisor) waitReady(ctx context.Context, s *runtime, procDone chan 
 	case <-readyCh:
 		return nil
 	case <-procDone:
+		// lifetime closes readyCh before procDone: a service that was
+		// ready and has since exited was started, whichever case select
+		// picked.
+		select {
+		case <-readyCh:
+			return nil
+		default:
+		}
 		return sup.exitResult(s, gen)
 	case <-timer.C:
 		select {

@@ -275,6 +275,34 @@ fi
 	}
 }
 
+// A notify service that published ready and then exited (and is being
+// restarted) has both readyCh and procDone closed by the time the starter
+// looks: the start succeeded, whichever channel select would pick.
+func TestWaitReadyPrefersReadyOverExit(t *testing.T) {
+	agent := newSvc("agent", "simple", "notify", "always", false, 30*time.Second, []string{"/bin/sleep", "30"})
+	sup := mustSup(t, map[string]*unit.Service{"agent": agent})
+	s := sup.rt["agent"]
+	ctx, cancel := ctxFor(t, 5*time.Second)
+	defer cancel()
+	for i := 0; i < 200; i++ {
+		readyCh := make(chan struct{})
+		close(readyCh)
+		procDone := make(chan struct{})
+		close(procDone)
+		s.mu.Lock()
+		gen := s.gen
+		s.state = "starting"
+		s.lastError = ""
+		s.mu.Unlock()
+		if err := sup.waitReady(ctx, s, procDone, readyCh, gen); err != nil {
+			t.Fatalf("iteration %d: %v", i, err)
+		}
+	}
+	s.mu.Lock()
+	s.state = "stopped"
+	s.mu.Unlock()
+}
+
 func TestRestartNotifyClean(t *testing.T) {
 	log := marker(t)
 	script := writeScript(t, "printf '\\n' >&3\nprintf 'x\\n' >> \"$1\"\nexit 0\n")
