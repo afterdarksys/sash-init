@@ -25,6 +25,8 @@ func TestParseSashUnit(t *testing.T) {
 		{`"exec":["/bin/sh"],`, "sash_unit_field"},
 		{`"type":"simple",`, "sash_unit_field"},
 		{`"ready":"exec",`, "sash_unit_field"},
+		{`"essential":false,`, "sash_unit_field"},
+		{`"watchdog":"1s",`, "sash_unit_field"},
 		{`"timeout":"5s",`, "sash_unit_field"},
 	} {
 		raw := strings.Replace(sashUnit, `"name":"app",`, `"name":"app",`+c.edit, 1)

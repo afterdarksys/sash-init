@@ -49,7 +49,9 @@ var unitKeys = map[string]struct{}{
 	"after": {}, "needs": {}, "wants": {}, "timeout": {}, "boot": {},
 	"sandbox": {}, "execution": {},
 	"memory_max": {}, "cpu_max": {}, "pids_max": {},
-	"sash": {},
+	"sash":      {},
+	"essential": {}, "restart_delay": {}, "restart_max_delay": {},
+	"watchdog": {},
 }
 
 var sandboxKeys = map[string]struct{}{
@@ -71,22 +73,29 @@ var capByName = map[string]uint32{
 
 // Service is one catalog entry. Boot is the resolved boot-set bit.
 type Service struct {
-	Name      string
-	Exec      []string
-	Type      string
-	Restart   string
-	Ready     string
-	After     []string
-	Needs     []string
-	Wants     []string
-	Timeout   time.Duration
-	Boot      bool
-	Sandbox   *Sandbox
-	Execution Execution
-	Limits    Limits
+	Name            string
+	Exec            []string
+	Type            string
+	Restart         string
+	Ready           string
+	After           []string
+	Needs           []string
+	Wants           []string
+	Timeout         time.Duration
+	Boot            bool
+	Essential       bool
+	RestartDelay    time.Duration
+	RestartMaxDelay time.Duration
+	Watchdog        time.Duration
+	Sandbox         *Sandbox
+	Execution       Execution
+	Limits          Limits
 	// Path is Exec[0] resolved and checked by Load. It is empty when that
 	// failed at load; the launch then resolves and checks Exec[0] itself.
 	Path string
+	// SHA256 is set only by a verified deployment (internal/deploy): the
+	// launch hashes the opened executable and refuses a mismatch.
+	SHA256 string
 	// Sash is set for a sash service unit (sash.go), which has no Exec.
 	Sash *Sash
 }
@@ -550,10 +559,51 @@ func Parse(raw []byte, stem string) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A boot unit is essential unless it says "essential": false, so a
+	// strict boot fails closed on a unit nobody marked.
+	essential := boot
+	if raw, ok := obj["essential"]; ok {
+		if err := jsonobj.Unmarshal(raw, &essential); err != nil {
+			return nil, err
+		}
+	}
+	if essential && !boot {
+		return nil, fail.E("essential_requires_boot")
+	}
+	delay, maxDelay := 100*time.Millisecond, 30*time.Second
+	for key, target := range map[string]*time.Duration{"restart_delay": &delay, "restart_max_delay": &maxDelay} {
+		if raw, ok := obj[key]; ok {
+			var text string
+			if err := jsonobj.Unmarshal(raw, &text); err != nil {
+				return nil, fail.E("restart_delay_invalid")
+			}
+			d, err := time.ParseDuration(text)
+			if err != nil || d < 10*time.Millisecond || d > 5*time.Minute {
+				return nil, fail.E("restart_delay_invalid")
+			}
+			*target = d
+		}
+	}
+	if maxDelay < delay {
+		return nil, fail.E("restart_delay_invalid")
+	}
+	var watchdog time.Duration
+	if raw, ok := obj["watchdog"]; ok {
+		var text string
+		if err := jsonobj.Unmarshal(raw, &text); err != nil {
+			return nil, fail.E("watchdog_invalid")
+		}
+		watchdog, err = time.ParseDuration(text)
+		if err != nil || watchdog < 100*time.Millisecond || watchdog > 5*time.Minute || ready != "notify" {
+			return nil, fail.E("watchdog_invalid")
+		}
+	}
 	return &Service{
 		Name: name, Exec: exec, Type: typ, Restart: restart, Ready: ready,
 		After: after, Needs: needs, Wants: wants, Timeout: timeout, Boot: boot,
 		Sandbox: sb, Execution: execution, Limits: limits,
+		Essential: essential, RestartDelay: delay, RestartMaxDelay: maxDelay,
+		Watchdog: watchdog,
 	}, nil
 }
 

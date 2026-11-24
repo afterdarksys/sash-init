@@ -43,8 +43,9 @@ type Sash struct {
 var sashUnitKeys = map[string]struct{}{"file": {}, "grant": {}}
 
 // sashOnly are the unit keys a sash unit refuses: the service block owns
-// what they would say.
-var sashOnly = []string{"exec", "type", "ready", "timeout"}
+// what they would say. essential is refused too: a sash boot unit is always
+// essential, and a silently ignored false would read as an opt-out.
+var sashOnly = []string{"exec", "type", "ready", "timeout", "essential", "restart_delay", "restart_max_delay", "watchdog"}
 
 func parseSashUnit(obj map[string]json.RawMessage, stem string) (*Service, error) {
 	for _, k := range sashOnly {
@@ -136,7 +137,7 @@ func parseSashUnit(obj map[string]json.RawMessage, stem string) (*Service, error
 	}
 	svc := &Service{
 		Name: name, Type: "simple", Restart: restart, After: after, Needs: needs, Wants: wants,
-		Timeout: DefaultTimeout, Boot: boot, Sandbox: sb, Execution: execution, Limits: limits, Sash: sh,
+		Timeout: DefaultTimeout, Boot: boot, Essential: boot, Sandbox: sb, Execution: execution, Limits: limits, Sash: sh,
 	}
 	if CgroupTrusted(svc) {
 		return nil, fail.E("sash_cgroup_trusted")
