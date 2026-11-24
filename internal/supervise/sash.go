@@ -711,7 +711,6 @@ func (sup *Supervisor) stopSashLocked(ctx context.Context, s *runtime) error {
 
 func (sup *Supervisor) stopSashBody(ctx context.Context, s *runtime) error {
 	svc := s.svc
-	s.cancelSessions()
 	timeout := stopTimeoutOf(svc)
 	table := s.sashTable()
 	if table.Running() > 0 {
