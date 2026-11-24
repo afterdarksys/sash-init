@@ -20,7 +20,14 @@ Defaults and options:
 ```text
 init --dir /etc/sahinit/units --socket /run/sahinit/control.sock
      --shutdown-timeout 30s [--recovery /absolute/local/executable]
+     [--sash /absolute/sash] [--sash-fleet-pub /absolute/fleet.pub]
+     [--sash-floor-dir /absolute/dir]
 ```
+
+The `--sash*` options are passed to the supervisor unchanged (see
+[sash services](design/sash-services-1.md)). Without `--sash-fleet-pub` and
+`--sash-floor-dir` every sash unit is refused at load, which strict boot treats
+as a failed boot.
 
 The kernel must provide procfs, sysfs, devtmpfs, tmpfs, cgroup v2 and
 `clone3(CLONE_INTO_CGROUP)` (Linux 5.7+). Recovery cgroup cleanup uses
@@ -84,6 +91,7 @@ not implemented. See Linux [reboot semantics](https://man7.org/linux/man-pages/m
 ./build.sh                  # native race tests, vet, Linux test compilation
 ./scripts/test-linux.sh     # Linux race suite with private cgroup namespace
 python3 scripts/test-boot.py # QEMU boots, serial assertions, bounded VM lifetime
+python3 scripts/test-boot.py --scenario sash  # only the sash scenario
 ```
 
 The QEMU harness uses disposable initramfs images and no VM network or host
@@ -94,12 +102,50 @@ shutdown, poweroff/reboot, bad configuration, failed boot, failed runtime servic
 supervisor crash, a service ignoring TERM and boot retry after recovery repairs
 the catalog.
 
+The `sash` scenario runs real sash services under PID 1. The images include a
+static sash built from the sash repository (`SASH_SRC` or `--sash-src`, default
+`../sash-initp1`, branch `feat/init-phase1`, passed read-only as a Docker build
+context). `tests/boot/sashfix` makes a fleet key in memory each time the images
+are built and writes only its public half, the signed `sash/2` grants and a
+signed floor; the private key is never written, and nothing is committed. The
+floor is installed with `sahinit sash floor-install`. Init runs with `--sash
+/sash --sash-fleet-pub /etc/sahinit/fleet.pub --sash-floor-dir
+/var/lib/sahinit/sash`. The image holds:
+
+- `svc` (boot): makes `/srv/svc/d` (0750, nobody) and a file in it, mounts a
+  tmpfs at `/mnt/svc` and spawns `/probe sleeper` as nobody, which signals
+  readiness on the notify pipe; its stop entry stops it and touches
+  `/srv/svc/stopped`.
+- `revoked` (not boot): a valid grant at serial 5 below its floor of 6.
+- `sashcheck` (boot oneshot, root, no sandbox): starts the driver in a new
+  session and moves it to the root cgroup, because the control socket refuses
+  peers that are supervised services (`peer_supervised`).
+
+The driver asserts, through `sahinit ctl` and `/proc`, that `svc` is running
+and ready at grant serial 5; its spawned process is in
+`/sahinit/svc.service` as uid 65534; the directory, the file and the tmpfs
+(`nosuid,nodev,noexec`) exist; `ctl start revoked` fails with
+`sash_grant_revoked`, the unit is failed with no restart and `svc` keeps
+running; and `ctl stop svc` runs the stop entry (exit 0, the file it touched),
+the spawned process and the service cgroup are gone and `/mnt/svc` is
+unmounted. It then powers off. The serial log must also carry the supervisor's
+`sash_grant revoked sash_grant_revoked`. It takes about 75 s under TCG, so it
+gets at least 180 s.
+
+The revoked unit is not a boot unit on purpose: in host mode every boot unit is
+essential, so a boot unit whose grant is refused enters recovery. The refused
+grant "fails the unit without stopping boot" only for a unit that is started
+later. Not covered here: shutdown (rather than `ctl stop`) of a running sash
+service, bind mounts, restart policy and the `check` and `reload` entries.
+
 Still outside this milestone: root discovery/switch-root, fsck, encrypted or
 network root, device hotplug/module loading, swap teardown, PTY/login setup,
 network configuration, durable logs, hardware watchdogs, live transactional
 reload and targeted dependency failure propagation. Services may supply some of
 these. Persistent-disk teardown is not proven by the initramfs tests.
 
-Signed policy remains metadata-only; verified artifact admission, the SystemAPI
-issuer and sash boot execution are separate unfinished integrations. Existing
+Signed policy remains metadata-only; verified artifact admission and the
+SystemAPI issuer are separate unfinished integrations. Sash services run under
+PID 1 (the `sash` VM scenario), with test-made grants and floors; there is no
+fleet signer yet. Existing
 Linux sandbox/cgroup trust limitations continue to apply.

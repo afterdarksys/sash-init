@@ -74,3 +74,13 @@ This does NOT confine what a legitimate mount exposes: a bind of a listed source
 15. **One step from check to claim.** A mount point is reserved, with a pending record, under the same lock as the check that no record holds it, then filled in with its ID once mounted. Two services listing the same point cannot both mount it; the loser is `exists`.
 16. **No mount without IDs.** Before mounting, sahinit reads a mount ID through the mount point's fd; a kernel without one is `unsupported`, so no mount is ever made that could not be checked again. If the ID cannot be read after mounting, the new mount is detached by its reserved path and the record dropped.
 17. **Forgotten mounts.** A record whose mount is no longer the one sahinit made (`not_mounted` on umount or remount) is dropped and audited as `sash_mount_forgotten SERVICE DIR`, so the point is free again rather than `exists` until a restart.
+
+## The PID 1 boot test
+
+`scripts/test-boot.py --scenario sash` boots sahinit as PID 1 in QEMU with real sash services (`docs/host-init.md`, VM suite). Decisions:
+
+1. **Init passes the sash options.** PID 1 started the supervisor with fixed arguments, so every sash unit was refused at load (`sash_fleet_key`), and strict boot made that a failed boot. `init` now takes `--sash`, `--sash-fleet-pub` and `--sash-floor-dir` (absolute) and passes them on when set.
+2. **Ephemeral keys.** `tests/boot/sashfix` makes the fleet key in memory each time the images are built and writes only the public key, the grants and a floor document. The floor goes in through `sahinit sash floor-install`, the operator's path.
+3. **The driver is outside the services.** The control socket refuses a peer in a service cgroup or a group a service led (`peer_supervised`). A root oneshot without a sandbox, which can leave its cgroup by design (`cgroup_trusted`), starts the driver with `setsid` and moves it to the root cgroup.
+4. **The refused grant is on a non-boot unit.** Host mode makes every boot unit essential, so a refused grant on one enters recovery. The test starts the revoked unit with `ctl start` after boot and checks that boot and `svc` carry on.
+5. **The spawned program is the probe.** The image has no shell or `sleep`; `/probe sleeper` is listed in the grant's `exec`, writes readiness to fd 3 and waits for TERM. It runs as nobody, so it never opens the console.
