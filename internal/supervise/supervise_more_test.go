@@ -331,10 +331,13 @@ func TestRestartNotifyClean(t *testing.T) {
 func TestRestartWindowPrune(t *testing.T) {
 	log := marker(t)
 	script := writeScript(t, "/bin/sleep 0.2\nprintf 'x\\n' >> \"$1\"\nexit 1\n")
-	agent := newSvc("agent", "simple", "exec", "always", false, 30*time.Second, shExec(script, log))
+	agent := newSvc("agent", "simple", "exec", "always", false, 100*time.Millisecond, shExec(script, log))
 	sup := mustSup(t, map[string]*unit.Service{"agent": agent})
 	sup.RestartBurst = 1
 	sup.RestartWindow = 50 * time.Millisecond
+	// Each run stays ready for 200 ms, longer than this, so the crash
+	// count resets and only the window decides.
+	sup.StableFor = 100 * time.Millisecond
 	ctx, cancel := ctxFor(t, 5*time.Second)
 	defer cancel()
 	if err := sup.Start(ctx, "agent"); err != nil {

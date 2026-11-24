@@ -92,10 +92,15 @@ func (sup *Supervisor) EssentialFailure(boot bool) string {
 			return true
 		}
 		s.mu.Lock()
-		state, desired, ready := s.state, s.desired, s.ready
+		state, desired, ready, backoff := s.state, s.desired, s.ready, s.backoff
 		s.mu.Unlock()
 		if !desired {
 			return false
+		}
+		// At the end of boot a unit that already crashed and waits out its
+		// restart delay is not ready: boot fails now rather than waiting.
+		if boot && backoff {
+			return true
 		}
 		if state == "failed" || state == "stopped" {
 			return true

@@ -113,9 +113,15 @@ type Supervisor struct {
 	lock            *os.File // flock on bound + ".lock", held while bound
 	serving         atomic.Bool
 	shuttingDown    atomic.Bool
-	RestartBurst    int
-	RestartWindow   time.Duration
-	Allow           map[uint32]struct{}
+	// booted is set by the caller once the boot waves ended without a
+	// strict failure; catalog changes wait for it (boot_in_progress).
+	booted        atomic.Bool
+	RestartBurst  int
+	RestartWindow time.Duration
+	// StableFor replaces the 10 s minimum a run must stay ready to reset
+	// the crash count (tests only).
+	StableFor time.Duration
+	Allow     map[uint32]struct{}
 	// SocketGID is the socket's group when Allow names a uid other than
 	// the supervisor's own; the socket is then mode 0660.
 	SocketGID    *uint32
@@ -164,9 +170,15 @@ type runtime struct {
 	stopReq    bool
 	timedOut   bool
 	restartsAt []time.Time
-	procDone   chan struct{}
-	readyCh    chan struct{}
-	cmd        *exec.Cmd
+	// readyAt is when the current run became ready; crashes counts the
+	// automatic restarts since a run stayed ready for stableFor; backoff
+	// is set while a restart waits out its delay.
+	readyAt  time.Time
+	crashes  int
+	backoff  bool
+	procDone chan struct{}
+	readyCh  chan struct{}
+	cmd      *exec.Cmd
 	// group is the pid of the last started process, which leads its own
 	// process group; pidfd is a pidfd for it (-1 when unavailable). Both are
 	// kept after it exits, for signalling what remains of its group, and
@@ -721,6 +733,7 @@ func (sup *Supervisor) startLocked(ctx context.Context, s *runtime, arg string, 
 			s.gen++
 			s.restarts = 0
 			s.restartsAt = nil
+			s.crashes = 0
 		}
 		gen := s.gen
 		s.eventLocked("starting", "", nil)
@@ -757,6 +770,7 @@ func (sup *Supervisor) startLocked(ctx context.Context, s *runtime, arg string, 
 		s.gen++
 		s.restarts = 0
 		s.restartsAt = nil
+		s.crashes = 0
 	}
 	gen := s.gen
 	s.eventLocked("starting", "", nil)
@@ -899,6 +913,7 @@ func (sup *Supervisor) launch(ctx context.Context, s *runtime, argv []string, ge
 	if s.svc.Ready == "exec" {
 		s.state = "running"
 		s.ready = true
+		s.readyAt = clock()
 		s.eventLocked("ready", "", nil)
 	}
 	s.mu.Unlock()
@@ -924,6 +939,7 @@ func (sup *Supervisor) lifetime(s *runtime, cmd *exec.Cmd, notifyR *os.File, pro
 			if s.gen == gen && !s.timedOut && !s.stopReq && !sup.shuttingDown.Load() {
 				s.state = "running"
 				s.ready = true
+				s.readyAt = clock()
 				s.lastError = ""
 				s.eventLocked("ready", "", nil)
 				published = true
@@ -1111,13 +1127,50 @@ func (sup *Supervisor) onExit(s *runtime, procDone chan struct{}, gen uint64, ex
 	fresh := make(chan struct{})
 	close(fresh)
 	s.procDone = fresh
+	s.backoff = true
 	s.mu.Unlock()
 	close(procDone)
 	go sup.relaunch(s, gen)
 }
 
+// clock is the restart accounting's time source; tests replace it.
+var clock = time.Now
+
+// stableFor is how long a run must stay ready before its crash count is
+// forgotten: at least 10 s (sup.StableFor, for tests), or the unit's
+// timeout when longer.
+func (sup *Supervisor) stableFor(svc *unit.Service) time.Duration {
+	min := 10 * time.Second
+	if sup.StableFor > 0 {
+		min = sup.StableFor
+	}
+	if t := timeoutOf(svc); t > min {
+		return t
+	}
+	return min
+}
+
+// allowRestart also counts consecutive crashes: a unit whose runs never stay
+// ready for stableFor hits restart_limit after the burst, however long its
+// restart delays make the gaps (the sliding window alone misses a loop
+// whose backoff spreads five restarts over more than 30 s). Caller holds
+// s.mu.
 func (sup *Supervisor) allowRestart(s *runtime) bool {
-	return allowRestartWith(s, sup.RestartBurst, sup.RestartWindow)
+	burst := sup.RestartBurst
+	if burst <= 0 {
+		burst = defaultBurst
+	}
+	if !s.readyAt.IsZero() && clock().Sub(s.readyAt) >= sup.stableFor(s.svc) {
+		s.crashes = 0
+	}
+	if s.crashes >= burst {
+		return false
+	}
+	if !allowRestartWith(s, burst, sup.RestartWindow) {
+		return false
+	}
+	s.crashes++
+	return true
 }
 
 // allowRestartWith is allowRestart with a burst and window; caller holds
@@ -1129,7 +1182,7 @@ func allowRestartWith(s *runtime, burst int, window time.Duration) bool {
 	if window <= 0 {
 		window = defaultWindow
 	}
-	now := time.Now()
+	now := clock()
 	prev := s.restartsAt
 	kept := make([]time.Time, 0, len(prev))
 	for _, t := range prev {
@@ -1148,9 +1201,12 @@ func allowRestartWith(s *runtime, burst int, window time.Duration) bool {
 
 func (sup *Supervisor) relaunch(s *runtime, gen uint64) {
 	s.mu.Lock()
-	delay := restartDelay(s.svc, len(s.restartsAt))
+	delay := restartDelay(s.svc, s.crashes)
 	s.mu.Unlock()
 	time.Sleep(delay)
+	s.mu.Lock()
+	s.backoff = false
+	s.mu.Unlock()
 	sup.transaction.RLock()
 	defer sup.transaction.RUnlock()
 	if current, ok := sup.runtime(s.svc.Name); !ok || current != s {
@@ -1540,3 +1596,10 @@ func argOK(arg string) error {
 	}
 	return nil
 }
+
+// SetBooted records whether boot finished (true) or the supervisor is
+// stopping (false); apply, rollback and activate need it set.
+func (sup *Supervisor) SetBooted(v bool) { sup.booted.Store(v) }
+
+// Booted reports SetBooted's value.
+func (sup *Supervisor) Booted() bool { return sup.booted.Load() }

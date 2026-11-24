@@ -121,12 +121,18 @@ fields: stop is always SIGTERM to the process group, then SIGKILL (see
 - A oneshot that exits non-zero is `failed`.
 - `restart` applies to a `simple` unit whose process exits after it was
   ready (or at any time with `ready: exec`): `always` restarts after any exit,
-  `on-failure` after a non-zero exit or a signal. The n-th restart within
-  the window waits `restart_delay` × 2^(n−1), capped at `restart_max_delay`,
+  `on-failure` after a non-zero exit or a signal. The n-th consecutive
+  crash waits `restart_delay` × 2^(n−1), capped at `restart_max_delay`,
   scaled by a random 80–100 % (so never above the cap); during the wait the
-  state is `starting`. At most 5 restarts in any 30 s; the next exit is then
-  `failed` with `restart_limit`. A manual start resets the count. A unit whose
-  `needs` provider is not ready when the delay ends becomes `blocked`.
+  state is `starting`. Two limits end a crash loop with `failed` and
+  `restart_limit`: more than 5 restarts in any 30 s, and more than 5
+  consecutive crashes, counting every exit until a run has stayed ready for
+  the stable period (10 s, or `timeout` when longer), however long the
+  delays. A run that stayed ready that long resets the crash count; a manual
+  start resets both. A unit whose `needs` provider is not ready when the
+  delay ends becomes `blocked`. In strict boot, an essential unit that has
+  crashed and is still waiting out its delay when the boot waves end counts
+  as not ready, so the boot fails then rather than waiting.
 - A stop is never followed by a restart.
 
 ### Watchdog
