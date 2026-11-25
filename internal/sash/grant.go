@@ -29,14 +29,34 @@ import (
 // message is sash's exactly (internal/grant/verify.go): the domain
 // "sash-grant-v2\n", then the sash/1 fields and the sash/2 fields in the
 // contract's order, as Go's encoding/json writes them; the golden vector in
-// testdata pins it. Does NOT hold a private key and does NOT check host:
-// sahinit has no host name in batch 1.
+// testdata pins it. Does NOT hold a private key and does NOT check a sash/2
+// grant's host: sahinit has no host name for it in batch 1.
+//
+// sash/3 (the boot grant, sash's docs/plans/2026-11-24-sash-boot-verbs-
+// contract.md) adds: a sash/1 or sash/2 grant, or a v2-domain signature,
+// presented as sash/3 and the reverse (its own domain, "sash-grant-v3\n",
+// and purpose boot is sash/3 only); a name list padded past 64 entries, with
+// a duplicate, or with an entry that is a path, a file name, an alias or a
+// flag; a null list; "ensure" smuggled in as a mount source so mount ensure
+// could hide a real mount (refused in sash/2 as well). Every field is
+// required. Its host is checked by the supervisor against the trust file's
+// host_id (sash_grant_host), not here; sash's v3 vectors in testdata pin the
+// message and every refusal.
 
 const (
 	// MaxGrant is the largest grant sahinit reads, as sash's MaxDocument.
 	MaxGrant       = 64 * 1024
 	PurposeService = "service"
-	grantDomain    = "sash-grant-v2\n"
+	// PurposeBoot is a sash/3 boot grant: the only kind that carries the
+	// boot verbs.
+	PurposeBoot   = "boot"
+	grantDomain   = "sash-grant-v2\n"
+	grantDomainV3 = "sash-grant-v3\n"
+	// MaxBootList is the most entries one sash/3 name list may hold.
+	MaxBootList = 64
+	// mountSourceEnsure is never a mount source: a mount stage whose second
+	// word is ensure is always mount ensure.
+	mountSourceEnsure = "ensure"
 )
 
 // ServiceName is a service name, in the grant and the service block.
@@ -45,12 +65,23 @@ var ServiceName = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
 // UnixName is a user or group name.
 var UnixName = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 
+// The sash/3 name grammars, as sash's. None holds "/", "." or a leading
+// "-", so no name can be a path, a file name or a flag.
+var (
+	// ModuleName is the kernel's canonical spelling: "_", never "-".
+	ModuleName = regexp.MustCompile(`^[a-z0-9][a-z0-9_]{0,54}$`)
+	// BootName is a device, host mount or network profile name.
+	BootName = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+	// UnitName is a unit name, as the catalog's.
+	UnitName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+)
+
 var (
 	mountName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 	capName   = regexp.MustCompile(`^CAP_[A-Z0-9_]{1,32}$`)
 )
 
-// Grant is a verified sash/2 boot grant.
+// Grant is a verified sash/2 service grant or sash/3 boot grant.
 type Grant struct {
 	V            string
 	Actor        string
@@ -70,7 +101,14 @@ type Grant struct {
 	User         string
 	Group        string
 	EnvNames     []string
-	Serial       uint64
+	// The sash/3 lists: the names the boot verbs may use. Empty in sash/2.
+	Modules     []string
+	Devices     []string
+	HostMounts  []string
+	NetProfiles []string
+	UnitsStart  []string
+	UnitsStop   []string
+	Serial      uint64
 }
 
 type signedV1 struct {
@@ -104,6 +142,32 @@ type wireV2 struct {
 	Sig string `json:"sig"`
 }
 
+// signedV3 is every sash/2 field but serial, then the six boot lists, then
+// serial last, in the order sash's contract fixes.
+type signedV3 struct {
+	signedV1
+	Service      string   `json:"service"`
+	Exec         []string `json:"exec"`
+	Caps         []string `json:"caps"`
+	Mounts       []string `json:"mounts"`
+	MountSources []string `json:"mount_sources"`
+	User         string   `json:"user"`
+	Group        string   `json:"group"`
+	EnvNames     []string `json:"env_names"`
+	Modules      []string `json:"modules"`
+	Devices      []string `json:"devices"`
+	HostMounts   []string `json:"host_mounts"`
+	NetProfiles  []string `json:"net_profiles"`
+	UnitsStart   []string `json:"units_start"`
+	UnitsStop    []string `json:"units_stop"`
+	Serial       uint64   `json:"serial"`
+}
+
+type wireV3 struct {
+	signedV3
+	Sig string `json:"sig"`
+}
+
 func norm(s []string) []string {
 	if s == nil {
 		return []string{}
@@ -111,21 +175,36 @@ func norm(s []string) []string {
 	return s
 }
 
-// Message is the exact byte string the fleet key signs for g.
+// Message is the exact byte string the fleet key signs for g: the sash/2
+// message, or for V "sash/3" the sash/3 one.
 func Message(g Grant) ([]byte, error) {
-	body, err := json.Marshal(signedV2{
-		signedV1: signedV1{V: g.V, Actor: g.Actor, Host: g.Host, Purpose: g.Purpose, Exp: g.Exp, LeaseID: g.LeaseID,
-			Entitlements: norm(g.Entitlements), FileRead: norm(g.FileRead), FileWrite: norm(g.FileWrite), AllowPrivate: g.AllowPrivate},
-		Service: g.Service, Exec: norm(g.Exec), Caps: norm(g.Caps), Mounts: norm(g.Mounts), MountSources: norm(g.MountSources),
-		User: g.User, Group: g.Group, EnvNames: norm(g.EnvNames), Serial: g.Serial,
-	})
+	v1 := signedV1{V: g.V, Actor: g.Actor, Host: g.Host, Purpose: g.Purpose, Exp: g.Exp, LeaseID: g.LeaseID,
+		Entitlements: norm(g.Entitlements), FileRead: norm(g.FileRead), FileWrite: norm(g.FileWrite), AllowPrivate: g.AllowPrivate}
+	var body any
+	domain := grantDomain
+	if g.V == "sash/3" {
+		domain = grantDomainV3
+		body = signedV3{
+			signedV1: v1, Service: g.Service, Exec: norm(g.Exec), Caps: norm(g.Caps), Mounts: norm(g.Mounts), MountSources: norm(g.MountSources),
+			User: g.User, Group: g.Group, EnvNames: norm(g.EnvNames),
+			Modules: norm(g.Modules), Devices: norm(g.Devices), HostMounts: norm(g.HostMounts),
+			NetProfiles: norm(g.NetProfiles), UnitsStart: norm(g.UnitsStart), UnitsStop: norm(g.UnitsStop), Serial: g.Serial,
+		}
+	} else {
+		body = signedV2{
+			signedV1: v1, Service: g.Service, Exec: norm(g.Exec), Caps: norm(g.Caps), Mounts: norm(g.Mounts), MountSources: norm(g.MountSources),
+			User: g.User, Group: g.Group, EnvNames: norm(g.EnvNames), Serial: g.Serial,
+		}
+	}
+	out, err := json.Marshal(body)
 	if err != nil {
 		return nil, fail.E("grant_bad_shape")
 	}
-	return append([]byte(grantDomain), body...), nil
+	return append([]byte(domain), out...), nil
 }
 
-// VerifyGrant checks doc as a sash/2 service grant signed by fleet. now is
+// VerifyGrant checks doc as a sash/2 service grant or a sash/3 boot grant
+// signed by fleet. now is
 // the caller's clock in Unix seconds. Tokens are sash's: grant_missing,
 // grant_bad_shape, grant_bad_sig, grant_star, grant_expired,
 // grant_root_slash, grant_exp_zero.
@@ -163,65 +242,65 @@ func VerifyGrant(doc []byte, fleet ed25519.PublicKey, now int64) (Grant, error) 
 }
 
 func parseGrant(doc []byte) (Grant, string, error) {
-	bad := func() (Grant, string, error) { return Grant{}, "", fail.E("grant_bad_shape") }
+	var head struct {
+		V json.RawMessage `json:"v"`
+	}
+	if err := json.Unmarshal(doc, &head); err != nil {
+		return Grant{}, "", fail.E("grant_bad_shape")
+	}
+	if string(head.V) == `"sash/3"` {
+		return parseV3(doc)
+	}
+	return parseV2(doc)
+}
+
+// strictDecode decodes doc into dst with no unknown field and nothing
+// after it, and returns its top-level keys.
+func strictDecode(doc []byte, dst any) (map[string]json.RawMessage, error) {
 	dec := json.NewDecoder(bytes.NewReader(doc))
 	dec.DisallowUnknownFields()
-	var w wireV2
-	if err := dec.Decode(&w); err != nil {
-		return bad()
+	if err := dec.Decode(dst); err != nil {
+		return nil, fail.E("grant_bad_shape")
 	}
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
-		return bad()
+		return nil, fail.E("grant_bad_shape")
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(doc, &raw); err != nil {
-		return bad()
+		return nil, fail.E("grant_bad_shape")
 	}
-	for _, key := range []string{"v", "actor", "host", "purpose", "exp", "lease_id", "entitlements", "service", "exec", "caps", "mounts", "mount_sources", "user", "group", "env_names", "serial", "sig"} {
+	return raw, nil
+}
+
+func hasKeys(raw map[string]json.RawMessage, keys []string) bool {
+	for _, key := range keys {
 		if _, ok := raw[key]; !ok {
-			return bad()
+			return false
 		}
 	}
-	if w.V != "sash/2" || w.Purpose != PurposeService || w.Host == "" || w.LeaseID == "" || w.Sig == "" {
+	return true
+}
+
+var v2Keys = []string{"v", "actor", "host", "purpose", "exp", "lease_id", "entitlements", "service", "exec", "caps", "mounts", "mount_sources", "user", "group", "env_names", "serial", "sig"}
+
+// v3Keys are every field a sash/3 document must carry.
+var v3Keys = []string{"v", "actor", "host", "purpose", "exp", "lease_id", "entitlements", "file_read", "file_write", "allow_private",
+	"service", "exec", "caps", "mounts", "mount_sources", "user", "group", "env_names",
+	"modules", "devices", "host_mounts", "net_profiles", "units_start", "units_stop", "serial", "sig"}
+
+func parseV2(doc []byte) (Grant, string, error) {
+	bad := func() (Grant, string, error) { return Grant{}, "", fail.E("grant_bad_shape") }
+	var w wireV2
+	raw, err := strictDecode(doc, &w)
+	if err != nil || !hasKeys(raw, v2Keys) {
 		return bad()
 	}
-	if !ServiceName.MatchString(w.Service) || w.Actor != "service:"+w.Service || w.Serial < 1 || w.Exp < 0 {
+	if w.V != "sash/2" || w.Purpose != PurposeService || w.Actor != "service:"+w.Service || w.Sig == "" {
 		return bad()
 	}
-	if w.Entitlements == nil || w.Exec == nil || w.Caps == nil || w.Mounts == nil || w.MountSources == nil || w.EnvNames == nil {
-		return bad()
-	}
-	if !UnixName.MatchString(w.User) || !UnixName.MatchString(w.Group) {
-		return bad()
-	}
-	for _, e := range w.Entitlements {
-		if e == "" {
-			return bad()
-		}
-	}
-	for _, list := range [][]string{w.FileRead, w.FileWrite, w.Exec, w.Mounts} {
-		if err := roots(list); err != nil {
-			return Grant{}, "", err
-		}
-	}
-	for _, src := range w.MountSources {
-		if mountName.MatchString(src) {
-			continue
-		}
-		if err := roots([]string{src}); err != nil {
-			return Grant{}, "", err
-		}
-	}
-	for _, e := range w.EnvNames {
-		if !EnvName.MatchString(e) {
-			return bad()
-		}
-	}
-	for _, c := range w.Caps {
-		if !capName.MatchString(c) {
-			return bad()
-		}
+	if err := shapeService(w.signedV1, w.Service, w.User, w.Group, w.Serial, w.Exec, w.Caps, w.Mounts, w.MountSources, w.EnvNames); err != nil {
+		return Grant{}, "", err
 	}
 	cp := func(s []string) []string { return append([]string(nil), s...) }
 	return Grant{
@@ -230,6 +309,113 @@ func parseGrant(doc []byte) (Grant, string, error) {
 		Service: w.Service, Exec: cp(w.Exec), Caps: cp(w.Caps), Mounts: cp(w.Mounts), MountSources: cp(w.MountSources),
 		User: w.User, Group: w.Group, EnvNames: cp(w.EnvNames), Serial: w.Serial,
 	}, w.Sig, nil
+}
+
+// parseV3 reads a sash/3 document: purpose boot only, actor boot:<service>,
+// every sash/2 rule, no null list (file_read and file_write included), and
+// the six name lists (each at most 64 entries, no duplicates, every entry in
+// its grammar).
+func parseV3(doc []byte) (Grant, string, error) {
+	bad := func() (Grant, string, error) { return Grant{}, "", fail.E("grant_bad_shape") }
+	var w wireV3
+	raw, err := strictDecode(doc, &w)
+	if err != nil || !hasKeys(raw, v3Keys) {
+		return bad()
+	}
+	if w.V != "sash/3" || w.Purpose != PurposeBoot || w.Actor != "boot:"+w.Service || w.Sig == "" || w.FileRead == nil || w.FileWrite == nil {
+		return bad()
+	}
+	if err := shapeService(w.signedV1, w.Service, w.User, w.Group, w.Serial, w.Exec, w.Caps, w.Mounts, w.MountSources, w.EnvNames); err != nil {
+		return Grant{}, "", err
+	}
+	for _, l := range []struct {
+		list []string
+		re   *regexp.Regexp
+	}{
+		{w.Modules, ModuleName}, {w.Devices, BootName}, {w.HostMounts, BootName},
+		{w.NetProfiles, BootName}, {w.UnitsStart, UnitName}, {w.UnitsStop, UnitName},
+	} {
+		if !bootList(l.list, l.re) {
+			return bad()
+		}
+	}
+	cp := func(s []string) []string { return append([]string(nil), s...) }
+	return Grant{
+		V: w.V, Actor: w.Actor, Host: w.Host, Purpose: w.Purpose, Exp: w.Exp, LeaseID: w.LeaseID,
+		Entitlements: cp(w.Entitlements), FileRead: cp(w.FileRead), FileWrite: cp(w.FileWrite), AllowPrivate: w.AllowPrivate,
+		Service: w.Service, Exec: cp(w.Exec), Caps: cp(w.Caps), Mounts: cp(w.Mounts), MountSources: cp(w.MountSources),
+		User: w.User, Group: w.Group, EnvNames: cp(w.EnvNames),
+		Modules: cp(w.Modules), Devices: cp(w.Devices), HostMounts: cp(w.HostMounts),
+		NetProfiles: cp(w.NetProfiles), UnitsStart: cp(w.UnitsStart), UnitsStop: cp(w.UnitsStop),
+		Serial: w.Serial,
+	}, w.Sig, nil
+}
+
+// shapeService is the rules sash/2 and sash/3 share once v, purpose and
+// actor are checked: host, lease and sig set, a service name, a serial of
+// at least 1, unix names, every list present, entitlements non-empty
+// strings, clean absolute roots, exec programs and mount points, a mount
+// source a name or such a path (never ensure), env and capability names in
+// their forms.
+func shapeService(w signedV1, service, user, group string, serial uint64, exec, caps, mounts, sources, env []string) error {
+	bad := fail.E("grant_bad_shape")
+	if w.Host == "" || w.LeaseID == "" || !ServiceName.MatchString(service) || serial < 1 || w.Exp < 0 {
+		return bad
+	}
+	if w.Entitlements == nil || exec == nil || caps == nil || mounts == nil || sources == nil || env == nil {
+		return bad
+	}
+	if !UnixName.MatchString(user) || !UnixName.MatchString(group) {
+		return bad
+	}
+	for _, e := range w.Entitlements {
+		if e == "" {
+			return bad
+		}
+	}
+	for _, list := range [][]string{w.FileRead, w.FileWrite, exec, mounts} {
+		if err := roots(list); err != nil {
+			return err
+		}
+	}
+	for _, src := range sources {
+		if src == mountSourceEnsure {
+			return bad
+		}
+		if mountName.MatchString(src) {
+			continue
+		}
+		if err := roots([]string{src}); err != nil {
+			return err
+		}
+	}
+	for _, e := range env {
+		if !EnvName.MatchString(e) {
+			return bad
+		}
+	}
+	for _, c := range caps {
+		if !capName.MatchString(c) {
+			return bad
+		}
+	}
+	return nil
+}
+
+// bootList is a present list of at most MaxBootList entries, each in re,
+// none twice.
+func bootList(list []string, re *regexp.Regexp) bool {
+	if list == nil || len(list) > MaxBootList {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, s := range list {
+		if !re.MatchString(s) || seen[s] {
+			return false
+		}
+		seen[s] = true
+	}
+	return true
 }
 
 func roots(list []string) error {
@@ -243,6 +429,10 @@ func roots(list []string) error {
 	}
 	return nil
 }
+
+// BootOps reports a sash/3 boot grant: the only kind that carries the boot
+// verbs.
+func (g Grant) BootOps() bool { return g.V == "sash/3" && g.Purpose == PurposeBoot }
 
 // Has reports whether key is listed. A "*" never verifies, so it is not
 // considered here.
