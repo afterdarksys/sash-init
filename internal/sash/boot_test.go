@@ -427,27 +427,41 @@ func TestResolveModule(t *testing.T) {
 	for name, c := range map[string]struct {
 		dep, mod, want string
 	}{
-		"absolute dependency":  {"kernel/a.ko: /lib/x.ko\n", "a", "module_tree"},
-		"absolute module":      {"/kernel/a.ko:\n", "a", "module_tree"},
-		"dot-dot":              {"kernel/a.ko: ../../etc/x.ko\n", "a", "module_tree"},
-		"dot-dot in the path":  {"kernel/../a.ko:\n", "a", "module_tree"},
-		"unclean":              {"kernel//a.ko:\n", "a", "module_tree"},
-		"dependency not a .ko": {"kernel/a.ko: kernel/b.so\n", "a", "module_tree"},
-		"two lines":            {"kernel/a.ko:\nextra/a.ko.xz:\n", "a", "module_unknown"},
-		"bad line elsewhere":   {"kernel/a.ko:\n/abs/b.ko:\n", "a", "module_tree"},
-		"line without a colon": {"kernel/a.ko:\nkernel/b.ko\n", "a", "module_tree"},
-		"dots in a name":       {"kernel/a..b.ko:\nkernel/a.ko:\n", "a", "module_tree"},
-		"dependency grammar":   {"kernel/a.ko: kernel/A-B.ko\n", "a", "module_tree"},
-		"two suffixes":         {"kernel/a.ko.gz.xz:\n", "a", "module_unknown"},
-		"no .ko":               {"kernel/a.xz:\n", "a", "module_unknown"},
-		"suffix only":          {"kernel/a.ko.bz2:\n", "a", "module_unknown"},
-		"prefix match":         {"kernel/ab.ko:\n", "a", "module_unknown"},
-		"bad name":             {"kernel/a.ko:\n", "../a", "module_unknown"},
-		"oversized":            {strings.Repeat("x", MaxModulesDep+1), "a", "module_tree"},
+		"absolute dependency":   {"kernel/a.ko: /lib/x.ko\n", "a", "module_tree"},
+		"absolute module":       {"/kernel/a.ko:\n", "a", "module_tree"},
+		"dot-dot":               {"kernel/a.ko: ../../etc/x.ko\n", "a", "module_tree"},
+		"dot-dot in the path":   {"kernel/../a.ko:\n", "a", "module_tree"},
+		"unclean":               {"kernel//a.ko:\n", "a", "module_tree"},
+		"dependency not a .ko":  {"kernel/a.ko: kernel/b.so\n", "a", "module_tree"},
+		"two lines":             {"kernel/a.ko:\nextra/a.ko.xz:\n", "a", "module_unknown"},
+		"bad line elsewhere":    {"kernel/a.ko:\n/abs/b.ko:\n", "a", "module_tree"},
+		"line without a colon":  {"kernel/a.ko:\nkernel/b.ko\n", "a", "module_tree"},
+		"dots in a name":        {"kernel/a..b.ko:\nkernel/a.ko:\n", "a", "module_tree"},
+		"dependency grammar":    {"kernel/a.ko: kernel/A-B.ko\n", "a", "module_tree"},
+		"two suffixes":          {"kernel/a.ko.gz.xz:\n", "a", "module_unknown"},
+		"no .ko":                {"kernel/a.xz:\n", "a", "module_unknown"},
+		"suffix only":           {"kernel/a.ko.bz2:\n", "a", "module_unknown"},
+		"prefix match":          {"kernel/ab.ko:\n", "a", "module_unknown"},
+		"bad name":              {"kernel/a.ko:\n", "../a", "module_unknown"},
+		"name past the grammar": {"kernel/A.ko:\n", "A", "module_unknown"},
+		"oversized":             {strings.Repeat("x", MaxModulesDep+1), "a", "module_tree"},
 	} {
 		if _, _, err := ResolveModule([]byte(c.dep), c.mod); fail.Token(err) != c.want {
 			t.Errorf("%s: %v, want %s", name, err, c.want)
 		}
+	}
+}
+
+// modules.dep is read up to MaxModulesDep bytes: one at the cap resolves, one
+// byte past it is module_tree.
+func TestResolveModuleCap(t *testing.T) {
+	line := "kernel/a.ko:\n"
+	at := line + strings.Repeat("\n", MaxModulesDep-len(line))
+	if own, _, err := ResolveModule([]byte(at), "a"); err != nil || own.File != "kernel/a.ko" {
+		t.Fatalf("at the cap: %+v %v", own, err)
+	}
+	if _, _, err := ResolveModule([]byte(at+"\n"), "a"); fail.Token(err) != "module_tree" {
+		t.Fatalf("past the cap: %v", err)
 	}
 }
 
