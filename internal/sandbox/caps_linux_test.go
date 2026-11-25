@@ -291,18 +291,21 @@ func wantKeys(t *testing.T, got map[string]string, want map[string]string) {
 	}
 }
 
-func ownBounding(t *testing.T) string {
+// ownStatus is a field of the test process's own status, which a service
+// without caps inherits: its bounding set, and the seccomp mode a container
+// runtime may have set.
+func ownStatus(t *testing.T, key string) string {
 	t.Helper()
 	raw, err := os.ReadFile("/proc/thread-self/status")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, l := range strings.Split(string(raw), "\n") {
-		if v, ok := strings.CutPrefix(l, "CapBnd:"); ok {
+		if v, ok := strings.CutPrefix(l, key+":"); ok {
 			return strings.TrimSpace(v)
 		}
 	}
-	t.Fatal("no CapBnd")
+	t.Fatal("no " + key)
 	return ""
 }
 
@@ -318,7 +321,7 @@ func TestCapsNoneUnchanged(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		wantKeys(t, got, map[string]string{"CapInh": zeroCaps, "CapPrm": zeroCaps, "CapEff": zeroCaps, "CapAmb": zeroCaps, "CapBnd": ownBounding(t), "NoNewPrivs": "1", "Seccomp": "0"})
+		wantKeys(t, got, map[string]string{"CapInh": zeroCaps, "CapPrm": zeroCaps, "CapEff": zeroCaps, "CapAmb": zeroCaps, "CapBnd": ownStatus(t, "CapBnd"), "NoNewPrivs": "1", "Seccomp": ownStatus(t, "Seccomp")})
 		if claim != SandboxClaim(min(landlockABI(), MaxLandlockABI)) {
 			t.Fatalf("claim %q", claim)
 		}
@@ -338,7 +341,7 @@ func TestCapsNetBindService(t *testing.T) {
 	}
 	const bit = "0000000000000400"
 	wantKeys(t, got, map[string]string{
-		"CapInh": bit, "CapPrm": bit, "CapEff": bit, "CapAmb": bit, "CapBnd": bit, "NoNewPrivs": "1", "Seccomp": "0",
+		"CapInh": bit, "CapPrm": bit, "CapEff": bit, "CapAmb": bit, "CapBnd": bit, "NoNewPrivs": "1", "Seccomp": ownStatus(t, "Seccomp"),
 		"bind": "ok", "setresuid": "EPERM", "chown": "EPERM", "drop": "ok", "bind_after_drop": "EACCES",
 	})
 	if claim != SandboxClaim(min(landlockABI(), MaxLandlockABI)) {
@@ -552,7 +555,7 @@ func TestCapsSinetdUnit(t *testing.T) {
 	for _, tc := range []struct {
 		unit, caps, seccomp, claim string
 	}{
-		{shipped, "0x400", "0", SandboxClaim(abi)},
+		{shipped, "0x400", ownStatus(t, "Seccomp"), SandboxClaim(abi)},
 		{three, "0x4c0", "2", SandboxClaim(abi) + idFilterClaim},
 	} {
 		svc, err := unit.Parse([]byte(tc.unit), "sinetd")
