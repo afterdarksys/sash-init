@@ -93,9 +93,15 @@ func TestCapTargetIDs(t *testing.T) {
 		{"caps": []string{"setuid"}, "setuid_to": []int{70001, 70001}},
 		{"caps": []string{"setuid"}, "setuid_to": many},
 		{"caps": []string{"setgid"}, "setgid_to": many},
-		// The supervisor's own ids are trusted principals.
-		{"caps": []string{"setuid"}, "setuid_to": []int{70001, os.Geteuid()}},
-		{"caps": []string{"setgid"}, "setgid_to": []int{os.Getegid()}},
+		// Wrong types, negative, fractional and too large numbers, null.
+		{"caps": []string{"setuid"}, "setuid_to": "70001"},
+		{"caps": []string{"setuid"}, "setuid_to": []int{-1}},
+		{"caps": []string{"setuid"}, "setuid_to": []int64{4294967296}},
+		{"caps": []string{"setuid"}, "setuid_to": []float64{1.5}},
+		{"caps": []string{"setuid"}, "setuid_to": []json.RawMessage{json.RawMessage("1.0")}},
+		{"caps": []string{"setuid"}, "setuid_to": []json.RawMessage{json.RawMessage("1e3")}},
+		{"caps": []string{"setuid"}, "setuid_to": nil},
+		{"caps": []string{"setgid"}, "setgid_to": nil},
 	}
 	for _, sb := range refused {
 		if tok := capsToken(t, sb); tok != "sandbox_ids" {
@@ -103,15 +109,10 @@ func TestCapTargetIDs(t *testing.T) {
 			t.Errorf("%s: %s", raw, tok)
 		}
 	}
-	for _, sb := range []map[string]any{
-		{"caps": []string{"setuid"}, "setuid_to": "70001"},
-		{"caps": []string{"setuid"}, "setuid_to": []int{-1}},
-		{"caps": []string{"setuid"}, "setuid_to": []int64{4294967296}},
-	} {
-		if tok := capsToken(t, sb); tok != "failed" {
-			raw, _ := json.Marshal(sb)
-			t.Errorf("%s: %s", raw, tok)
-		}
+	// The supervisor's own ids are checked at start (sandbox.Launch), not
+	// here: plan may run as anyone.
+	if tok := capsToken(t, map[string]any{"caps": []string{"setuid"}, "setuid_to": []int{os.Geteuid() + 1}}); tok != "" && os.Geteuid()+1 != 0 {
+		t.Errorf("load-time supervisor rule: %s", tok)
 	}
 	svc, err := Parse(capsUnit(t, map[string]any{"caps": []string{"setuid", "setgid", "net_bind_service"}, "setuid_to": many[:MaxIDs], "setgid_to": []int{70001}}), "a")
 	if err != nil {
@@ -154,5 +155,57 @@ func TestSinetdUnitLoads(t *testing.T) {
 	}
 	if len(svc.Sandbox.Caps) != 3 || len(svc.Sandbox.SetuidTo) != 2 {
 		t.Fatalf("%+v", svc.Sandbox)
+	}
+}
+
+// setuid and setgid with a writable /proc (or /, or a path in it) would let
+// the service write a user namespace's id map: sandbox_proc.
+func TestCapIDsNeedReadOnlyProc(t *testing.T) {
+	for _, caps := range []map[string]any{
+		{"caps": []string{"setuid"}, "setuid_to": []int{70001}},
+		{"caps": []string{"setgid"}, "setgid_to": []int{70001}},
+	} {
+		for _, rw := range []string{"/", "/proc", "/proc/1", "/proc/sys"} {
+			sb := map[string]any{"read_write_paths": []string{"/var/lib/x", rw}}
+			for k, v := range caps {
+				sb[k] = v
+			}
+			if tok := capsToken(t, sb); tok != "sandbox_proc" {
+				t.Errorf("%v rw %s: %s", caps["caps"], rw, tok)
+			}
+		}
+		sb := map[string]any{"read_write_paths": []string{"/procx", "/var/proc"}, "read_only_paths": []string{"/proc"}}
+		for k, v := range caps {
+			sb[k] = v
+		}
+		if tok := capsToken(t, sb); tok != "" {
+			t.Errorf("%v: %s", caps["caps"], tok)
+		}
+	}
+	// Without setuid or setgid a writable /proc is allowed, as before.
+	if tok := capsToken(t, map[string]any{"caps": []string{"net_bind_service"}, "read_write_paths": []string{"/proc"}}); tok != "" {
+		t.Fatal(tok)
+	}
+	if err := FinishSandbox(&Sandbox{Caps: []string{"setgid"}, SetgidTo: []uint32{7}, ReadWrite: []string{"/"}}, false, true); fail.Token(err) != "sandbox_proc" {
+		t.Fatal(err)
+	}
+}
+
+// A unit with caps never has gid 0 as its gid or among its groups.
+func TestCapsRefuseGID0(t *testing.T) {
+	for _, exec := range []map[string]any{
+		{"uid": 65534, "gid": 0},
+		{"uid": 65534, "gid": 65534, "groups": []int{5, 0}},
+	} {
+		for _, sb := range []map[string]any{{"caps": []string{"net_bind_service"}}, {"caps": []string{"setgid"}, "setgid_to": []int{70001}}} {
+			raw := unitJSON(t, map[string]any{"name": "a", "exec": []string{"/bin/sh"}, "type": "simple", "ready": "exec", "execution": exec, "sandbox": sb})
+			if _, err := Parse(raw, "a"); fail.Token(err) != "sandbox_ids" {
+				t.Errorf("%v %v: %v", exec, sb, err)
+			}
+		}
+		raw := unitJSON(t, map[string]any{"name": "a", "exec": []string{"/bin/sh"}, "type": "simple", "ready": "exec", "execution": exec, "sandbox": map[string]any{}})
+		if _, err := Parse(raw, "a"); err != nil {
+			t.Errorf("no caps %v: %v", exec, err)
+		}
 	}
 }

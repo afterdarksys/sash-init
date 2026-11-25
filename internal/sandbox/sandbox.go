@@ -85,6 +85,11 @@ func Launch(ctx context.Context, self string, argv []string, sb *unit.Sandbox, n
 	if sb != nil && runsAsRoot(opts.Execution) {
 		return nil, "", nil, fail.E("sandbox_root")
 	}
+	if sb != nil && len(sb.Caps) > 0 {
+		if err := supervisorIDs(sb, opts.Execution, uint32(os.Geteuid()), uint32(os.Getegid())); err != nil {
+			return nil, "", nil, err
+		}
+	}
 	// Only a root supervisor has capabilities to give, and only to an
 	// explicit identity.
 	if sb != nil && len(sb.Caps) > 0 && (os.Geteuid() != 0 || opts.Execution.UID == nil) {
@@ -157,6 +162,29 @@ func Launch(ctx context.Context, self string, argv []string, sb *unit.Sandbox, n
 		return nil, "", nil, err
 	}
 	return cmd, claimNone, notifyR, nil
+}
+
+// supervisorIDs refuses a unit with caps whose target lists, gid or groups
+// name the supervisor's own euid or egid (sandbox_ids). They are trusted
+// principals (the control socket, cgroupfs), and only the supervisor itself
+// knows them, so this is checked at start rather than at load, where
+// `sahinit plan` may run as anyone.
+func supervisorIDs(sb *unit.Sandbox, e unit.Execution, euid, egid uint32) error {
+	for _, id := range sb.SetuidTo {
+		if id == euid {
+			return fail.E("sandbox_ids")
+		}
+	}
+	gids := append(append([]uint32{}, sb.SetgidTo...), e.Groups...)
+	if e.GID != nil {
+		gids = append(gids, *e.GID)
+	}
+	for _, id := range gids {
+		if id == egid {
+			return fail.E("sandbox_ids")
+		}
+	}
+	return nil
 }
 
 // noClone is set once clone3(CLONE_INTO_CGROUP) is found missing (Linux

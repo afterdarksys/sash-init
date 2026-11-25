@@ -592,6 +592,12 @@ func Parse(raw []byte, stem string) (*Service, error) {
 	if sb != nil && (execution.UID == nil || *execution.UID == 0) {
 		return nil, fail.E("sandbox_root")
 	}
+	// A unit with caps never runs with gid 0, in its primary or
+	// supplementary groups: the id filter allows its own gid, and setgroups
+	// may only shrink the list.
+	if sb != nil && len(sb.Caps) > 0 && hasGID0(execution) {
+		return nil, fail.E("sandbox_ids")
+	}
 	limits, err := parseLimits(obj)
 	if err != nil {
 		return nil, err
@@ -720,11 +726,10 @@ func parseSandbox(raw json.RawMessage) (*Sandbox, error) {
 	}
 	for key, dest := range map[string]*[]uint32{"setuid_to": &sb.SetuidTo, "setgid_to": &sb.SetgidTo} {
 		if raw, ok := obj[key]; ok {
-			if err := jsonobj.Unmarshal(raw, dest); err != nil {
-				return nil, err
-			}
-			if *dest == nil {
-				*dest = []uint32{}
+			// A wrong type, a negative, fractional or too large number, or
+			// null, is a target-list error like any other.
+			if err := jsonobj.Unmarshal(raw, dest); err != nil || *dest == nil {
+				return nil, fail.E("sandbox_ids")
 			}
 		}
 	}
@@ -734,18 +739,8 @@ func parseSandbox(raw json.RawMessage) (*Sandbox, error) {
 	if err := FinishSandbox(sb, present, privs); err != nil {
 		return nil, err
 	}
-	// The supervisor's own ids are trusted principals (the control socket,
-	// cgroupfs); a service must not be able to become them.
-	for _, id := range sb.SetuidTo {
-		if id == uint32(os.Geteuid()) {
-			return nil, fail.E("sandbox_ids")
-		}
-	}
-	for _, id := range sb.SetgidTo {
-		if id == uint32(os.Getegid()) {
-			return nil, fail.E("sandbox_ids")
-		}
-	}
+	// The supervisor's own ids are refused at start (sandbox.Launch), where
+	// the supervisor's ids are known; plan may run as anyone.
 	return sb, nil
 }
 
@@ -789,7 +784,34 @@ func FinishSandbox(sb *Sandbox, privsPresent, privs bool) error {
 	if err := checkIDs(sb.SetuidTo, sb.HasCap("setuid")); err != nil {
 		return err
 	}
-	return checkIDs(sb.SetgidTo, sb.HasCap("setgid"))
+	if err := checkIDs(sb.SetgidTo, sb.HasCap("setgid")); err != nil {
+		return err
+	}
+	// Threats: with CAP_SETUID or CAP_SETGID in the initial user namespace a
+	// process may write any id map (user_namespaces(7)), and /proc/PID/uid_map
+	// is reached only through a writable /proc. Landlock keeps /proc
+	// read-only unless a read_write path covers it.
+	if sb.HasCap("setuid") || sb.HasCap("setgid") {
+		for _, p := range sb.ReadWrite {
+			if p == "/" || p == "/proc" || strings.HasPrefix(p, "/proc/") {
+				return fail.E("sandbox_proc")
+			}
+		}
+	}
+	return nil
+}
+
+// hasGID0 reports whether gid 0 is the identity's gid or one of its groups.
+func hasGID0(e Execution) bool {
+	if e.GID != nil && *e.GID == 0 {
+		return true
+	}
+	for _, g := range e.Groups {
+		if g == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // checkIDs checks a setuid_to or setgid_to list: present exactly when the
