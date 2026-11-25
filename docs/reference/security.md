@@ -212,7 +212,10 @@ bounded sizes and times, and a credential that is never printed.
 - **Network access is not confined** by the sandbox.
 - **Capabilities are inherited** by everything a capped service executes,
   across uid changes between non-zero uids, unless the service clears its
-  own ambient and inheritable sets.
+  own ambient and inheritable sets; and even then a program with file
+  capabilities that it execs directly gets those of them the service holds
+  in its permitted set. A child that must hold nothing has to exec with an
+  empty permitted set ([units](units.md#sandbox)).
 - **A `setuid`/`setgid` service can act as every id it lists**: files in its
   Landlock domain, `chmod` of their files anywhere (Landlock cannot restrict
   chmod, chown, utime or truncate by path), their processes and every Unix

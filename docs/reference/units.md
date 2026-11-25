@@ -284,12 +284,26 @@ the sandbox on; every key is optional.
 - **The caps are inherited.** They are ambient, so every program the service
   executes gets them too, and keeps them after a `setuid` from one non-zero
   uid to another (the kernel clears capabilities on a uid change only when
-  leaving uid 0). A service that starts children which must not hold them
-  has to clear its own ambient and inheritable sets first, keeping its
-  permitted and effective sets: `prctl(PR_CAP_AMBIENT,
-  PR_CAP_AMBIENT_CLEAR_ALL)` and a `capset` with an empty inheritable set, on
-  every thread (in Go, `syscall.AllThreadsSyscall`). Children then hold
-  nothing whatever uid they run as.
+  leaving uid 0). Clearing the service's ambient and inheritable sets
+  (`prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL)` and a `capset` with an
+  empty inheritable set, on every thread; in Go `syscall.AllThreadsSyscall`)
+  is **not enough on its own**. It stops a program without file capabilities
+  from inheriting anything, but the service still holds its permitted set,
+  and a program **with file capabilities** (`setcap`; `newuidmap` carries
+  `cap_setuid=ep` on some distributions) that the service, or a child that
+  still holds the permitted set, execs directly gets every capability it
+  names that the parent holds in its permitted set, permitted and, with the
+  file's effective bit, effective: no_new_privs limits it to the parent's
+  permitted set, not to nothing. A file capability outside the unit's caps
+  makes that exec fail with EPERM in every process of the unit (the bounding
+  set is cut to the caps). So a child that must hold nothing has to exec with
+  an empty permitted set: drop the permitted and effective sets (with
+  `capset`) in the forked child before its exec, or exec it through a small
+  program without file capabilities, which starts with nothing and so passes
+  nothing on. `PR_SET_KEEPCAPS` plays no part: it matters only when leaving
+  uid 0, which the id filter refuses. Whatever the service does, its
+  children stay under no_new_privs, Landlock and, with `setuid` or `setgid`,
+  the id filter.
 - **`setuid` and `setgid`** come with the id filter, a seccomp filter
   installed after `no_new_privs`: `setuid`, `setreuid`, `setresuid` and
   `setfsuid` may only name the unit's own uid or a `setuid_to` uid (likewise

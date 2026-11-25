@@ -42,7 +42,9 @@ non-root exec unit, and says exactly what that does and does not limit.
 6. **Inheritance:** granted caps are ambient, so every child the service
    execs inherits them, including across a uid change between non-zero uids.
    A service that must not pass them on has to clear its own ambient and
-   inheritable sets (or drop everything) itself. The unit reference says so.
+   inheritable sets (or drop everything) itself, and that is not enough for
+   a child with file capabilities: see "Inheritance". The unit reference
+   says so.
 
 ## Kernel facts this relies on
 
@@ -82,7 +84,24 @@ a privileged container on kernel 7.0.12-linuxkit, Go 1.26, as root:
   `setresuid(0,0,0)` failed with EPERM.
 - prctl(2) `PR_SET_NO_NEW_PRIVS`: execve grants no privileges that could not
   have been had without it; set-user-ID bits and file capabilities do not
-  work; it is inherited and cannot be unset.
+  work; it is inherited and cannot be unset. **"Do not work" means "grant
+  nothing beyond the caller's permitted set", not "grant nothing":** the
+  kernel computes the file's capabilities and then intersects the new
+  permitted set with the caller's (`cap_bprm_creds_from_file`). Experiment
+  (2026-11-25, kernel 7.0.12-linuxkit, through `sandbox.Launch`, uid 65534):
+  a `[setuid]` unit cleared its ambient and inheritable sets (CapPrm and
+  CapEff stay 0x80, CapInh and CapAmb 0) and exec'd a copy of a binary
+  carrying `cap_setuid=ep` (a `security.capability` xattr, revision 2,
+  effective flag): the child held CapPrm 0x80 and CapEff 0x80, CapInh and
+  CapAmb 0, NoNewPrivs 1, Seccomp 2. The same from a `[setuid,setgid]` unit
+  (0xc0) gave 0x80: only what the file names. Exec'd through a plain
+  binary first (which started with nothing), the same file ran with 0 in
+  every set. In a `[net_bind_service]` unit the exec of that file failed
+  with EPERM, directly or through the plain binary: capabilities(7)
+  "Safety checking for capability-dumb binaries", since CAP_SETUID is not
+  in the cut bounding set. (Added after a builder's report; the first
+  version of this contract said clearing the two sets left children with
+  nothing, which holds only for programs without file capabilities.)
 - capabilities(7) `CAP_SETUID`: arbitrary uid changes; **forge the uid in
   `SCM_CREDENTIALS`**; write a uid mapping in a user namespace. `CAP_SETGID`
   likewise for gids and the supplementary group list. unix(7)
@@ -340,12 +359,24 @@ left as an open decision.
 Granted caps are ambient. Every child the service execs gets the same set,
 and keeps it after a `setuid` to another non-zero uid. sinetd, which forks
 per-service children and drops them to another user, must make sure the
-children get nothing. One way, in a Go service: once at start, on every
-thread (`syscall.AllThreadsSyscall`, cgo off), clear the ambient set
-(`PR_CAP_AMBIENT_CLEAR_ALL`) and capset the inheritable set to 0, keeping
-permitted and effective. A child exec'd after that holds no capability,
-whatever uid it runs as (verified by experiment). Even if a service gets
-this wrong, its children stay inside the id filter and the Landlock domain.
+children get nothing. Two steps, in a Go service:
+1. once at start, on every thread (`syscall.AllThreadsSyscall`, cgo off),
+   clear the ambient set (`PR_CAP_AMBIENT_CLEAR_ALL`) and capset the
+   inheritable set to 0, keeping permitted and effective. A child exec'd
+   after that from a program **without file capabilities** holds no
+   capability, whatever uid it runs as (verified by experiment);
+2. because the forked child still holds the service's permitted set until
+   its exec, a target **with file capabilities** gets those of them that
+   set contains (above). So the child must exec with an empty permitted
+   set: capset permitted, effective and inheritable to 0 in the forked child
+   before exec (possible in C; Go's `os/exec` runs no code there), or exec a
+   small trampoline without file capabilities (for example the service's
+   own binary in a "drop and exec" mode), which starts with nothing and
+   then execs the target, which gains nothing (verified by experiment).
+   `PR_SET_KEEPCAPS` is irrelevant: it only matters when leaving uid 0,
+   which the id filter refuses.
+Even if a service gets this wrong, its children stay inside no_new_privs,
+the id filter and the Landlock domain, and hold at most the granted set.
 
 ## Codes
 
@@ -373,8 +404,10 @@ security.md (guarantees and what is not guaranteed), README (scope line).
   over a port another daemon has not bound yet), act as any listed id, forge
   `SCM_CREDENTIALS`, and connect to any Unix socket and the network.
 - **Hostile child of a service.** Inherits the ambient set unless the
-  service cleared it, and always inherits no_new_privs, Landlock and the id
-  filter. It cannot ptrace or read the memory of its capped parent while it
+  service cleared it, and, even then, gets the granted caps its file
+  capabilities name if it is a file-capability program exec'd while the
+  permitted set is still held; always inherits no_new_privs, Landlock and
+  the id filter. It cannot ptrace or read the memory of its capped parent while it
   holds fewer caps (ptrace(2) step 5.2).
 - **Unit author mistake.** A typo is `sandbox_cap`; a dangerous cap is
   `sandbox_cap_denied`; setuid without a target list, 0 or gid 0 is
@@ -406,6 +439,10 @@ Linux, as root in the privileged container (`internal/sandbox`,
   fail with EPERM; switching to the listed ids works and leaves the caps
   (the kernel rule), dropping them leaves 0; a child exec'd without the drop
   holds the caps (documented hazard), with the drop holds none;
+- file capabilities: after the ambient and inheritable sets are cleared, a
+  `cap_setuid=ep` binary exec'd directly holds 0x80 permitted and effective,
+  exec'd through a plain trampoline holds nothing, and in a
+  `net_bind_service` unit its exec fails with EPERM;
 - Landlock holds with caps: a path outside the domain is EACCES;
 - helper entry check: a helper started with one cap too many, or without
   the ambient caps, refuses with `sandbox_cap` and runs nothing;

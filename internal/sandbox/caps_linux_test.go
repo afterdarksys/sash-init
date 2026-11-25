@@ -128,6 +128,10 @@ func capsProbe(mode string) int {
 	switch mode {
 	case "socket":
 		socketProbe()
+	case "fcap":
+		fileCapsProbe()
+	case "tramp":
+		trampoline()
 	case "status":
 		statusLines(os.Getenv("SAHT_PREFIX"))
 	case "landlock":
