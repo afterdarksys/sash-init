@@ -131,6 +131,10 @@ func capsProbe(mode string) int {
 		_, err := os.ReadFile("/etc/hostname")
 		fmt.Printf("outside=%s\n", errName(err))
 		fmt.Printf("bind=%s\n", errName(bindTCP(os.Getenv("SAHT_PORT"))))
+	case "x32":
+		// An x32 syscall number on x86-64: the id filter kills the process.
+		unix.RawSyscall(unix.SYS_GETPID|x32Bit, 0, 0, 0)
+		fmt.Printf("survived\n")
 	case "netbind":
 		statusLines("")
 		fmt.Printf("bind=%s\n", errName(bindTCP(os.Getenv("SAHT_PORT"))))
@@ -492,7 +496,8 @@ func TestIDFilterShape(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if prog[0] != stmt(ldAbs, offArch) || prog[len(prog)-1] != stmt(ret, retAllow) {
+		// The arch check comes first and kills on a mismatch.
+		if prog[0] != stmt(ldAbs, offArch) || prog[1] != jump(jeq, nativeFilter.audit, 1, 0) || prog[2] != stmt(ret, retKill) || prog[len(prog)-1] != stmt(ret, retAllow) {
 			t.Fatal("frame")
 		}
 		for i, in := range prog {
@@ -572,5 +577,26 @@ func TestCapsSinetdUnit(t *testing.T) {
 		if out.String() != want || claim != tc.claim {
 			t.Fatalf("got %q claim %q, want %q %q", out.String(), claim, want, tc.claim)
 		}
+	}
+}
+
+// On x86-64 an x32 syscall number kills a process under the id filter, so
+// the x32 table cannot reach the unfiltered numbers.
+func TestCapsIDFilterKillsX32(t *testing.T) {
+	self, ident := capsSetup(t)
+	if runtime.GOARCH != "amd64" {
+		t.Skip("x32 is x86-64 only")
+	}
+	var out bytes.Buffer
+	ident.Environment = []string{"SAHT_CAPS_PROBE=x32"}
+	sb := &unit.Sandbox{NoNewPrivs: true, ReadOnly: []string{"/"}, Caps: []string{"setgid"}, SetgidTo: []uint32{65533}}
+	cmd, _, _, err := Launch(context.Background(), self, []string{self}, sb, false, 5*time.Second, Options{Execution: ident, Stdout: &out})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = cmd.Wait()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.Sys().(syscall.WaitStatus).Signal() != syscall.SIGSYS || out.Len() != 0 {
+		t.Fatalf("err %v out %q", err, out.String())
 	}
 }
