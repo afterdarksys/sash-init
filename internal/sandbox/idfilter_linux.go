@@ -22,8 +22,8 @@ import (
 // it then reaches (D-Bus as root, docker.sock as gid docker), and map any id
 // into a new user namespace. The filter bounds every uid and gid change to
 // the unit's own ids and its listed targets, allows setgroups only to clear
-// the list, refuses CLONE_NEWUSER and hides clone3 (whose flags it cannot
-// read). A foreign architecture, and x32 on x86-64, kills the process, so no
+// the list, refuses CLONE_NEWUSER and setns, and hides clone3 (whose flags
+// it cannot read). A foreign architecture, and x32 on x86-64, kills the process, so no
 // other syscall table reaches the unfiltered numbers. It does not stop a
 // forged SCM_CREDENTIALS uid or gid, which the kernel allows any CAP_SETUID
 // or CAP_SETGID holder and a filter cannot see.
@@ -37,6 +37,7 @@ type filterArch struct {
 	setuid, setreuid, setresuid, setfsuid uint32
 	setgid, setregid, setresgid, setfsgid uint32
 	setgroups, unshare, clone, clone3     uint32
+	setns                                 uint32
 }
 
 // seccomp_data offsets: nr, arch, then args at 16 + 8*i. The low 32 bits of
@@ -147,6 +148,11 @@ func buildIDFilter(a filterArch, uids, gids []uint32) ([]unix.SockFilter, error)
 	prog = append(prog, flagBlock(a.unshare, unix.CLONE_NEWUSER)...)
 	prog = append(prog, flagBlock(a.clone, unix.CLONE_NEWUSER)...)
 	prog = append(prog, jump(jeq, a.clone3, 0, 1), stmt(ret, retNoSys))
+	// Joining a user namespace another process made would give a namespace
+	// the filter never saw created (setns(2) needs CAP_SYS_ADMIN in it, which
+	// an owner-uid process has); joining any other kind needs CAP_SYS_ADMIN,
+	// which the unit never holds.
+	prog = append(prog, jump(jeq, a.setns, 0, 1), stmt(ret, retEPERM))
 	prog = append(prog, stmt(ret, retAllow))
 	if len(prog) > unix.BPF_MAXINSNS {
 		return nil, fail.E("failed")
