@@ -692,7 +692,7 @@ func restrict(sb *unit.Sandbox) (*held, int, error) {
 		}
 	}
 	if needsIDFilter(sb) {
-		if err := noProcBeneath(sb.ReadWrite); err != nil {
+		if err := noProcInMounts(sb.ReadWrite); err != nil {
 			return h, 0, err
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"testing/iotest"
 	"time"
 	"unsafe"
 
@@ -687,10 +689,33 @@ func TestProcMounts(t *testing.T) {
 	if err != nil || len(got) != 2 || got[0] != "/proc" || got[1] != "/srv/a b" {
 		t.Fatalf("%q %v", got, err)
 	}
-	for _, bad := range []string{"22 1 0:21 / /proc rw proc proc rw\n", "22 1 - proc\n", "22 1 0:21 / /p\\04 rw - proc proc rw\n"} {
-		if _, err := procMounts([]byte(bad)); err == nil {
-			t.Errorf("%q accepted", bad)
+	// A line over the scanner's 1 MiB limit fails closed rather than ending
+	// the scan early.
+	long := "22 1 0:21 / /srv/x rw - ext4 /dev/x rw," + strings.Repeat("o", 1<<20) + "\n" + "24 1 0:21 / /srv/p rw - proc proc rw\n"
+	for _, bad := range []string{"22 1 0:21 / /proc rw proc proc rw\n", "22 1 - proc\n", "22 1 0:21 / /p\\04 rw - proc proc rw\n", long} {
+		if _, err := procMounts([]byte(bad)); fail.Token(err) != "failed" {
+			t.Errorf("%.60q: %v", bad, err)
 		}
+	}
+}
+
+// A proc mount at or below a path is refused; a sibling sharing its prefix
+// (/srv/ab beside /srv/a) is not. A read error and an fstatfs error fail
+// closed.
+func TestProcBeneathAndErrors(t *testing.T) {
+	info := func(mp string) io.Reader {
+		return strings.NewReader("22 1 0:21 / /proc rw - proc proc rw\n24 1 0:21 / " + mp + " rw - proc proc rw\n")
+	}
+	for mp, want := range map[string]string{"/srv/ab": "", "/srv/a": "sandbox_proc", "/srv/a/x": "sandbox_proc", "/srv": ""} {
+		if err := noProcBeneath(info(mp), []string{"/srv/a"}); fail.Token(err) != want {
+			t.Errorf("%s: %v, want %q", mp, err, want)
+		}
+	}
+	if err := noProcBeneath(iotest.ErrReader(errors.New("read")), []string{"/srv/a"}); fail.Token(err) != "failed" {
+		t.Errorf("read error: %v", err)
+	}
+	if err := notProc(-1); fail.Token(err) != "failed" {
+		t.Errorf("fstatfs error: %v", err)
 	}
 }
 

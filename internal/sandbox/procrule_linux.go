@@ -7,6 +7,7 @@ package sandbox
 import (
 	"bufio"
 	"bytes"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -37,10 +38,21 @@ func notProc(fd int) error {
 	return nil
 }
 
-// noProcBeneath refuses when a procfs is mounted at or beneath any of the
+// noProcInMounts refuses when a procfs is mounted at or beneath any of the
 // paths, as listed in this mount namespace's /proc/self/mountinfo.
-func noProcBeneath(paths []string) error {
-	raw, err := os.ReadFile("/proc/self/mountinfo")
+func noProcInMounts(paths []string) error {
+	f, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
+		return fail.E("failed")
+	}
+	defer f.Close()
+	return noProcBeneath(f, paths)
+}
+
+// noProcBeneath is noProcInMounts reading mountinfo from r. A read error
+// fails closed.
+func noProcBeneath(r io.Reader, paths []string) error {
+	raw, err := io.ReadAll(io.LimitReader(r, 16<<20))
 	if err != nil {
 		return fail.E("failed")
 	}
