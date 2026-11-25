@@ -209,3 +209,35 @@ func TestCapsRefuseGID0(t *testing.T) {
 		}
 	}
 }
+
+// A read_write link to /proc is caught once Load resolves it, so load and
+// plan refuse it with sandbox_proc rather than the start failing.
+func TestLoadProcLinkRefused(t *testing.T) {
+	if st, err := os.Stat("/proc/self"); err != nil || !st.IsDir() {
+		t.Skip("no /proc")
+	}
+	links := t.TempDir()
+	if err := os.Chmod(links, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/proc", links+"/p"); err != nil {
+		t.Fatal(err)
+	}
+	for _, sb := range []map[string]any{
+		{"caps": []string{"setuid"}, "setuid_to": []int{70001}, "read_write_paths": []string{links + "/p"}},
+		{"caps": []string{"setgid"}, "setgid_to": []int{70001}, "read_write_paths": []string{links + "/p"}},
+	} {
+		dir := t.TempDir()
+		writeRaw(t, dir, "a.json", string(capsUnit(t, sb)))
+		// The path as written passes Parse; only the resolved one is /proc.
+		if _, err := Parse(capsUnit(t, sb), "a"); err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		wantLoad(t, dir, "sandbox_proc")
+	}
+	dir := t.TempDir()
+	writeRaw(t, dir, "a.json", string(capsUnit(t, map[string]any{"caps": []string{"net_bind_service"}, "read_write_paths": []string{links + "/p"}})))
+	if _, _, err := Load(dir); err != nil {
+		t.Fatalf("net_bind_service with a /proc link: %v", err)
+	}
+}

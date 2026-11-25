@@ -405,6 +405,12 @@ func Load(dir string) (svcs map[string]*Service, refused map[string]string, err 
 		if err := resolveSandbox(svc.Sandbox); err != nil {
 			return nil, nil, err
 		}
+		// A read_write link to /proc is only seen once resolved.
+		if svc.Sandbox != nil {
+			if err := procRule(svc.Sandbox); err != nil {
+				return nil, nil, err
+			}
+		}
 		out[svc.Name] = svc
 	}
 	if len(out) == 0 {
@@ -787,15 +793,25 @@ func FinishSandbox(sb *Sandbox, privsPresent, privs bool) error {
 	if err := checkIDs(sb.SetgidTo, sb.HasCap("setgid")); err != nil {
 		return err
 	}
-	// Threats: with CAP_SETUID or CAP_SETGID in the initial user namespace a
-	// process may write any id map (user_namespaces(7)), and /proc/PID/uid_map
-	// is reached only through a writable /proc. Landlock keeps /proc
-	// read-only unless a read_write path covers it.
-	if sb.HasCap("setuid") || sb.HasCap("setgid") {
-		for _, p := range sb.ReadWrite {
-			if p == "/" || p == "/proc" || strings.HasPrefix(p, "/proc/") {
-				return fail.E("sandbox_proc")
-			}
+	return procRule(sb)
+}
+
+// procRule refuses a read_write path of /, /proc or below /proc for a unit
+// holding setuid or setgid (sandbox_proc). It runs on the paths as written
+// and again after Load resolves them; the helper also refuses a path that
+// is, or has beneath it, a procfs mount.
+//
+// Threats: with CAP_SETUID or CAP_SETGID in the initial user namespace a
+// process may write any id map (user_namespaces(7)), and /proc/PID/uid_map
+// is reached only through a writable procfs. Landlock keeps /proc
+// read-only unless a read_write path covers it.
+func procRule(sb *Sandbox) error {
+	if !sb.HasCap("setuid") && !sb.HasCap("setgid") {
+		return nil
+	}
+	for _, p := range sb.ReadWrite {
+		if p == "/" || p == "/proc" || strings.HasPrefix(p, "/proc/") {
+			return fail.E("sandbox_proc")
 		}
 	}
 	return nil
