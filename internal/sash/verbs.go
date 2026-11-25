@@ -510,9 +510,10 @@ func (s *Server) spawn(req Request) (Response, error) {
 				plan.Caps = append(plan.Caps, name)
 			}
 		}
-		// The sandbox gives an unprivileged child no ambient caps, so a
-		// cap that passed every check still could not be granted: refused
-		// plainly until a later batch makes caps work.
+		// A sash unit holds no caps (sash_caps), so its ceiling is empty
+		// and every cap is refused above as ceiling. This stays as a second
+		// refusal: spawn caps were never reviewed against the grant model
+		// (docs/design/unit-caps-1.md), and the host refuses them too.
 		if len(plan.Caps) > 0 {
 			return Response{}, fail.E("caps_unsupported")
 		}

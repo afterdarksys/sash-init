@@ -131,6 +131,11 @@ func signalName(sig syscall.Signal) string {
 }
 
 func (h *sashHost) Spawn(plan sash.SpawnPlan, p *sash.Proc) error {
+	// Threats: Launch would give a spawn's caps to the child, and spawn caps
+	// were never reviewed; the sash server refuses them before this.
+	if len(plan.Caps) > 0 {
+		return fail.E("caps_unsupported")
+	}
 	sup, s := h.sup, h.s
 	svc := s.svc
 	if sup.Cgroups == nil || svc.Sandbox == nil || svc.Execution.UID == nil {
