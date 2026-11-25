@@ -15,7 +15,9 @@ this page is what does not, yet. Current scope, stated plainly:
 - sash services (batches 1 and 2) work against test-made grants and floors;
   there is no fleet signer, the grant's `host` is not checked, and spawned
   processes cannot receive capabilities.
-- Sandboxed units cannot hold capabilities, and the network is not confined.
+- Sandboxed exec units may hold only `net_bind_service`, `setuid` and
+  `setgid` (the last two bound to listed ids); sash and deployment units hold
+  none; the network is not confined.
 
 The userspace supervisor now has an experimental Linux PID 1 parent for an
 already available local root. See [host init](host-init.md) for scope and VM tests.

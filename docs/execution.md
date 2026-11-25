@@ -42,9 +42,10 @@ name resolution are not implemented.
 
 Context is applied before the target starts on both direct and Linux sandbox
 launches. The sandbox helper itself runs as the selected identity. Sandbox path
-access and requested capabilities must be available to that identity; failures
-refuse startup rather than weakening the sandbox. No capability elevation is
-provided by this feature. The target still receives `SAHINIT_READY_FD=3` for
+access must be available to that identity; failures refuse startup rather than
+weakening the sandbox. A unit's `caps` are raised by the root supervisor for
+the helper and cut to exactly the granted set before exec (see
+[unit capabilities](design/unit-caps-1.md)). The target still receives `SAHINIT_READY_FD=3` for
 notify readiness.
 
 A unit with a `sandbox` must name a non-root `uid` (`sandbox_root`); the helper
