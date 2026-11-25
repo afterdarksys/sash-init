@@ -167,9 +167,25 @@ func capsProbe(mode string) int {
 		// the filter let the call through.
 		fmt.Printf("clone_newuser=%s\n", errName(sys3(unix.SYS_CLONE, unix.CLONE_NEWUSER|unix.CLONE_FS, 0, 0)))
 		fmt.Printf("clone3=%s\n", errName(sys3(unix.SYS_CLONE3, 0, 0, 0)))
+		// Joining an existing user namespace: EBADF from the kernel if the
+		// filter let it through.
+		fmt.Printf("setns_user=%s\n", errName(sys3(unix.SYS_SETNS, none, unix.CLONE_NEWUSER, 0)))
+		// Every argument is checked, not only the first ones.
+		fmt.Printf("resuid_saved0=%s\n", errName(sys3(unix.SYS_SETRESUID, target, target, zero)))
+		fmt.Printf("resgid_saved0=%s\n", errName(sys3(unix.SYS_SETRESGID, target, target, zero)))
+		fmt.Printf("regid0=%s\n", errName(sys3(unix.SYS_SETREGID, none, zero, 0)))
+		// setfsgid reports no error: the fsgid must simply stay.
+		unix.RawSyscall(unix.SYS_SETFSGID, zero, 0, 0)
+		r1, _, _ = unix.RawSyscall(unix.SYS_SETFSGID, none, 0, 0)
+		fmt.Printf("fsgid_after=%d\n", int32(r1))
 		fmt.Printf("setgroups_clear=%s\n", errName(sys3(unix.SYS_SETGROUPS, 0, 0, 0)))
+		// -1 leaves an id unchanged and is always allowed.
+		fmt.Printf("euid_only=%s\n", errName(sys3(unix.SYS_SETRESUID, none, target, none)))
 		fmt.Printf("gid_target=%s\n", errName(sys3(unix.SYS_SETRESGID, target, target, target)))
 		fmt.Printf("uid_target=%s\n", errName(sys3(unix.SYS_SETRESUID, target, target, target)))
+		// The unit's own uid stays allowed after switching away from it.
+		fmt.Printf("own_back=%s\n", errName(sys3(unix.SYS_SETRESUID, 65534, 65534, 65534)))
+		fmt.Printf("uid_target2=%s\n", errName(sys3(unix.SYS_SETRESUID, target, target, target)))
 		statusLines("after_")
 		probeChild("child_kept_")
 		fmt.Printf("clear=%s\n", errName(clearInherited()))
@@ -368,7 +384,8 @@ func TestCapsSetuidSetgid(t *testing.T) {
 		"uid0": "EPERM", "euid0": "EPERM", "setuid0": "EPERM", "setreuid0": "EPERM", "setfsuid0": "-1",
 		"gid0": "EPERM", "setgid0": "EPERM", "unlisted": "EPERM", "unlisted_gid": "EPERM", "uid0_high": "EPERM",
 		"setgroups": "EPERM", "newuser": "EPERM", "clone_newuser": "EPERM", "clone3": "ENOSYS",
-		"setgroups_clear": "ok", "gid_target": "ok", "uid_target": "ok",
+		"setns_user": "EPERM", "resuid_saved0": "EPERM", "resgid_saved0": "EPERM", "regid0": "EPERM", "fsgid_after": "65534",
+		"setgroups_clear": "ok", "euid_only": "ok", "gid_target": "ok", "uid_target": "ok", "own_back": "ok", "uid_target2": "ok",
 		"after_CapPrm": bits, "after_CapEff": bits, "after_CapAmb": bits,
 		"child_kept_CapPrm": bits, "child_kept_CapAmb": bits, "child_kept_Seccomp": "2",
 		"clear":                "ok",
@@ -601,5 +618,61 @@ func TestCapsIDFilterKillsX32(t *testing.T) {
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.Sys().(syscall.WaitStatus).Signal() != syscall.SIGSYS || out.Len() != 0 {
 		t.Fatalf("err %v out %q", err, out.String())
+	}
+}
+
+// The supervisor's own ids are refused at start: as a target, as the unit's
+// gid, or among its groups. As root the supervisor's gid is 0; as another
+// user the helper never runs (the root check follows), so this check alone
+// decides.
+func TestCapsSupervisorIDsAtStart(t *testing.T) {
+	uid := uint32(os.Geteuid() + 1)
+	euid, egid := uint32(os.Geteuid()), uint32(os.Getegid())
+	other := uint32(65533)
+	for _, tc := range []struct {
+		sb  *unit.Sandbox
+		gid uint32
+	}{
+		{&unit.Sandbox{NoNewPrivs: true, ReadOnly: []string{"/"}, Caps: []string{"setuid"}, SetuidTo: []uint32{euid}}, other},
+		{&unit.Sandbox{NoNewPrivs: true, ReadOnly: []string{"/"}, Caps: []string{"setgid"}, SetgidTo: []uint32{egid}}, other},
+		{&unit.Sandbox{NoNewPrivs: true, ReadOnly: []string{"/"}, Caps: []string{"net_bind_service"}}, egid},
+	} {
+		gid := tc.gid
+		_, _, _, err := Launch(context.Background(), "/unused", []string{"/bin/true"}, tc.sb, false, time.Second, Options{Execution: unit.Execution{UID: &uid, GID: &gid}})
+		if fail.Token(err) != "sandbox_ids" {
+			t.Errorf("%v gid %d: %v", tc.sb.Caps, gid, err)
+		}
+	}
+}
+
+// fakeHelper stands in for the helper and claims the id filter or not,
+// whatever it applied (it applies nothing and runs nothing).
+func fakeHelper(claim string) int {
+	var buf [4096]byte
+	for {
+		n, err := unix.Read(fdSpec, buf[:])
+		if n <= 0 || err != nil {
+			break
+		}
+	}
+	writeFD(fdStatus, okLine(min(landlockABI(), MaxLandlockABI), claim == "filter"))
+	return 0
+}
+
+// A helper whose claim does not match the id filter the unit needs is
+// refused, either way.
+func TestCapsLyingHelperClaim(t *testing.T) {
+	self, ident := capsSetup(t)
+	for _, tc := range []struct {
+		claim string
+		sb    *unit.Sandbox
+	}{
+		{"filter", &unit.Sandbox{NoNewPrivs: true, ReadOnly: []string{"/"}, Caps: []string{"net_bind_service"}}},
+		{"plain", &unit.Sandbox{NoNewPrivs: true, ReadOnly: []string{"/"}, Caps: []string{"setgid"}, SetgidTo: []uint32{65533}}},
+	} {
+		got, claim, err := runCaps(t, self, ident, tc.sb, "SAHT_FAKE_CLAIM="+tc.claim)
+		if fail.Token(err) != "sandbox_cap" || got != nil || claim != "" {
+			t.Errorf("%s: %v %v %q", tc.claim, err, got, claim)
+		}
 	}
 }

@@ -34,6 +34,9 @@ func TestMain(m *testing.M) {
 				unix.Exit(3)
 			}
 		}
+		if claim := os.Getenv("SAHT_FAKE_CLAIM"); claim != "" {
+			unix.Exit(fakeHelper(claim))
+		}
 		unix.Exit(ApplyCLI(os.Args[1:]))
 	}
 	if mode := os.Getenv("SAHT_CAPS_PROBE"); mode != "" {
