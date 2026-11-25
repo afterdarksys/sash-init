@@ -253,3 +253,42 @@ func TestSashFloorBusyIsTransient(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// A sash/3 boot grant loads only for a boot-ops unit, and only when it names
+// the trust file's host_id; a boot-ops unit never runs on a sash/2 grant.
+func TestLoadBootGrantBindings(t *testing.T) {
+	boot := sash.SampleBootGrant("app", "app", "app")
+	boot.Host = "web1"
+	sup, s, _, fleet := grantSup(t, signed(t, boot, testKey("fleet")))
+	write := func(g sash.Grant) {
+		t.Helper()
+		if err := os.WriteFile(s.svc.Sash.Grant, signed(t, g, fleet), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := sup.loadGrant(s.svc); fail.Token(err) != "sash_boot_ops" {
+		t.Fatalf("boot grant on a plain unit: %v", err)
+	}
+	s.svc.Sash.BootOps = true
+	if _, _, err := sup.loadGrant(s.svc); fail.Token(err) != "sash_grant_host" {
+		t.Fatalf("no trust file: %v", err)
+	}
+	sup.Sash.HostID = "web2"
+	if _, _, err := sup.loadGrant(s.svc); fail.Token(err) != "sash_grant_host" {
+		t.Fatalf("another host: %v", err)
+	}
+	sup.Sash.HostID = "web1"
+	if g, _, err := sup.loadGrant(s.svc); err != nil || !g.BootOps() {
+		t.Fatalf("bound: %+v %v", g, err)
+	}
+	empty := boot
+	empty.Host = ""
+	write(empty)
+	if _, _, err := sup.loadGrant(s.svc); fail.Token(err) != "grant_bad_shape" {
+		t.Fatalf("empty host: %v", err)
+	}
+	write(sash.SampleGrant("app", "app", "app"))
+	if _, _, err := sup.loadGrant(s.svc); fail.Token(err) != "sash_boot_ops" {
+		t.Fatalf("sash/2 on a boot-ops unit: %v", err)
+	}
+}

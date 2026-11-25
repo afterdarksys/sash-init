@@ -55,6 +55,12 @@ type SashConfig struct {
 	// StateDir is a private directory for sahinit's sash state (the
 	// mounts it made); "" keeps them in memory only.
 	StateDir string
+	// HostID is the boot-policy trust file's host_id. A sash/3 boot grant
+	// must name exactly it; "" (no trust file) refuses every one.
+	HostID string
+	// HostDecl is host.json: what each boot verb name means. nil is no
+	// declarations.
+	HostDecl *sash.HostDecl
 	// Now is the clock for grant expiry; nil is time.Now.
 	Now func() time.Time
 }
@@ -209,7 +215,9 @@ func waitBounded(ctx context.Context, cmd *exec.Cmd) (int, bool) {
 }
 
 // loadGrant reads and verifies the unit's grant file, then checks its
-// bindings: this service, the identity describe gave, and the floor.
+// bindings: a sash/3 boot grant exactly for a boot-ops unit
+// (sash_boot_ops), a boot grant's host (sash_grant_host), this service, the
+// identity describe gave, and the floor.
 func (sup *Supervisor) loadGrant(svc *unit.Service) (sash.Grant, []byte, error) {
 	if sup.Sash == nil || sup.Sash.Floors == nil || len(sup.Sash.Fleet) != ed25519.PublicKeySize {
 		return sash.Grant{}, nil, fail.E("sash_unavailable")
@@ -229,6 +237,12 @@ func (sup *Supervisor) loadGrant(svc *unit.Service) (sash.Grant, []byte, error) 
 	g, err := sash.VerifyGrant(doc, sup.Sash.Fleet, sup.now().Unix())
 	if err != nil {
 		return sash.Grant{}, nil, err
+	}
+	if g.BootOps() != svc.Sash.BootOps {
+		return sash.Grant{}, nil, fail.E("sash_boot_ops")
+	}
+	if g.BootOps() && (sup.Sash.HostID == "" || g.Host != sup.Sash.HostID) {
+		return sash.Grant{}, nil, fail.E("sash_grant_host")
 	}
 	d := svc.Sash.Desc
 	if g.Service != svc.Name {
@@ -476,6 +490,9 @@ func (sup *Supervisor) startSashLocked(ctx context.Context, s *runtime, gen uint
 	default:
 		return sup.sashFail(s, gen, "failed", false)
 	}
+	if svc.Sash.BootOps {
+		return sup.sashOneshot(s, gen, table)
+	}
 	if !sup.sashReady(ctx, s, gen, g, d) {
 		if s.lost(gen, sup) {
 			return fail.E("failed")
@@ -495,6 +512,33 @@ func (sup *Supervisor) startSashLocked(ctx context.Context, s *runtime, gen uint
 	if table.Running() == 0 {
 		go sup.sashChanged(s, gen)
 	}
+	return nil
+}
+
+// sashOneshot settles a boot-ops unit whose start entry exited 0: every
+// process it spawned must have ended (boot_ops_lingering otherwise, and the
+// start fails), and the unit is then exited and ready, as an exec oneshot
+// that exited 0, for strict boot and the needs gate.
+func (sup *Supervisor) sashOneshot(s *runtime, gen uint64, table *sash.Table) error {
+	if table.Running() > 0 {
+		sup.logf("boot_ops_lingering %s", s.svc.Name)
+		return sup.sashFail(s, gen, "boot_ops_lingering", true)
+	}
+	if sup.Cgroups != nil {
+		if err := sup.Cgroups.KillAll(s.svc.Name, timeoutOf(s.svc)); err != nil {
+			return sup.sashFail(s, gen, fail.Token(err), true)
+		}
+	}
+	sup.sashUnmount(s)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gen != gen || s.stopReq || sup.shuttingDown.Load() {
+		return fail.E("failed")
+	}
+	s.pid = 0
+	s.state, s.ready, s.lastError = "exited", true, ""
+	s.readyAt = clock()
+	s.eventLocked("exited", "", nil)
 	return nil
 }
 

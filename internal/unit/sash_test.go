@@ -218,3 +218,47 @@ func TestApplyDescribe(t *testing.T) {
 		t.Fatalf("never is no: %v %s", err, noRestart.Restart)
 	}
 }
+
+const bootOpsUnit = `{"name":"app","sash":{"file":"/etc/sahinit/services/app.sash","grant":"/etc/sahinit/grants/app.grant","boot_ops":true},"execution":{"uid":990,"gid":990},"sandbox":{}}`
+
+func TestBootOpsUnit(t *testing.T) {
+	svc := mustParse(t, bootOpsUnit, "app")
+	if !svc.Sash.BootOps || !svc.Boot || !svc.Essential {
+		t.Fatalf("%+v", svc.Sash)
+	}
+	if mustParse(t, sashUnit, "app").Sash.BootOps {
+		t.Fatal("opt-in by default")
+	}
+	if _, err := Parse([]byte(strings.Replace(bootOpsUnit, `"name":"app",`, `"name":"app","boot":false,`, 1)), "app"); fail.Token(err) != "sash_boot_ops" {
+		t.Fatalf("boot false: %v", err)
+	}
+	if _, err := Parse([]byte(strings.Replace(bootOpsUnit, `"boot_ops":true`, `"boot_ops":"yes"`, 1)), "app"); err == nil {
+		t.Fatal("boot_ops not a bool")
+	}
+	look := func(string) (uint32, error) { return 990, nil }
+	oneshot := func(d *sash.Description) { d.Restart, d.Entries = nil, []string{"start"} }
+	if err := ApplyDescribe(mustParse(t, bootOpsUnit, "app"), describeOf(t, oneshot), look, look); err != nil {
+		t.Fatalf("oneshot: %v", err)
+	}
+	for name, edit := range map[string]func(*sash.Description){
+		"never":      func(d *sash.Description) { oneshot(d); d.Restart = &sash.Restart{Policy: "never"} },
+		"ready none": func(d *sash.Description) { oneshot(d); d.Ready = &sash.Ready{Kind: "none"} },
+	} {
+		if err := ApplyDescribe(mustParse(t, bootOpsUnit, "app"), describeOf(t, edit), look, look); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	for name, edit := range map[string]func(*sash.Description){
+		"restart on-failure": func(d *sash.Description) { oneshot(d); d.Restart = &sash.Restart{Policy: "on-failure"} },
+		"restart always":     func(d *sash.Description) { oneshot(d); d.Restart = &sash.Restart{Policy: "always"} },
+		"no start":           func(d *sash.Description) { oneshot(d); d.Entries, d.Run = []string{}, []string{"x"} },
+		"run as well":        func(d *sash.Description) { oneshot(d); d.Run = []string{"x"} },
+		"run entry":          func(d *sash.Description) { oneshot(d); d.Entries = []string{"start", "run"} },
+		"ready notify":       func(d *sash.Description) { oneshot(d); d.Ready = &sash.Ready{Kind: "notify"} },
+		"ready tcp":          func(d *sash.Description) { oneshot(d); d.Ready = &sash.Ready{Kind: "tcp", Target: "127.0.0.1:1"} },
+	} {
+		if err := ApplyDescribe(mustParse(t, bootOpsUnit, "app"), describeOf(t, edit), look, look); fail.Token(err) != "sash_boot_ops" {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

@@ -20,6 +20,11 @@ package unit
 // (sash_cgroup_trusted), so the cgroup holds everything it spawns. The
 // unit's ordering, readiness, stop and restart come from sash --describe;
 // a value the unit also sets must agree (ApplyDescribe).
+//
+// A boot-ops unit ("boot_ops": true) may use the boot verbs, so it must be a
+// boot unit and a oneshot that runs once: describe must say restart never,
+// a start entry, no run, and ready none (sash_boot_ops). Whether its grant
+// is a sash/3 boot grant is checked before every start.
 
 import (
 	"encoding/json"
@@ -35,12 +40,14 @@ import (
 type Sash struct {
 	File  string
 	Grant string
+	// BootOps is the unit's opt-in to the boot verbs.
+	BootOps bool
 	// Desc is set by ApplyDescribe at load. A sash unit without it does
 	// not start.
 	Desc *sash.Description
 }
 
-var sashUnitKeys = map[string]struct{}{"file": {}, "grant": {}}
+var sashUnitKeys = map[string]struct{}{"file": {}, "grant": {}, "boot_ops": {}}
 
 // sashOnly are the unit keys a sash unit refuses: the service block owns
 // what they would say. essential is refused too: a sash boot unit is always
@@ -82,6 +89,11 @@ func parseSashUnit(obj map[string]json.RawMessage, stem string) (*Service, error
 		}
 		if err := ExecPath(*dest); err != nil {
 			return nil, fail.E("sash_" + key + "_perm")
+		}
+	}
+	if raw, ok := files["boot_ops"]; ok {
+		if err := jsonobj.Unmarshal(raw, &sh.BootOps); err != nil {
+			return nil, err
 		}
 	}
 	restart := ""
@@ -130,6 +142,9 @@ func parseSashUnit(obj map[string]json.RawMessage, stem string) (*Service, error
 	}
 	if len(execution.Groups) > 0 || execution.Directory != "" || len(execution.Environment) > 0 {
 		return nil, fail.E("sash_unit_field")
+	}
+	if sh.BootOps && !boot {
+		return nil, fail.E("sash_boot_ops")
 	}
 	limits, err := parseLimits(obj)
 	if err != nil {
@@ -228,6 +243,9 @@ func ApplyDescribe(svc *Service, d *sash.Description, lookupUser, lookupGroup fu
 	if err := lifecycleLimits(d); err != nil {
 		return err
 	}
+	if svc.Sash.BootOps && !bootOpsShape(d) {
+		return fail.E("sash_boot_ops")
+	}
 	policy := "no"
 	if d.Restart != nil && d.Restart.Policy != "never" {
 		policy = d.Restart.Policy
@@ -238,6 +256,13 @@ func ApplyDescribe(svc *Service, d *sash.Description, lookupUser, lookupGroup fu
 	svc.Restart = policy
 	svc.Sash.Desc = d
 	return nil
+}
+
+// bootOpsShape is a service block that runs once: restart never, a start
+// entry, no run, and ready none.
+func bootOpsShape(d *sash.Description) bool {
+	return (d.Restart == nil || d.Restart.Policy == "never") && d.Has("start") && !d.Has("run") && len(d.Run) == 0 &&
+		(d.Ready == nil || d.Ready.Kind == "none")
 }
 
 func sameSet(a, b []string) bool {
