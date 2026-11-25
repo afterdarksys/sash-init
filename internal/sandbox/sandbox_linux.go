@@ -79,6 +79,9 @@ const (
 		unix.LANDLOCK_ACCESS_FS_MAKE_DIR |
 		unix.LANDLOCK_ACCESS_FS_MAKE_REG |
 		unix.LANDLOCK_ACCESS_FS_TRUNCATE
+	// accessSocket is the one right a socket_paths entry adds; the entry
+	// lies beneath a read_write path, which grants the rest.
+	accessSocket  = unix.LANDLOCK_ACCESS_FS_MAKE_SOCK
 	accessHandled = accessWrite |
 		unix.LANDLOCK_ACCESS_FS_MAKE_CHAR |
 		unix.LANDLOCK_ACCESS_FS_MAKE_SOCK |
@@ -105,7 +108,7 @@ var specKeys = map[string]struct{}{
 	"no_new_privs": {}, "read_only_paths": {}, "read_write_paths": {}, "caps": {},
 	"notify": {}, "sandbox": {}, "cgroup": {}, "pass": {}, "umask": {}, "rlimits": {},
 	"stdout_file": {}, "stderr_file": {}, "stderr_stdout": {},
-	"setuid_to": {}, "setgid_to": {},
+	"setuid_to": {}, "setgid_to": {}, "socket_paths": {},
 }
 
 var childTokens = map[string]struct{}{
@@ -114,6 +117,7 @@ var childTokens = map[string]struct{}{
 	"exec_relative": {}, "exec_not_file": {}, "failed": {}, "sandbox_root": {},
 	"cgroup_join": {}, "stream_denied": {},
 	"sandbox_cap_denied": {}, "sandbox_ids": {}, "seccomp_unavailable": {}, "sandbox_proc": {},
+	"sandbox_socket": {},
 }
 
 func okLine(abi int, idFilter bool) []byte {
@@ -136,8 +140,9 @@ func init() {
 }
 
 type pathFD struct {
-	fd int
-	rw bool
+	fd     int
+	rw     bool
+	socket bool
 }
 
 type held struct {
@@ -486,6 +491,11 @@ func decodeSandbox(obj map[string]json.RawMessage) (*unit.Sandbox, error) {
 			return nil, err
 		}
 	}
+	if raw, ok := obj["socket_paths"]; ok {
+		if err := jsonobj.Unmarshal(raw, &sb.Sockets); err != nil {
+			return nil, err
+		}
+	}
 	if raw, ok := obj["caps"]; ok {
 		if err := jsonobj.Unmarshal(raw, &sb.Caps); err != nil {
 			return nil, err
@@ -696,9 +706,23 @@ func restrict(sb *unit.Sandbox) (*held, int, error) {
 			return h, 0, err
 		}
 	}
+	for _, p := range sb.Sockets {
+		fd, err := openNoSym(p)
+		if err != nil {
+			return h, 0, err
+		}
+		h.paths = append(h.paths, pathFD{fd: fd, socket: true})
+		var st unix.Stat_t
+		if err := unix.Fstat(fd, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR {
+			return h, 0, fail.E("sandbox_path")
+		}
+	}
 	wants := []uint64{accessRead}
 	if len(sb.ReadWrite) > 0 {
 		wants = append(wants, accessWrite&^accessOptional)
+	}
+	if len(sb.Sockets) > 0 {
+		wants = append(wants, accessSocket)
 	}
 	handled, abi, err := landlockAccess(landlockABI(), wants...)
 	if err != nil {
@@ -713,8 +737,11 @@ func restrict(sb *unit.Sandbox) (*held, int, error) {
 	h.ruleset = int(r1)
 	for _, p := range h.paths {
 		access := uint64(accessRead)
-		if p.rw {
+		switch {
+		case p.rw:
 			access = uint64(accessWrite)
+		case p.socket:
+			access = uint64(accessSocket)
 		}
 		access &= handled
 		rule := unix.LandlockPathBeneathAttr{Allowed_access: access, Parent_fd: int32(p.fd)}
@@ -846,6 +873,7 @@ func marshalSpecPass(sb *unit.Sandbox, notify, join bool, pass int, umask *int, 
 		NoNewPrivs bool              `json:"no_new_privs"`
 		ReadOnly   []string          `json:"read_only_paths"`
 		ReadWrite  []string          `json:"read_write_paths"`
+		Sockets    []string          `json:"socket_paths,omitempty"`
 		Caps       []string          `json:"caps"`
 		SetuidTo   []uint32          `json:"setuid_to,omitempty"`
 		SetgidTo   []uint32          `json:"setgid_to,omitempty"`
@@ -871,6 +899,7 @@ func marshalSpecPass(sb *unit.Sandbox, notify, join bool, pass int, umask *int, 
 		NoNewPrivs: sb.NoNewPrivs,
 		ReadOnly:   emptyStr(sb.ReadOnly),
 		ReadWrite:  emptyStr(sb.ReadWrite),
+		Sockets:    sb.Sockets,
 		Caps:       emptyStr(sb.Caps),
 		SetuidTo:   sb.SetuidTo,
 		SetgidTo:   sb.SetgidTo,

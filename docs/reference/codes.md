@@ -76,7 +76,7 @@ holds the policy token) and, for sash units, `sash_start`, `sash_run`, `sash_sto
 | `limit_invalid` | A `memory_max`, `cpu_max` or `pids_max` value is malformed or out of range. | See [limits](units.md#limits). |
 | `sandbox_root` | A sandboxed unit has no `uid` or uid 0, or the helper found itself running as root with a sandbox. | Give the unit a non-root `execution.uid`. |
 | `sandbox_privs` | `no_new_privs` is `false`. | Remove it or set `true`. |
-| `sandbox_path` | A sandbox path is not absolute and clean, or at launch is missing or contains a symlink. | Use the resolved real path. |
+| `sandbox_path` | A sandbox path is not absolute and clean, or at launch is missing or contains a symlink, or a `socket_paths` entry is not a directory. | Use the resolved real path; create the socket directory before the start. |
 | `sandbox_overlap` | A path is listed twice, or in both lists after resolution. | |
 | `essential_requires_boot` | `"essential": true` on a unit with `"boot": false`. | Remove it; only boot units are essential. |
 | `restart_delay_invalid` | `restart_delay` or `restart_max_delay` is not a duration string from `10ms` to `5m`, or the maximum is below the delay. | See [restart](units.md#types-readiness-and-restart). |
@@ -85,6 +85,7 @@ holds the policy token) and, for sash units, `sash_start`, `sash_run`, `sash_sto
 | `sandbox_cap_denied` | A real Linux capability that is not on the allowlist (`net_bind_service`, `setuid`, `setgid`). | Remove it; the others are never grantable. |
 | `sandbox_ids` | At load: `setuid` without `setuid_to` (or `setgid` without `setgid_to`), a list without its cap, an empty list, a value that is not an integer from 1 to 4294967294 (wrong type, null, negative, fractional, too large), more than 64 ids, a repeated id, 0, or a unit with caps whose gid or groups include 0. At start: a target, the unit's gid or a group is the supervisor's own uid or gid. | List the non-root ids the service switches to; run it with a non-root group. |
 | `sandbox_proc` | A unit with `setuid` or `setgid` has `/`, `/proc` or a path under `/proc` in `read_write_paths` (at load, also after symlinks resolve), or at start an entry that is on a procfs or has a procfs mounted beneath it. A writable procfs would let it write a user namespace's id map. | Keep every procfs out of its writable paths. |
+| `sandbox_socket` | A `socket_paths` entry is not at or beneath any `read_write_paths` entry (at load, also after symlinks resolve, and in the helper). | List the directory, or one above it, in `read_write_paths` too. |
 
 ## Dependency graph
 

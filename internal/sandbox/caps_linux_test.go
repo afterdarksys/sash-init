@@ -126,6 +126,8 @@ func probeChild(prefix string) {
 func capsProbe(mode string) int {
 	runtime.LockOSThread()
 	switch mode {
+	case "socket":
+		socketProbe()
 	case "status":
 		statusLines(os.Getenv("SAHT_PREFIX"))
 	case "landlock":
@@ -201,7 +203,8 @@ func capsProbe(mode string) int {
 
 // sinetdStandIn stands in for /usr/local/sbin/sinetd under the shipped unit:
 // it reports its capability state through capget and prctl (its Landlock
-// domain has no /proc), binds a low port and signals readiness on fd 3.
+// domain has no /proc), binds a low port and its grant socket, and signals
+// readiness on fd 3.
 func sinetdStandIn() int {
 	runtime.LockOSThread()
 	st, err := readCaps()
@@ -222,6 +225,8 @@ func sinetdStandIn() int {
 	fmt.Printf("bind=%s\n", bound)
 	_, err = os.ReadFile("/etc/hostname")
 	fmt.Printf("outside=%s\n", errName(err))
+	// sinetd's grant socket, in its read_write path.
+	fmt.Printf("sock=%s\n", errName(bindUnix("/run/sinetd/grant.sock")))
 	if _, err := unix.Write(3, []byte{'\n'}); err != nil {
 		return 1
 	}
@@ -565,17 +570,25 @@ func TestCapsSinetdUnit(t *testing.T) {
 			t.Cleanup(func() { os.Remove(d) })
 		}
 	}
+	// sinetd owns its runtime directory, so only Landlock decides the bind.
+	if err := os.Chown("/run/sinetd", 65532, 65532); err != nil {
+		t.Fatal(err)
+	}
 	shipped := strings.Replace(string(raw), `"/usr/local/sbin/sinetd"`, strconv.Quote(standIn), 1)
 	three := strings.Replace(shipped, `"caps": ["net_bind_service"]`, `"caps": ["net_bind_service", "setuid", "setgid"], "setuid_to": [70001], "setgid_to": [70001]`, 1)
-	if shipped == string(raw) || three == shipped {
+	sockets := strings.Replace(shipped, `"read_write_paths": ["/run/sinetd"],`, `"read_write_paths": ["/run/sinetd"], "socket_paths": ["/run/sinetd"],`, 1)
+	if shipped == string(raw) || three == shipped || sockets == shipped {
 		t.Fatal("fixture edit did not apply")
 	}
 	abi := min(landlockABI(), MaxLandlockABI)
 	for _, tc := range []struct {
-		unit, caps, seccomp, claim string
+		unit, caps, seccomp, claim, sock string
 	}{
-		{shipped, "0x400", ownStatus(t, "Seccomp"), SandboxClaim(abi)},
-		{three, "0x4c0", "2", SandboxClaim(abi) + idFilterClaim},
+		// As shipped, the grant socket cannot be bound: socket_paths is
+		// the opt-in (docs/design/unit-sockets-1.md).
+		{shipped, "0x400", ownStatus(t, "Seccomp"), SandboxClaim(abi), "EACCES"},
+		{three, "0x4c0", "2", SandboxClaim(abi) + idFilterClaim, "EACCES"},
+		{sockets, "0x400", ownStatus(t, "Seccomp"), SandboxClaim(abi), "ok"},
 	} {
 		svc, err := unit.Parse([]byte(tc.unit), "sinetd")
 		if err != nil {
@@ -595,7 +608,7 @@ func TestCapsSinetdUnit(t *testing.T) {
 		if err := cmd.Wait(); err != nil {
 			t.Fatalf("%v: %s %s", err, out.String(), errb.String())
 		}
-		want := fmt.Sprintf("eff=%[1]s prm=%[1]s inh=%[1]s amb=%[1]s bnd=%[1]s nnp=1 seccomp=%s uid=65532\nbind=low\noutside=EACCES\n", tc.caps, tc.seccomp)
+		want := fmt.Sprintf("eff=%[1]s prm=%[1]s inh=%[1]s amb=%[1]s bnd=%[1]s nnp=1 seccomp=%s uid=65532\nbind=low\noutside=EACCES\nsock=%s\n", tc.caps, tc.seccomp, tc.sock)
 		if out.String() != want || claim != tc.claim {
 			t.Fatalf("got %q claim %q, want %q %q", out.String(), claim, want, tc.claim)
 		}

@@ -53,6 +53,11 @@ code disagree, the code is right and this page is a bug.
 - Landlock restricts file access to the listed paths, with the rights the
   kernel's ABI knows; the absence of Landlock, or of a needed right, refuses
   the start rather than weakening it.
+- No sandboxed unit can create a FIFO, a device node or a symlink anywhere,
+  or a Unix socket outside its `socket_paths`; a `socket_paths` entry must
+  lie at or beneath a `read_write_paths` entry (`sandbox_socket`), so it adds
+  no writable place, and for a `setuid`/`setgid` unit it is covered by the
+  procfs rules below. See [unit sockets](../design/unit-sockets-1.md).
 - Capabilities: a unit without `caps` holds none (the ambient set is
   cleared). A unit with `caps` holds exactly the listed ones from the
   allowlist `net_bind_service`, `setuid`, `setgid`, in its effective,
@@ -215,6 +220,14 @@ bounded sizes and times, and a credential that is never printed.
   and gid, 0 included. The id filter exists on Linux amd64 and arm64 only.
 - **`net_bind_service`** binds any port below 1024 on any address.
 - **Landlock does not confine Unix socket connects** (nor the network).
+  Through ABI 5 there is no Landlock right for `connect(2)` to a pathname
+  socket: a sandboxed service can connect to every socket its uid and gids
+  may open by file permissions, wherever it is. `socket_paths` confines
+  only where the service may *create* a socket, never which ones it reaches.
+- **A socket path in a shared directory** (such as `/tmp`) lets the service
+  bind a well-known socket name there before its real server does and answer
+  that server's clients. Not detected; list only the service's own
+  directories.
 - A sash unit cannot hold capabilities (`sash_caps`), nor can a sash spawn
   (`ceiling`); a deployment unit cannot (`deployment_caps`).
 - **Peer pinning before Linux 6.5** leaves a narrow pid-reuse window between

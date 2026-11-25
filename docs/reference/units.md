@@ -234,7 +234,8 @@ the sandbox on; every key is optional.
 | --- | --- | --- | --- |
 | `no_new_privs` | bool | `true` | Always applied; an explicit `false` is `sandbox_privs`. |
 | `read_only_paths` | array of strings | `[]` | Paths the service may read beneath. |
-| `read_write_paths` | array of strings | `[]` | Paths the service may read and write beneath. |
+| `read_write_paths` | array of strings | `[]` | Paths the service may read and write beneath: create, write, truncate, rename within one directory and remove regular files and directories. Not sockets, FIFOs, device nodes or symlinks, nor a rename or hard link into another directory (below). |
+| `socket_paths` | array of strings | `[]` | Directories in which the service may also create (bind) Unix sockets. Each must be at or beneath a `read_write_paths` entry (`sandbox_socket`). |
 | `caps` | array of strings | `[]` | Capabilities the service holds, from the allowlist `net_bind_service`, `setuid`, `setgid`. Any other real capability is `sandbox_cap_denied`; an unknown name is `sandbox_cap`. |
 | `setuid_to` | array of integers | none | Required with `setuid`, refused without it: the uids the service may switch to besides its own. 1 to 64, unique, from 1 to 4294967294 (`sandbox_ids`, also for any other value or type); not the supervisor's uid (`sandbox_ids` at start). |
 | `setgid_to` | array of integers | none | The same for `setgid` and gids. |
@@ -242,7 +243,9 @@ the sandbox on; every key is optional.
 - The unit must set a non-root `execution.uid` (`sandbox_root`); the helper
   also refuses to apply a sandbox while it runs as uid 0.
 - Paths: absolute, clean, at most 4096 bytes, no NUL (`sandbox_path`); at most
-  64 in total and unique across both lists (`sandbox_overlap`). Each is
+  64 in total across the three lists, unique across the read-only and
+  read-write lists (`sandbox_overlap`) and within each list
+  (`duplicate_field`). Each is
   resolved once at load through the trusted walk (so `/lib` becomes `/usr/lib`
   on merged-/usr); a path that does not resolve is kept as written. At launch
   each path is opened without following any symlink: a link or a missing path
@@ -251,6 +254,23 @@ the sandbox on; every key is optional.
   knows are handled. No Landlock is `landlock_unavailable`; a right the ABI
   lacks is `landlock_abi`. Everything outside the listed paths is denied for
   file access. Network access is **not** confined.
+- Special files: no list grants FIFOs, character or block devices or
+  symlinks; they are EACCES everywhere. A rename or hard link into a
+  different directory is EXDEV, even inside one read_write path (Landlock
+  REFER is not granted); within one directory it works. Device ioctls are
+  refused (ABI 5). See [unit sockets](../design/unit-sockets-1.md).
+- `socket_paths`: each entry grants only the creation of Unix sockets
+  beneath it (Landlock MAKE_SOCK); the read_write path it lies in grants the
+  rest (removing a stale socket, for one). The rule is checked by path
+  components (`/run/ab` is not beneath `/run/a`), as written, again after
+  links are resolved at load, and in the helper (`sandbox_socket`). At launch
+  each entry is opened without following links and must be a directory
+  (`sandbox_path`). An entry equal to its read_write path is the usual case:
+  `"read_write_paths": ["/run/sinetd"], "socket_paths": ["/run/sinetd"]`.
+  Allowed for exec, sash and deployment units. It does **not** limit which
+  sockets the service may connect to: Landlock does not confine `connect`.
+  A shared writable directory such as `/tmp` as a socket path lets the
+  service answer for any socket name there before its real server binds it.
 - Capabilities (see [unit capabilities](../design/unit-caps-1.md)): with
   `caps` empty the service holds no capability (effective, permitted,
   inheritable and ambient sets empty). With `caps` set, the service holds
@@ -366,7 +386,7 @@ run describe; it checks only the unit file and the file permissions.
 | `essential_requires_boot`, `restart_delay_invalid`, `watchdog_invalid` | `essential`, the restart delays, `watchdog` |
 | `edge_empty` | an empty dependency name |
 | `execution_invalid` | any `execution` rule |
-| `sandbox_root`, `sandbox_privs`, `sandbox_path`, `sandbox_overlap`, `sandbox_cap`, `sandbox_cap_denied`, `sandbox_ids`, `sandbox_proc` | sandbox rules |
+| `sandbox_root`, `sandbox_privs`, `sandbox_path`, `sandbox_overlap`, `sandbox_cap`, `sandbox_cap_denied`, `sandbox_ids`, `sandbox_proc`, `sandbox_socket` | sandbox rules |
 | `limit_invalid` | a limit value |
 | `sash_*` | sash unit rules above |
 | `cycle`, `missing_needs`, `missing_after`, `boot_needs` | the dependency graph |

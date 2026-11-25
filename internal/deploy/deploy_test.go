@@ -280,3 +280,25 @@ func TestCapsRefused(t *testing.T) {
 		}
 	}
 }
+
+// A deployment unit may list socket paths: the field is in the signed unit
+// file and grants no capability. One outside its read_write paths is refused.
+func TestSocketPathsStage(t *testing.T) {
+	for sandbox, want := range map[string]string{
+		`{"read_write_paths":["/run/app"],"socket_paths":["/run/app"]}`: "",
+		`{"socket_paths":["/run/app"]}`:                                 "sandbox_socket",
+	} {
+		f := setup(t)
+		u := []byte(`{"name":"app","type":"simple","ready":"exec","exec":["@/artifacts/app"],"boot":true,"essential":true,"execution":{"uid":65534,"gid":65534},"sandbox":` + sandbox + `}`)
+		os.WriteFile(filepath.Join(f.bundle, "units/app.json"), u, 0600)
+		var m Manifest
+		json.Unmarshal(f.manifest, &m)
+		m.Units[0].SHA256 = Hash(u)
+		f.manifest, _ = json.Marshal(m)
+		f.p.CatalogSHA256 = Hash(f.manifest)
+		_, err := f.m.Stage(f.sign(), f.manifest, f.bundle)
+		if fail.Token(err) != want {
+			t.Errorf("%s: %v, want %q", sandbox, err, want)
+		}
+	}
+}

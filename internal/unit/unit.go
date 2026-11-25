@@ -56,7 +56,7 @@ var unitKeys = map[string]struct{}{
 
 var sandboxKeys = map[string]struct{}{
 	"no_new_privs": {}, "read_only_paths": {}, "read_write_paths": {}, "caps": {},
-	"setuid_to": {}, "setgid_to": {},
+	"setuid_to": {}, "setgid_to": {}, "socket_paths": {},
 }
 
 // capByName is the allowlist of capabilities a sandboxed unit may hold
@@ -126,7 +126,10 @@ type Sandbox struct {
 	NoNewPrivs bool
 	ReadOnly   []string
 	ReadWrite  []string
-	Caps       []string
+	// Sockets are directories, each at or beneath a ReadWrite path, in which
+	// the service may also create Unix sockets (docs/design/unit-sockets-1.md).
+	Sockets []string
+	Caps    []string
 	// SetuidTo and SetgidTo are the ids a unit holding setuid or setgid may
 	// switch to (besides its own); the helper's id filter enforces them.
 	SetuidTo []uint32
@@ -711,7 +714,7 @@ func parseSandbox(raw json.RawMessage) (*Sandbox, error) {
 			return nil, err
 		}
 	}
-	var ro, rw, caps []string
+	var ro, rw, socks, caps []string
 	if raw, ok := obj["read_only_paths"]; ok {
 		ro, err = stringsField(raw, maxPaths, false)
 		if err != nil {
@@ -720,6 +723,12 @@ func parseSandbox(raw json.RawMessage) (*Sandbox, error) {
 	}
 	if raw, ok := obj["read_write_paths"]; ok {
 		rw, err = stringsField(raw, maxPaths, false)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if raw, ok := obj["socket_paths"]; ok {
+		socks, err = stringsField(raw, maxPaths, false)
 		if err != nil {
 			return nil, err
 		}
@@ -741,6 +750,7 @@ func parseSandbox(raw json.RawMessage) (*Sandbox, error) {
 	}
 	sb.ReadOnly = ro
 	sb.ReadWrite = rw
+	sb.Sockets = socks
 	sb.Caps = caps
 	if err := FinishSandbox(sb, present, privs); err != nil {
 		return nil, err
@@ -760,7 +770,7 @@ func FinishSandbox(sb *Sandbox, privsPresent, privs bool) error {
 		return fail.E("sandbox_privs")
 	}
 	sb.NoNewPrivs = true
-	if len(sb.ReadOnly)+len(sb.ReadWrite) > maxPaths {
+	if len(sb.ReadOnly)+len(sb.ReadWrite)+len(sb.Sockets) > maxPaths {
 		return fail.E("failed")
 	}
 	seen := make(map[string]struct{})
@@ -772,6 +782,19 @@ func FinishSandbox(sb *Sandbox, privsPresent, privs bool) error {
 			return fail.E("sandbox_overlap")
 		}
 		seen[p] = struct{}{}
+	}
+	seenSock := make(map[string]struct{}, len(sb.Sockets))
+	for _, p := range sb.Sockets {
+		if err := sandboxPath(p); err != nil {
+			return err
+		}
+		if _, ok := seenSock[p]; ok {
+			return fail.E("duplicate_field")
+		}
+		seenSock[p] = struct{}{}
+	}
+	if err := socketRule(sb); err != nil {
+		return err
 	}
 	seenCap := make(map[string]bool, len(sb.Caps))
 	for _, name := range sb.Caps {
@@ -817,6 +840,29 @@ func procRule(sb *Sandbox) error {
 	return nil
 }
 
+// socketRule refuses a socket_paths entry that is not at or beneath a
+// read_write_paths entry (sandbox_socket). It runs on the paths as written
+// and again after Load resolves them.
+//
+// Threats: a socket path grants only Landlock MAKE_SOCK; keeping it inside a
+// writable path means it never adds a place the service may write, so the
+// read_write rules (sandbox_proc, cgroup_trusted) cover it too.
+func socketRule(sb *Sandbox) error {
+	for _, s := range sb.Sockets {
+		ok := false
+		for _, rw := range sb.ReadWrite {
+			if s == rw || rw == "/" || strings.HasPrefix(s, rw+"/") {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return fail.E("sandbox_socket")
+		}
+	}
+	return nil
+}
+
 // hasGID0 reports whether gid 0 is the identity's gid or one of its groups.
 func hasGID0(e Execution) bool {
 	if e.GID != nil && *e.GID == 0 {
@@ -853,7 +899,8 @@ func checkIDs(ids []uint32, held bool) error {
 // untrusted directory, is kept as written; the helper then refuses any link
 // in it with sandbox_path, since it opens paths without following links.
 // Two paths with one target in the same list become one; in both lists they
-// are sandbox_overlap.
+// are sandbox_overlap. A socket path must still lie at or beneath a
+// read_write path once both are resolved (sandbox_socket).
 func resolveSandbox(sb *Sandbox) error {
 	if sb == nil {
 		return nil
@@ -868,8 +915,8 @@ func resolveSandbox(sb *Sandbox) error {
 			return fail.E("sandbox_overlap")
 		}
 	}
-	sb.ReadOnly, sb.ReadWrite = ro, rw
-	return nil
+	sb.ReadOnly, sb.ReadWrite, sb.Sockets = ro, rw, resolvePaths(sb.Sockets)
+	return socketRule(sb)
 }
 
 func resolvePaths(in []string) []string {
