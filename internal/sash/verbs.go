@@ -19,7 +19,8 @@ package sash
 // output and probe notify take a name from this service's table, never a
 // pid. A tcp probe reaches loopback, or private and link-local addresses
 // with allow_private, never a public address, and never looks a name up.
-// Anything else, fs.mount and the file verbs included, is unsupported.
+// The boot verbs (boot.*) have their own gates and checks (boot.go).
+// Anything else is unsupported.
 // A secret env value reaches only the child's environment: it is never in
 // an error, a log line, status or diagnostics (errors here are fixed
 // tokens).
@@ -109,6 +110,13 @@ type Server struct {
 	// Deadline, when set, is when the session's entry runs out: no wait
 	// outlasts it.
 	Deadline time.Time
+	// BootOps is the unit's opt-in to the boot verbs; Entry is the
+	// session's entry; Boot is this boot's shared record; Decl is
+	// host.json (nil: no declarations).
+	BootOps bool
+	Entry   string
+	Boot    *BootState
+	Decl    *HostDecl
 
 	// ctx ends when the session does (Serve sets it); a blocked wait
 	// returns then.
@@ -178,6 +186,9 @@ func (s *Server) Handle(req Request) (resp Response) {
 }
 
 func (s *Server) handle(req Request) (Response, error) {
+	if _, ok := bootKeys[req.Key]; ok {
+		return s.boot(req)
+	}
 	mutates, known := verbKeys[req.Key]
 	if !known || req.Key == "file.write" && (len(req.Argv) == 0 || !fileOps[req.Argv[0]]) {
 		return Response{}, errUnsupported
