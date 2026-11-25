@@ -236,7 +236,7 @@ the sandbox on; every key is optional.
 | `read_only_paths` | array of strings | `[]` | Paths the service may read beneath. |
 | `read_write_paths` | array of strings | `[]` | Paths the service may read and write beneath. |
 | `caps` | array of strings | `[]` | Capabilities the service holds, from the allowlist `net_bind_service`, `setuid`, `setgid`. Any other real capability is `sandbox_cap_denied`; an unknown name is `sandbox_cap`. |
-| `setuid_to` | array of integers | none | Required with `setuid`, refused without it: the uids the service may switch to besides its own. 1 to 64, unique, from 1 to 4294967294, not the supervisor's uid (`sandbox_ids`). |
+| `setuid_to` | array of integers | none | Required with `setuid`, refused without it: the uids the service may switch to besides its own. 1 to 64, unique, from 1 to 4294967294 (`sandbox_ids`, also for any other value or type); not the supervisor's uid (`sandbox_ids` at start). |
 | `setgid_to` | array of integers | none | The same for `setgid` and gids. |
 
 - The unit must set a non-root `execution.uid` (`sandbox_root`); the helper
@@ -274,10 +274,14 @@ the sandbox on; every key is optional.
   installed after `no_new_privs`: `setuid`, `setreuid`, `setresuid` and
   `setfsuid` may only name the unit's own uid or a `setuid_to` uid (likewise
   for gids and `setgid_to`), `setgroups` may only clear the list, and
-  `unshare` or `clone` with `CLONE_NEWUSER` is refused (EPERM); `clone3` is
-  ENOSYS; a foreign architecture or an x32 syscall kills the process. It is
+  `unshare` or `clone` with `CLONE_NEWUSER`, and `setns`, are refused
+  (EPERM); `clone3` is ENOSYS; a foreign architecture or an x32 syscall kills the process. It is
   inherited by every child and cannot be removed. Linux amd64 and arm64 only
-  (`seccomp_unavailable`). Even so the service can act as **every listed
+  (`seccomp_unavailable`). Such a unit may not have `/`, `/proc` or a path
+  under `/proc` in `read_write_paths` (`sandbox_proc`): it could write the
+  id map of a user namespace another process created. A unit with any caps
+  may not run with gid 0 or have 0 in its groups, nor the supervisor's gid
+  (`sandbox_ids`). Even so the service can act as **every listed
   id**: its files inside the Landlock domain, `chmod` of its files anywhere
   (Landlock does not restrict chmod), its processes, and every Unix socket
   that trusts that id. It can also forge the uid and gid in
@@ -362,7 +366,7 @@ run describe; it checks only the unit file and the file permissions.
 | `essential_requires_boot`, `restart_delay_invalid`, `watchdog_invalid` | `essential`, the restart delays, `watchdog` |
 | `edge_empty` | an empty dependency name |
 | `execution_invalid` | any `execution` rule |
-| `sandbox_root`, `sandbox_privs`, `sandbox_path`, `sandbox_overlap`, `sandbox_cap`, `sandbox_cap_denied`, `sandbox_ids` | sandbox rules |
+| `sandbox_root`, `sandbox_privs`, `sandbox_path`, `sandbox_overlap`, `sandbox_cap`, `sandbox_cap_denied`, `sandbox_ids`, `sandbox_proc` | sandbox rules |
 | `limit_invalid` | a limit value |
 | `sash_*` | sash unit rules above |
 | `cycle`, `missing_needs`, `missing_after`, `boot_needs` | the dependency graph |

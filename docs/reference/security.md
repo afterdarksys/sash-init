@@ -61,8 +61,14 @@ code disagree, the code is right and this page is a bug.
   any difference (`sandbox_cap`). Every other capability is refused at load
   (`sandbox_cap_denied`). See [unit capabilities](../design/unit-caps-1.md).
 - `setuid` and `setgid` come only with explicit target lists and a seccomp
-  id filter: no uid or gid 0, no supervisor id, no unlisted id, no
-  supplementary groups, no new user namespace.
+  id filter: no switch to uid or gid 0, the supervisor's ids or an unlisted
+  id, no supplementary groups added, no user namespace created or joined
+  (`setns`). A unit with caps never has gid 0 as its gid or groups, nor the
+  supervisor's ids (checked at start). The user-namespace guarantee also
+  **depends on `/proc` staying read-only** for the unit (`sandbox_proc`):
+  with `CAP_SETUID`/`CAP_SETGID` a process may write the id map of a
+  namespace that another, unfiltered process created. A procfs mounted
+  elsewhere beneath a read_write path is not detected.
 - The status claim (`no_new_privs,landlock_vN,caps`, plus `,id_filter`)
   lists only mechanisms that returned success, and only while a process
   runs.

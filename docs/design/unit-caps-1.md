@@ -88,8 +88,22 @@ a privileged container on kernel 7.0.12-linuxkit, Go 1.26, as root:
   likewise for gids and the supplementary group list. unix(7)
   `SCM_CREDENTIALS` confirms the forging rule. user_namespaces(7): a writer
   with `CAP_SETUID` in the parent namespace "can make mappings to arbitrary
-  user IDs"; since Linux 5.12 mapping uid 0 additionally needs
-  `CAP_SETFCAP`.
+  user IDs"; the writer needs that capability "in the user namespace of the
+  process pid", and a capability in a namespace holds in all its
+  descendants, so a capped process in the initial namespace may write the
+  map of a namespace **another, unfiltered process created**. Since Linux
+  5.12 a uid_map line that maps **parent uid 0** also needs `CAP_SETFCAP`;
+  that rule covers neither gid_map (so outer gid 0 can be mapped) nor any
+  other uid. (Corrected after review: the first version of this contract
+  said "mapping uid 0 needs CAP_SETFCAP" as if that closed the route.)
+- setns(2): joining a user namespace needs `CAP_SYS_ADMIN` in it, and
+  user_namespaces(7) gives a process every capability in a namespace whose
+  owner uid is its euid. So a service that switched to a listed uid could
+  join a namespace that uid made.
+- Landlock applies to procfs opens: in the experiment below, a Landlock
+  domain without `/proc` could not read `/proc/self/status`. An id map is
+  written through `/proc/PID/uid_map`, so with `/proc` outside every
+  read_write path the map route is closed.
 - ptrace(2), "Ptrace access mode checking", step 5.2: access is denied unless
   the caller's capabilities are a superset of the target's permitted set (or
   the caller has `CAP_SYS_PTRACE`). Experiment: an uncapped child of a capped
@@ -164,8 +178,10 @@ What it does **not** limit, which makes the bare grant root-equivalent:
   chown(2), setxattr(2), utime(2) and truncate(2) by path "currently" cannot
   be restricted. `chmod 0666 /etc/shadow` needs no capability for its owner.
 - **User namespaces.** With `CAP_SETUID`/`CAP_SETGID` it can create a user
-  namespace and map any non-zero uid or gid (uid 0 needs `CAP_SETFCAP`
-  since 5.12, which it lacks) when it can write the map file.
+  namespace, or find one an unfiltered process created, and write its id
+  map with any outer uid but 0 (which needs `CAP_SETFCAP` since 5.12) and
+  any outer gid, 0 included, when it can write the map file under `/proc`.
+  It can also join, with setns, a namespace owned by a uid it switched to.
 - **`SCM_CREDENTIALS`.** It can send any uid and gid, 0 included.
 
 So batch 1 requires the target lists, and the helper enforces them with a
@@ -178,6 +194,7 @@ seccomp filter (the "id filter") on top of no_new_privs and Landlock:
 | `setgid`, `setfsgid`, `setregid`, `setresgid` | the same with `setgid_to` and the unit's own gid |
 | `setgroups` | only a size of 0 (clear the list) |
 | `unshare`, `clone` | `CLONE_NEWUSER` in the flags is refused |
+| `setns` | refused (joining a user namespace; every other kind needs `CAP_SYS_ADMIN` anyway) |
 | `clone3` | ENOSYS (its flags are in memory a filter cannot read; libc and Go fall back to `clone`) |
 | any other arch, x32 syscalls on x86-64 | the process is killed |
 
@@ -189,8 +206,30 @@ helper reports the filter exactly when the unit needs it.
 
 Rules for the lists (`sandbox_ids` for any of them): `setuid_to` is present
 exactly when `caps` has `setuid`, `setgid_to` exactly when it has `setgid`;
-each has 1 to 64 unique integers from 1 to 4294967294; neither may hold 0 or
-the supervisor's own uid or gid (both are trusted principals).
+each has 1 to 64 unique integers from 1 to 4294967294 (any other JSON value,
+null included, is `sandbox_ids` too); neither may hold 0. A unit with any
+caps may not have gid 0 as its gid or among its groups (`sandbox_ids`),
+since the filter allows the unit's own gid and setgroups can only shrink the
+list. All of this is checked at load.
+
+The supervisor's own uid and gid (trusted principals) may not be a target,
+the unit's gid or one of its groups. That is checked **at start**, in
+`sandbox.Launch`, by the supervisor itself (`sandbox_ids`): `sahinit plan`
+may run as any user, so at load the supervisor's ids are not known. (The
+first version checked it at load against the caller's euid.) As root the
+supervisor's ids are 0, which the load rules already refuse; the start
+check matters for a non-root supervisor, which cannot give caps anyway, and
+is defence in depth.
+
+**The map route needs a read-only `/proc` (`sandbox_proc`).** The filter
+stops creating and joining user namespaces, but a namespace another,
+unfiltered process created can still have its id map written by a holder of
+`CAP_SETUID`/`CAP_SETGID` (above). A unit with `setuid` or `setgid` may
+therefore not list `/`, `/proc` or any path under `/proc` in
+`read_write_paths` (`sandbox_proc`, at load and again in the helper on the
+resolved paths). The "no user namespace, never uid or gid 0" guarantee
+depends on that rule. It checks paths, not filesystems: a procfs mounted
+somewhere else beneath a read_write path is not detected.
 
 What the id filter still does **not** stop, stated in units.md and
 security.md:
@@ -253,7 +292,8 @@ Interactions:
   caps to the inheritable set, which the bounding set already limits to the
   granted set by step 6.
 - **User namespaces** are not used by sahinit. The id filter refuses new
-  ones for setuid/setgid units. A net_bind_service-only unit may create one
+  ones and setns for setuid/setgid units, and `sandbox_proc` keeps the id
+  maps of other namespaces out of reach. A net_bind_service-only unit may create one
   as any unprivileged process can; that gains nothing outside it.
 - **seccomp** is new to sahinit and used only for the id filter.
 
@@ -276,7 +316,9 @@ left as an open decision.
 - **Sash units:** refused (`sash_caps`). sash scripts run under grants whose
   caps were designed to be refused (`caps_unsupported`); giving the sash
   process itself caps was never reviewed. A sash spawn's caps are now always
-  outside the unit's (empty) ceiling, so they are `ceiling`.
+  outside the unit's (empty) ceiling, so they are `ceiling`; the sash host
+  also refuses a spawn plan with caps (`caps_unsupported`) before anything
+  else, since `Launch` would now honour them.
 - **Deployment units (`--deployment-root`):** refused (`deployment_caps`).
   The signed policy admits a unit file but says nothing about capabilities;
   until it does, a signer should not be able to grant them without saying
@@ -303,7 +345,8 @@ this wrong, its children stay inside the id filter and the Landlock domain.
 | --- | --- |
 | `sandbox_cap` | now: an unknown capability name (load); at start, the supervisor is not root, or the helper could not reach or verify exactly the granted set |
 | `sandbox_cap_denied` | new: a real capability that is not on the allowlist (load) |
-| `sandbox_ids` | new: a `setuid_to`/`setgid_to` rule (load) |
+| `sandbox_ids` | new: a `setuid_to`/`setgid_to` rule, or gid 0 with caps (load); the supervisor's own ids (start) |
+| `sandbox_proc` | new: setuid/setgid with `/`, `/proc` or a path under it writable (load, and in the helper) |
 | `seccomp_unavailable` | new: the id filter cannot be installed on this kernel or architecture (start) |
 | `sash_caps` | new: a sash unit lists caps (load) |
 | `deployment_caps` | new: a deployment unit lists caps (load) |
@@ -316,7 +359,8 @@ security.md (guarantees and what is not guaranteed), README (scope line).
 - **Hostile service.** Holds exactly the granted set; cannot regain others
   (bounding set, no_new_privs); cannot reach files outside Landlock; with
   setuid/setgid cannot become uid or gid 0, the supervisor, or any unlisted
-  id, cannot add supplementary groups, cannot make a user namespace. It
+  id, cannot add supplementary groups, cannot make or join a user namespace
+  or reach another's id map (`sandbox_proc`). It
   **can** bind any port below 1024 on any address (net_bind_service; take
   over a port another daemon has not bound yet), act as any listed id, forge
   `SCM_CREDENTIALS`, and connect to any Unix socket and the network.
@@ -325,8 +369,9 @@ security.md (guarantees and what is not guaranteed), README (scope line).
   filter. It cannot ptrace or read the memory of its capped parent while it
   holds fewer caps (ptrace(2) step 5.2).
 - **Unit author mistake.** A typo is `sandbox_cap`; a dangerous cap is
-  `sandbox_cap_denied`; setuid without a target list, 0, or the supervisor's
-  id is `sandbox_ids`, all at load (`plan` shows them). Listing the wrong
+  `sandbox_cap_denied`; setuid without a target list, 0 or gid 0 is
+  `sandbox_ids` at load (`plan` shows them); the supervisor's own id is
+  `sandbox_ids` at start. Listing the wrong
   user is not detectable: the service gets that user's powers.
 - **Helper bugs between privilege states.** The helper holds setpcap only
   between its start and step 7; it checks the full state on entry, after the
