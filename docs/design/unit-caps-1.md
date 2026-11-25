@@ -99,7 +99,10 @@ a privileged container on kernel 7.0.12-linuxkit, Go 1.26, as root:
   every set. In a `[net_bind_service]` unit the exec of that file failed
   with EPERM, directly or through the plain binary: capabilities(7)
   "Safety checking for capability-dumb binaries", since CAP_SETUID is not
-  in the cut bounding set. (Added after a builder's report; the first
+  in the cut bounding set and the file has the effective bit. The same file
+  without the effective bit (`cap_setuid=p`) ran in that unit holding
+  CapPrm and CapEff 0, and from the `[setuid]` unit held CapPrm 0x80 and
+  CapEff 0. (Added after a builder's report; the first
   version of this contract said clearing the two sets left children with
   nothing, which holds only for programs without file capabilities.)
 - capabilities(7) `CAP_SETUID`: arbitrary uid changes; **forge the uid in
@@ -442,7 +445,9 @@ Linux, as root in the privileged container (`internal/sandbox`,
 - file capabilities: after the ambient and inheritable sets are cleared, a
   `cap_setuid=ep` binary exec'd directly holds 0x80 permitted and effective,
   exec'd through a plain trampoline holds nothing, and in a
-  `net_bind_service` unit its exec fails with EPERM;
+  `net_bind_service` unit its exec fails with EPERM; a `cap_setuid=p`
+  binary holds 0x80 permitted and 0 effective from a `setuid` unit, and runs
+  with nothing in a `net_bind_service` unit;
 - Landlock holds with caps: a path outside the domain is EACCES;
 - helper entry check: a helper started with one cap too many, or without
   the ambient caps, refuses with `sandbox_cap` and runs nothing;

@@ -22,13 +22,14 @@ import (
 func fileCapsProbe() {
 	fmt.Printf("clear=%s\n", errName(clearInherited()))
 	statusLines("svc_")
-	fcap := os.Getenv("SAHT_FCAP")
+	fcap, pcap := os.Getenv("SAHT_FCAP"), os.Getenv("SAHT_PCAP")
 	for _, tc := range []struct {
 		prefix, path string
 		env          []string
 	}{
 		{"direct_", fcap, []string{"SAHT_CAPS_PROBE=status", "SAHT_PREFIX=direct_"}},
 		{"tramp_", os.Args[0], []string{"SAHT_CAPS_PROBE=tramp", "SAHT_FCAP=" + fcap}},
+		{"p_", pcap, []string{"SAHT_CAPS_PROBE=status", "SAHT_PREFIX=p_"}},
 	} {
 		cmd := exec.Command(tc.path)
 		cmd.Env = tc.env
@@ -51,7 +52,8 @@ func trampoline() {
 // file capabilities exec'd while the permitted set is held gets those it
 // names (no_new_privs limits them to the permitted set, not to nothing);
 // exec'd through a plain trampoline it gets nothing; one naming a cap
-// outside the unit's bounding set does not run at all.
+// outside the unit's bounding set does not run at all with the effective bit
+// (=ep), and runs without it when the file has no effective bit (=p).
 func TestCapsFileCapsChild(t *testing.T) {
 	self, ident := capsSetup(t)
 	dir, err := os.MkdirTemp("/tmp", "sahfcap-")
@@ -78,6 +80,15 @@ func TestCapsFileCapsChild(t *testing.T) {
 	if err := unix.Setxattr(fcap, "security.capability", xattr, 0); err != nil {
 		t.Skipf("setxattr: %v", err)
 	}
+	// The same capability without the effective flag: cap_setuid=p.
+	pcap := filepath.Join(dir, "pcap")
+	if err := os.WriteFile(pcap, raw, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binary.LittleEndian.PutUint32(xattr[0:], 0x02000000)
+	if err := unix.Setxattr(pcap, "security.capability", xattr, 0); err != nil {
+		t.Fatal(err)
+	}
 	const setuidBit = "0000000000000080"
 	for _, tc := range []struct {
 		sb   *unit.Sandbox
@@ -87,15 +98,17 @@ func TestCapsFileCapsChild(t *testing.T) {
 			"clear": "ok", "svc_CapPrm": setuidBit, "svc_CapEff": setuidBit, "svc_CapInh": zeroCaps, "svc_CapAmb": zeroCaps,
 			"direct_CapPrm": setuidBit, "direct_CapEff": setuidBit, "direct_CapInh": zeroCaps, "direct_CapAmb": zeroCaps, "direct_NoNewPrivs": "1", "direct_Seccomp": "2",
 			"tramp_self_CapPrm": zeroCaps, "tramp_CapPrm": zeroCaps, "tramp_CapEff": zeroCaps, "tramp_CapAmb": zeroCaps,
+			"p_CapPrm": setuidBit, "p_CapEff": zeroCaps,
 		}},
 		{&unit.Sandbox{NoNewPrivs: true, ReadOnly: []string{"/"}, Caps: []string{"setuid", "setgid"}, SetuidTo: []uint32{65533}, SetgidTo: []uint32{65533}}, map[string]string{
 			"svc_CapPrm": "00000000000000c0", "direct_CapPrm": setuidBit, "direct_CapEff": setuidBit, "tramp_CapPrm": zeroCaps,
 		}},
 		{&unit.Sandbox{NoNewPrivs: true, ReadOnly: []string{"/"}, Caps: []string{"net_bind_service"}}, map[string]string{
 			"svc_CapPrm": "0000000000000400", "direct_run": "EPERM", "tramp_self_CapPrm": zeroCaps, "tramp_exec": "EPERM",
+			"p_run": "", "p_CapPrm": zeroCaps, "p_CapEff": zeroCaps, "p_NoNewPrivs": "1",
 		}},
 	} {
-		got, _, err := runCaps(t, self, ident, tc.sb, "SAHT_CAPS_PROBE=fcap", "SAHT_FCAP="+fcap)
+		got, _, err := runCaps(t, self, ident, tc.sb, "SAHT_CAPS_PROBE=fcap", "SAHT_FCAP="+fcap, "SAHT_PCAP="+pcap)
 		if err != nil {
 			t.Fatal(err)
 		}

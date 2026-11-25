@@ -19,7 +19,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// bindUnix binds a pathname Unix socket at p and removes it again.
+// bindUnix binds a pathname Unix socket at p and reports only the bind:
+// removing the socket again needs REMOVE_FILE, which a read-only path lacks,
+// so its error must not stand in for a refused bind. A socket left behind
+// goes with the test's temporary directory.
 func bindUnix(p string) error {
 	fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
@@ -29,7 +32,8 @@ func bindUnix(p string) error {
 	if err := unix.Bind(fd, &unix.SockaddrUnix{Name: p}); err != nil {
 		return err
 	}
-	return unix.Unlink(p)
+	unix.Unlink(p)
+	return nil
 }
 
 // socketProbe binds a socket in each NAME=DIR of SAHT_BIND, tries every
@@ -173,6 +177,27 @@ func TestSocketPathsBind(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantKeys(t, got, map[string]string{"bind_rw": "ok", "bind_sock": "ok", "bind_other": "EACCES"})
+}
+
+// A directory listed only in read_only_paths, writable by file permissions,
+// never allows a socket: read-only rules carry no MAKE_SOCK.
+func TestSocketPathsReadOnlyBind(t *testing.T) {
+	self, ident := capsSetup(t)
+	d := socketFixture(t, self)
+	for _, sb := range []*unit.Sandbox{
+		{NoNewPrivs: true, ReadOnly: []string{d.bin, "/usr", "/proc", d.ro}},
+		{NoNewPrivs: true, ReadOnly: []string{d.bin, "/usr", "/proc", d.ro}, ReadWrite: []string{d.rw}, Sockets: []string{d.sock}},
+	} {
+		got, _, err := runSocketProbe(t, self, ident, d, sb, "SAHT_BIND=ro="+d.ro+",sock="+d.sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]string{"bind_ro": "EACCES", "bind_sock": "EACCES"}
+		if len(sb.Sockets) > 0 {
+			want["bind_sock"] = "ok"
+		}
+		wantKeys(t, got, want)
+	}
 }
 
 // The helper refuses a socket path outside every read_write path

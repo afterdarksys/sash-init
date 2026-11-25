@@ -294,9 +294,10 @@ the sandbox on; every key is optional.
   still holds the permitted set, execs directly gets every capability it
   names that the parent holds in its permitted set, permitted and, with the
   file's effective bit, effective: no_new_privs limits it to the parent's
-  permitted set, not to nothing. A file capability outside the unit's caps
-  makes that exec fail with EPERM in every process of the unit (the bounding
-  set is cut to the caps). So a child that must hold nothing has to exec with
+  permitted set, not to nothing. A file capability with the effective bit
+  (`=ep`) outside the unit's caps makes that exec fail with EPERM; one
+  without it (`=p`) runs without it (the bounding set is cut to the caps, in
+  every process of the unit). So a child that must hold nothing has to exec with
   an empty permitted set: drop the permitted and effective sets (with
   `capset`) in the forked child before its exec, or exec it through a small
   program without file capabilities, which starts with nothing and so passes
