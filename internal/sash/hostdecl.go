@@ -212,8 +212,9 @@ func ParseHostDecl(doc []byte) (*HostDecl, error) {
 }
 
 // ProfileUnits is every unit host.json names: a unit profile's unit and a
-// static profile's requires. The catalog check at load refuses one that is
-// missing, and a unit profile's unit that is a boot unit.
+// static profile's requires. The catalog check at load refuses a unit
+// profile's unit that is missing or a boot unit; a requires unit that is
+// missing is checked at network apply (net_unguarded).
 func (h *HostDecl) ProfileUnits() (units, requires []string) {
 	if h == nil {
 		return nil, nil

@@ -3,6 +3,7 @@
 package supervise
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/json"
@@ -290,5 +291,84 @@ func TestLoadBootGrantBindings(t *testing.T) {
 	write(sash.SampleGrant("app", "app", "app"))
 	if _, _, err := sup.loadGrant(s.svc); fail.Token(err) != "sash_boot_ops" {
 		t.Fatalf("sash/2 on a boot-ops unit: %v", err)
+	}
+}
+
+// A boot-ops unit's start that exited 0 is a oneshot: with a spawned
+// process still running it fails boot_ops_lingering without a restart;
+// with every process ended it is exited and ready.
+func TestBootOpsOneshot(t *testing.T) {
+	for _, lingering := range []bool{true, false} {
+		sup, s, _, _ := grantSup(t, nil)
+		s.svc.Sash.BootOps = true
+		s.svc.Restart = "always"
+		s.mu.Lock()
+		s.state = "starting"
+		gen := s.gen
+		s.mu.Unlock()
+		table := sash.NewTable()
+		p, err := table.Reserve("worker")
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.Started(4242, time.Now(), nil)
+		if !lingering {
+			p.Exit(0, "", time.Now())
+		}
+		err = sup.sashStarted(context.Background(), s, gen, sash.Grant{}, s.svc.Sash.Desc, table)
+		s.mu.Lock()
+		state, ready, lastErr := s.state, s.ready, s.lastError
+		s.mu.Unlock()
+		if lingering {
+			if fail.Token(err) != "boot_ops_lingering" || state != "failed" || lastErr != "boot_ops_lingering" {
+				t.Fatalf("lingering: %v state %s %s", err, state, lastErr)
+			}
+			continue
+		}
+		if err != nil || state != "exited" || !ready {
+			t.Fatalf("clean: %v state %s ready %v", err, state, ready)
+		}
+		row, err := sup.statusRow("app")
+		if err != nil || row["state"] != "exited" {
+			t.Fatalf("status %v %v", row, err)
+		}
+	}
+}
+
+// Each session's verb server carries the entry it runs and the unit's
+// opt-in, so a stop or reload session can never pass the boot verbs' entry
+// gate.
+func TestSessionServerCarriesEntry(t *testing.T) {
+	sup, s, _, _ := grantSup(t, nil)
+	for _, entry := range []string{"start", "stop", "reload", "check"} {
+		srv := sup.sessionServer(s, entry, entry == "check", time.Minute, sash.Grant{})
+		if srv.Entry != entry || srv.BootOps || srv.Boot == nil || srv.Check != (entry == "check") {
+			t.Fatalf("%s: %+v", entry, srv)
+		}
+	}
+	s.svc.Sash.BootOps = true
+	if !sup.sessionServer(s, "start", false, time.Minute, sash.Grant{}).BootOps {
+		t.Fatal("opt-in not carried")
+	}
+}
+
+// The boot window closes at the first SetBooted(true) and stays closed
+// when shutdown sets it false again; shutting down closes it even when
+// boot never finished.
+func TestBootWindowLatches(t *testing.T) {
+	sup, _, _, _ := grantSup(t, nil)
+	b := sup.bootState()
+	if b.Over() {
+		t.Fatal("closed before boot ended")
+	}
+	sup.SetBooted(true)
+	sup.SetBooted(false)
+	if !b.Over() {
+		t.Fatal("reopened by SetBooted(false)")
+	}
+	sup2, _, _, _ := grantSup(t, nil)
+	sup2.shuttingDown.Store(true)
+	if !sup2.bootState().Over() {
+		t.Fatal("open during shutdown before boot ended")
 	}
 }

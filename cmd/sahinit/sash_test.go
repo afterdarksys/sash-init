@@ -131,3 +131,46 @@ func TestSetupSashRefusals(t *testing.T) {
 		t.Fatal("no sash unit")
 	}
 }
+
+// An unusable host.json leaves out every boot-ops unit, by file, and the
+// rest of the catalog.
+func TestRefuseBootOps(t *testing.T) {
+	svcs := map[string]*unit.Service{
+		"prep": {Name: "prep", Sash: &unit.Sash{BootOps: true}},
+		"app":  {Name: "app", Sash: &unit.Sash{}},
+		"web":  {Name: "web"},
+	}
+	var errb bytes.Buffer
+	if n := refuseBootOps(svcs, nil, &errb); n != 0 || len(svcs) != 3 {
+		t.Fatal("refused with a usable host.json")
+	}
+	if n := refuseBootOps(svcs, fail.E("host_decl_invalid"), &errb); n != 1 || svcs["prep"] != nil || svcs["app"] == nil || svcs["web"] == nil || errb.String() != "host_decl_invalid prep.json\n" {
+		t.Fatalf("%d %q", n, errb.String())
+	}
+}
+
+// A unit network profile must name a catalog unit that is not a boot unit.
+func TestLoadHostDeclUnitProfile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "host.json")
+	if err := os.WriteFile(p, []byte(`{"network": {"dhcp": {"kind": "unit", "unit": "dhcp"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := sashFlags{hostDecl: p}
+	for name, c := range map[string]struct {
+		svcs map[string]*unit.Service
+		want string
+	}{
+		"missing":   {map[string]*unit.Service{}, "host_decl_invalid"},
+		"boot unit": {map[string]*unit.Service{"dhcp": {Name: "dhcp", Boot: true}}, "host_decl_invalid"},
+		"not boot":  {map[string]*unit.Service{"dhcp": {Name: "dhcp"}}, ""},
+	} {
+		_, err := loadHostDecl(f, c.svcs)
+		if got := fail.Token(err); err != nil && got != c.want || err == nil && c.want != "" {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := loadHostDecl(sashFlags{hostDecl: filepath.Join(dir, "none.json")}, nil); fail.Token(err) != "host_decl_perm" {
+		t.Errorf("named file missing: %v", err)
+	}
+}

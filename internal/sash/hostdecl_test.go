@@ -3,6 +3,7 @@
 package sash
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -92,9 +93,37 @@ func TestHostDeclRefusals(t *testing.T) {
 		"unit name":            r(`"unit": "dhcp"`, `"unit": "dh_cp"`).Replace(HostFixture),
 		"requires name":        r(`["firewall"]`, `["-firewall"]`).Replace(HostFixture),
 		"not an object":        `[]`,
+		"null mtu":             r(`"mtu": 1500`, `"mtu": null`).Replace(HostFixture),
+		"null name":            r(`"mtu": 1500`, `"name": null, "mtu": 1500`).Replace(HostFixture),
+		"match value too long": r(`"serial": "DATA0001"`, `"serial": "`+strings.Repeat("x", 257)+`"`).Replace(HostFixture),
+		"unit on static":       r(`"mtu": 1500`, `"unit": "dhcp", "mtu": 1500`).Replace(HostFixture),
+		"65 devices":           `{"devices": {` + table(65, `{"path": "/dev/vdb", "kind": "block", "match": {}}`) + `}}`,
+		"65 mounts":            `{"mounts": {` + table(65, `{"target": "/t", "fstype": "tmpfs", "source": "tmpfs", "options": []}`) + `}}`,
+		"65 profiles":          `{"network": {` + table(65, `{"kind": "unit", "unit": "dhcp"}`) + `}}`,
 	} {
 		if _, err := ParseHostDecl([]byte(doc)); fail.Token(err) != "host_decl_invalid" {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+// table is n entries d0..d(n-1) of entry; a mount entry's "/t" target gets
+// the index appended so targets stay distinct.
+func table(n int, entry string) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		e := strings.Replace(entry, `"/t"`, `"/t`+strconv.Itoa(i)+`"`, 1)
+		b.WriteString(`"d` + strconv.Itoa(i) + `": ` + e)
+	}
+	return b.String()
+}
+
+// 64 entries is the limit, not past it.
+func TestHostDeclTableLimit(t *testing.T) {
+	if _, err := ParseHostDecl([]byte(`{"devices": {` + table(64, `{"path": "/dev/vdb", "kind": "block", "match": {}}`) + `}}`)); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -136,3 +136,19 @@ func TestSampleBootGrantVerifies(t *testing.T) {
 		t.Fatal("sash/2 is not a boot grant")
 	}
 }
+
+// parseV2 takes every version but sash/3, and refuses all but sash/2.
+func TestGrantV2RefusesOtherVersions(t *testing.T) {
+	fleet := seedKey(1)
+	for _, v := range []string{"sash/1", "sash/4", ""} {
+		g := SampleGrant("app", "app", "app")
+		g.V = v
+		doc, err := SignGrant(g, fleet)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := VerifyGrant(doc, fleet.Public().(ed25519.PublicKey), 1); fail.Token(err) != "grant_bad_shape" {
+			t.Errorf("v %q: %v", v, err)
+		}
+	}
+}

@@ -341,8 +341,13 @@ host and ends:
   (`host_decl_invalid`, `host_decl_perm`).
 
 Other boot units order after it with `"needs": ["hostprep"]`. The boot
-verbs run only in its `start` entry, before the boot waves end, at most 64
-times per boot; see [codes](codes.md#sash-units-boot-verbs). In this build
+verbs run only in its `start` entry, before the boot waves end (the window
+never reopens, and it is closed while the supervisor shuts down), at most 64
+times per boot, and each unit is started or stopped by a boot verb at most
+once per boot. "Per boot" is per supervisor process: a supervisor that PID 1
+restarts (a SIGHUP boot retry) starts a fresh record (budget, `boot_once`,
+device waits) without a kernel reboot. Persisting the record across that
+retry, keyed by the kernel's boot id, comes with the kernel side (phase 3); see [codes](codes.md#sash-units-boot-verbs). In this build
 the verb server checks every rule but the kernel side is not wired yet:
 each verb that passes its checks answers `unsupported`.
 

@@ -20,11 +20,20 @@ import (
 )
 
 // bootState is this boot's record for the boot verbs, shared by every
-// session. Its window closes when SetBooted(true) is called.
+// session. Its window closes for good at the first SetBooted(true), and
+// while the supervisor shuts down (also when boot never finished).
+//
+// The record lives in this supervisor process. A supervisor that PID 1
+// restarts (a SIGHUP boot retry) starts a new record: a retry is a new
+// boot for the budget, boot_once and the device records, though the kernel
+// did not reboot. Persisting it under the state directory, keyed by the
+// kernel's boot_id, is phase 3's, when the verbs act on the host.
 func (sup *Supervisor) bootState() *sash.BootState {
-	sup.bootOnce.Do(func() { sup.bootRec = sash.NewBootState(sup.Booted) })
+	sup.bootOnce.Do(func() { sup.bootRec = sash.NewBootState(sup.bootOver) })
 	return sup.bootRec
 }
+
+func (sup *Supervisor) bootOver() bool { return sup.bootEnded.Load() || sup.shuttingDown.Load() }
 
 func (h *sashHost) Unit(name string) (sash.UnitInfo, error) {
 	s, ok := h.sup.runtime(name)

@@ -316,8 +316,7 @@ func (sup *Supervisor) session(ctx context.Context, s *runtime, entry string, ch
 	defer cancel()
 	id := s.addSession(cancel)
 	defer s.dropSession(id)
-	srv := &sash.Server{G: g, Table: s.sashTable(), Host: &sashHost{sup: sup, s: s}, Check: check, CapCeiling: svc.Sandbox.Caps, Deadline: time.Now().Add(timeout),
-		BootOps: svc.Sash.BootOps, Entry: entry, Boot: sup.bootState(), Decl: sup.Sash.HostDecl}
+	srv := sup.sessionServer(s, entry, check, timeout, g)
 	served := make(chan struct{})
 	go func() {
 		sash.Serve(ctx, mine, srv)
@@ -364,6 +363,14 @@ func (sup *Supervisor) session(ctx context.Context, s *runtime, entry string, ch
 	tok := stderrToken.FindString(line)
 	s.recordEntry(entry, code, tok)
 	return code, tok
+}
+
+// sessionServer is the verb server for one session of s: its grant and
+// table, the entry it runs (the boot verbs' gate 4), the unit's boot
+// opt-in, this boot's record and host.json.
+func (sup *Supervisor) sessionServer(s *runtime, entry string, check bool, timeout time.Duration, g sash.Grant) *sash.Server {
+	return &sash.Server{G: g, Table: s.sashTable(), Host: &sashHost{sup: sup, s: s}, Check: check, CapCeiling: s.svc.Sandbox.Caps,
+		Deadline: time.Now().Add(timeout), BootOps: s.svc.Sash.BootOps, Entry: entry, Boot: sup.bootState(), Decl: sup.Sash.HostDecl}
 }
 
 func (s *runtime) addSession(cancel context.CancelFunc) uint64 {
@@ -491,7 +498,13 @@ func (sup *Supervisor) startSashLocked(ctx context.Context, s *runtime, gen uint
 	default:
 		return sup.sashFail(s, gen, "failed", false)
 	}
-	if svc.Sash.BootOps {
+	return sup.sashStarted(ctx, s, gen, g, d, table)
+}
+
+// sashStarted settles a start whose entry exited 0: a boot-ops unit as a
+// oneshot, any other once it is ready.
+func (sup *Supervisor) sashStarted(ctx context.Context, s *runtime, gen uint64, g sash.Grant, d *sash.Description, table *sash.Table) error {
+	if s.svc.Sash.BootOps {
 		return sup.sashOneshot(s, gen, table)
 	}
 	if !sup.sashReady(ctx, s, gen, g, d) {

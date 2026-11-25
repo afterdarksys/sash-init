@@ -273,6 +273,7 @@ func TestBootShapesAndNames(t *testing.T) {
 		"device timeout 030":     {"boot.device", []string{"device", "wait", "data", "timeout", "030"}, "denied"},
 		"device timeout +5":      {"boot.device", []string{"device", "wait", "data", "timeout", "+5"}, "denied"},
 		"device no timeout":      {"boot.device", []string{"device", "wait", "data"}, "denied"},
+		"device timeout word":    {"boot.device", []string{"device", "wait", "data", "until", "30"}, "denied"},
 		"mount path":             {"boot.mount", []string{"mount", "ensure", "/mnt/x"}, "denied"},
 		"mount two names":        {"boot.mount", []string{"mount", "ensure", "data", "scratch"}, "denied"},
 		"mount not granted":      {"boot.mount", []string{"mount", "ensure", "home"}, "denied"},
@@ -325,6 +326,19 @@ func TestBootOnceAndOverlap(t *testing.T) {
 	if _, tok := call(s, "boot.stop", "service", "stop", "app"); tok != "boot_once" {
 		t.Fatalf("stop twice: %s", tok)
 	}
+	// Once per unit per boot, whichever way: start then stop, and stop
+	// then start, are both boot_once.
+	s.G.UnitsStop = append(s.G.UnitsStop, "dhcp")
+	if _, tok := call(s, "boot.stop", "service", "stop", "dhcp"); tok != "boot_once" {
+		t.Fatalf("start then stop: %s", tok)
+	}
+	s.G.UnitsStart = append(s.G.UnitsStart, "getty")
+	if _, tok := call(s, "boot.stop", "service", "stop", "getty"); tok != "" {
+		t.Fatal(tok)
+	}
+	if _, tok := call(s, "boot.start", "service", "start", "getty"); tok != "boot_once" {
+		t.Fatalf("stop then start: %s", tok)
+	}
 	// A host mount at, under or above a file_write root is mount_overlap.
 	for _, root := range []string{"/scratch", "/scratch/run", "/scratch/a/b"} {
 		s, _ := newBootServer(t)
@@ -332,6 +346,21 @@ func TestBootOnceAndOverlap(t *testing.T) {
 		if _, tok := call(s, "boot.mount", "mount", "ensure", "scratch"); tok != "mount_overlap" {
 			t.Errorf("root %s: %s", root, tok)
 		}
+	}
+	// A host mount under a file_write root is mount_overlap too.
+	s, _ = newBootServer(t)
+	m := s.Decl.Mounts["scratch"]
+	m.Target = "/srv/scratch"
+	s.Decl.Mounts["scratch"] = m
+	s.G.FileWrite = []string{"/srv"}
+	if _, tok := call(s, "boot.mount", "mount", "ensure", "scratch"); tok != "mount_overlap" {
+		t.Errorf("under a root: %s", tok)
+	}
+	// A requires unit that is running but not ready does not guard.
+	s, _ = newBootServer(t)
+	s.Host.(*bootHost).status["firewall"] = "running"
+	if _, tok := call(s, "boot.net", "network", "apply", "wan"); tok != "net_unguarded" {
+		t.Fatalf("running, not ready: %s", tok)
 	}
 	// Ready or exited requires let a guarded profile through.
 	s, _ = newBootServer(t)
@@ -404,7 +433,11 @@ func TestResolveModule(t *testing.T) {
 		"dot-dot in the path":  {"kernel/../a.ko:\n", "a", "module_tree"},
 		"unclean":              {"kernel//a.ko:\n", "a", "module_tree"},
 		"dependency not a .ko": {"kernel/a.ko: kernel/b.so\n", "a", "module_tree"},
-		"two lines":            {"kernel/a.ko:\nextra/a.ko.xz:\n", "a", "module_tree"},
+		"two lines":            {"kernel/a.ko:\nextra/a.ko.xz:\n", "a", "module_unknown"},
+		"bad line elsewhere":   {"kernel/a.ko:\n/abs/b.ko:\n", "a", "module_tree"},
+		"line without a colon": {"kernel/a.ko:\nkernel/b.ko\n", "a", "module_tree"},
+		"dots in a name":       {"kernel/a..b.ko:\nkernel/a.ko:\n", "a", "module_tree"},
+		"dependency grammar":   {"kernel/a.ko: kernel/A-B.ko\n", "a", "module_tree"},
 		"two suffixes":         {"kernel/a.ko.gz.xz:\n", "a", "module_unknown"},
 		"no .ko":               {"kernel/a.xz:\n", "a", "module_unknown"},
 		"suffix only":          {"kernel/a.ko.bz2:\n", "a", "module_unknown"},
@@ -415,5 +448,22 @@ func TestResolveModule(t *testing.T) {
 		if _, _, err := ResolveModule([]byte(c.dep), c.mod); fail.Token(err) != c.want {
 			t.Errorf("%s: %v, want %s", name, err, c.want)
 		}
+	}
+}
+
+// The device wait record is per service: another service's wait does not
+// let this one mount through that dev_t.
+func TestBootDeviceRecordPerService(t *testing.T) {
+	s, _ := newBootServer(t)
+	if _, tok := call(s, "boot.device", "device", "wait", "data", "timeout", "5"); tok != "" {
+		t.Fatal(tok)
+	}
+	other := &Server{G: s.G, Table: NewTable(), Host: s.Host, BootOps: true, Entry: "start", Decl: s.Decl, Boot: s.Boot}
+	other.G.Service, other.G.Actor = "netprep", "boot:netprep"
+	if _, tok := call(other, "boot.mount", "mount", "ensure", "data"); tok != "device_changed" {
+		t.Fatalf("another service's wait: %s", tok)
+	}
+	if _, tok := call(s, "boot.mount", "mount", "ensure", "data"); tok != "" {
+		t.Fatalf("own wait: %s", tok)
 	}
 }

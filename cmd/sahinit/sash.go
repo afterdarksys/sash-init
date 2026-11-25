@@ -161,6 +161,27 @@ func loadHostDecl(f sashFlags, svcs map[string]*unit.Service) (*sash.HostDecl, e
 	return decl, nil
 }
 
+// refuseBootOps leaves out every boot-ops unit, named on stderr as
+// "TOKEN FILE", when host.json could not be used (declErr), and returns how
+// many it left out.
+func refuseBootOps(svcs map[string]*unit.Service, declErr error, stderr io.Writer) int {
+	if declErr == nil {
+		return 0
+	}
+	var names []string
+	for n, svc := range svcs {
+		if svc.Sash != nil && svc.Sash.BootOps {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		fmt.Fprintln(stderr, fail.Token(declErr), n+".json")
+		delete(svcs, n)
+	}
+	return len(names)
+}
+
 // setupSash prepares every sash unit in svcs: the sash binary, the fleet
 // key and the floor store, then sash --describe for each, deriving its
 // unit. A unit that fails is left out and named on stderr as "TOKEN FILE";
@@ -209,14 +230,11 @@ func setupSash(f sashFlags, svcs map[string]*unit.Service, root *cgroup.Root, se
 		return refuse("sash_cgroups")
 	}
 	decl, declErr := loadHostDecl(f, svcs)
+	refused := refuseBootOps(svcs, declErr, stderr)
 	lookUser, lookGroup := supervise.LookupIDs()
-	refused := 0
 	for _, n := range names {
-		svc := svcs[n]
-		if svc.Sash.BootOps && declErr != nil {
-			fmt.Fprintln(stderr, fail.Token(declErr), n+".json")
-			delete(svcs, n)
-			refused++
+		svc, ok := svcs[n]
+		if !ok {
 			continue
 		}
 		d, err := supervise.Describe(context.Background(), root, self, bin, svc)

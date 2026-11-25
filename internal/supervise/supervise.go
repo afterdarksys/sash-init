@@ -117,6 +117,9 @@ type Supervisor struct {
 	// booted is set by the caller once the boot waves ended without a
 	// strict failure; catalog changes wait for it (boot_in_progress).
 	booted atomic.Bool
+	// bootEnded latches the first SetBooted(true): the boot verbs' window
+	// never reopens.
+	bootEnded atomic.Bool
 	// bootRec is this boot's record for the boot verbs, made on first use.
 	bootOnce      sync.Once
 	bootRec       *sash.BootState
@@ -1611,8 +1614,15 @@ func argOK(arg string) error {
 }
 
 // SetBooted records whether boot finished (true) or the supervisor is
-// stopping (false); apply, rollback and activate need it set.
-func (sup *Supervisor) SetBooted(v bool) { sup.booted.Store(v) }
+// stopping (false); apply, rollback and activate need it set. The first
+// true also closes the boot verbs' window for good (bootEnded): a later
+// false at shutdown never reopens it.
+func (sup *Supervisor) SetBooted(v bool) {
+	if v {
+		sup.bootEnded.Store(true)
+	}
+	sup.booted.Store(v)
+}
 
 // Booted reports SetBooted's value.
 func (sup *Supervisor) Booted() bool { return sup.booted.Load() }

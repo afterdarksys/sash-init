@@ -118,22 +118,22 @@ type BootHost interface {
 }
 
 // BootState is one boot's record, shared by every session: the boot calls
-// each service made, the devices device wait checked, and the units the
-// boot verbs started and stopped.
+// each service made, the devices each service's device wait checked, and
+// the units a boot verb started or stopped (one set for both, so a unit is
+// touched at most once per boot whichever way).
 type BootState struct {
 	// Over reports that the boot waves have ended.
 	Over func() bool
 
 	mu      sync.Mutex
 	calls   map[string]int
-	devs    map[string]DevID
-	started map[string]bool
-	stopped map[string]bool
+	devs    map[string]DevID // service + "/" + device
+	touched map[string]bool
 }
 
 // NewBootState is a fresh boot record; over reports the end of boot.
 func NewBootState(over func() bool) *BootState {
-	return &BootState{Over: over, calls: map[string]int{}, devs: map[string]DevID{}, started: map[string]bool{}, stopped: map[string]bool{}}
+	return &BootState{Over: over, calls: map[string]int{}, devs: map[string]DevID{}, touched: map[string]bool{}}
 }
 
 func (b *BootState) spend(service string) bool {
@@ -153,27 +153,27 @@ func (b *BootState) Calls(service string) int {
 	return b.calls[service]
 }
 
-func (b *BootState) dev(name string) (DevID, bool) {
+func (b *BootState) dev(service, name string) (DevID, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	d, ok := b.devs[name]
+	d, ok := b.devs[service+"/"+name]
 	return d, ok
 }
 
-func (b *BootState) setDev(name string, d DevID) {
+func (b *BootState) setDev(service, name string, d DevID) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.devs[name] = d
+	b.devs[service+"/"+name] = d
 }
 
-// once marks unit in m and reports whether it was the first time.
-func (b *BootState) once(m map[string]bool, unit string) bool {
+// once marks unit touched and reports whether it was the first time.
+func (b *BootState) once(unit string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if m[unit] {
+	if b.touched[unit] {
 		return false
 	}
-	m[unit] = true
+	b.touched[unit] = true
 	return true
 }
 
@@ -270,7 +270,7 @@ func (s *Server) deviceWait(ctx context.Context, bh BootHost, a []string) (Respo
 	if err != nil {
 		return Response{}, bootErr(err)
 	}
-	s.Boot.setDev(a[2], dev)
+	s.Boot.setDev(s.G.Service, a[2], dev)
 	return rows([]string{"name", "path", "major", "minor"}, Row{"name": a[2], "path": decl.Path,
 		"major": strconv.FormatUint(uint64(dev.Major), 10), "minor": strconv.FormatUint(uint64(dev.Minor), 10)}), nil
 }
@@ -297,9 +297,11 @@ func (s *Server) mountEnsure(ctx context.Context, bh BootHost, a []string) (Resp
 		if !ok {
 			return Response{}, fail.E("not_found")
 		}
-		// No device wait for this device earlier in this boot: there is
-		// no checked dev_t to mount through.
-		dev, waited := s.Boot.dev(m.Source)
+		// No device wait for this device by this service earlier in this
+		// boot: there is no checked dev_t to mount through. This is
+		// device_changed even when the device is also absent (phase 1
+		// note 7): the server cannot look, and the host is not asked.
+		dev, waited := s.Boot.dev(s.G.Service, m.Source)
 		if !waited {
 			return Response{}, fail.E("device_changed")
 		}
@@ -369,11 +371,7 @@ func (s *Server) unitVerb(ctx context.Context, bh BootHost, name string, start b
 	case !start && info.Essential:
 		return nil, false, fail.E("boot_essential")
 	}
-	seen := s.Boot.stopped
-	if start {
-		seen = s.Boot.started
-	}
-	if !s.Boot.once(seen, name) {
+	if !s.Boot.once(name) {
 		return nil, false, fail.E("boot_once")
 	}
 	var row Row
