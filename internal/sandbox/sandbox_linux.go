@@ -113,7 +113,7 @@ var childTokens = map[string]struct{}{
 	"openat2_unavailable": {}, "landlock_unavailable": {}, "landlock_abi": {},
 	"exec_relative": {}, "exec_not_file": {}, "failed": {}, "sandbox_root": {},
 	"cgroup_join": {}, "stream_denied": {},
-	"sandbox_cap_denied": {}, "sandbox_ids": {}, "seccomp_unavailable": {},
+	"sandbox_cap_denied": {}, "sandbox_ids": {}, "seccomp_unavailable": {}, "sandbox_proc": {},
 }
 
 func okLine(abi int, idFilter bool) []byte {
@@ -685,6 +685,16 @@ func restrict(sb *unit.Sandbox) (*held, int, error) {
 			return h, 0, err
 		}
 		h.paths = append(h.paths, pathFD{fd: fd, rw: true})
+		if needsIDFilter(sb) {
+			if err := notProc(fd); err != nil {
+				return h, 0, err
+			}
+		}
+	}
+	if needsIDFilter(sb) {
+		if err := noProcBeneath(sb.ReadWrite); err != nil {
+			return h, 0, err
+		}
 	}
 	wants := []uint64{accessRead}
 	if len(sb.ReadWrite) > 0 {

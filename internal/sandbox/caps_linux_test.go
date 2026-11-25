@@ -676,3 +676,74 @@ func TestCapsLyingHelperClaim(t *testing.T) {
 		}
 	}
 }
+
+// mountinfo parsing: proc mounts only, octal escapes undone, malformed
+// input refused.
+func TestProcMounts(t *testing.T) {
+	raw := []byte("22 1 0:21 / /proc rw,nosuid - proc proc rw\n" +
+		"23 1 0:22 / /sys rw - sysfs sysfs rw\n" +
+		"24 1 0:21 / /srv/a\\040b rw shared:1 - proc proc rw\n")
+	got, err := procMounts(raw)
+	if err != nil || len(got) != 2 || got[0] != "/proc" || got[1] != "/srv/a b" {
+		t.Fatalf("%q %v", got, err)
+	}
+	for _, bad := range []string{"22 1 0:21 / /proc rw proc proc rw\n", "22 1 - proc\n", "22 1 0:21 / /p\\04 rw - proc proc rw\n"} {
+		if _, err := procMounts([]byte(bad)); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+// A procfs reachable through a read_write path other than /proc is
+// refused for a setuid/setgid unit: a bind mount of /proc (both checks), a
+// directory inside such a procfs (fstatfs only: it is no mount point) and a
+// procfs mounted deeper inside a writable tree (mountinfo only). A
+// net_bind_service unit with the same path still starts.
+func TestCapsProcfsInReadWrite(t *testing.T) {
+	self, ident := capsSetup(t)
+	base, err := os.MkdirTemp("/srv", "sahcaps-proc-")
+	if err != nil {
+		t.Skip(err)
+	}
+	// Removed one directory at a time, after the unmounts (cleanups run
+	// last first), so nothing is ever deleted through a procfs.
+	t.Cleanup(func() {
+		for _, d := range []string{base + "/tree/deep/p", base + "/tree/deep", base + "/tree", base + "/bind", base} {
+			os.Remove(d)
+		}
+	})
+	if err := os.Chmod(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bind, tree := base+"/bind", base+"/tree"
+	deep := tree + "/deep/p"
+	for _, d := range []string{bind, deep} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := unix.Mount("/proc", bind, "", unix.MS_BIND, ""); err != nil {
+		t.Skipf("bind mount: %v", err)
+	}
+	t.Cleanup(func() { unix.Unmount(bind, unix.MNT_DETACH) })
+	if err := unix.Mount("proc", deep, "proc", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
+		t.Skipf("proc mount: %v", err)
+	}
+	t.Cleanup(func() { unix.Unmount(deep, unix.MNT_DETACH) })
+	for _, rw := range []string{bind, bind + "/1", tree} {
+		for _, caps := range []*unit.Sandbox{
+			{Caps: []string{"setuid"}, SetuidTo: []uint32{65533}},
+			{Caps: []string{"setgid"}, SetgidTo: []uint32{65533}},
+		} {
+			sb := &unit.Sandbox{NoNewPrivs: true, ReadOnly: []string{"/"}, ReadWrite: []string{rw}, Caps: caps.Caps, SetuidTo: caps.SetuidTo, SetgidTo: caps.SetgidTo}
+			_, _, err := runCaps(t, self, ident, sb, "SAHT_CAPS_PROBE=status")
+			if fail.Token(err) != "sandbox_proc" {
+				t.Errorf("%s %v: %v", rw, caps.Caps, err)
+			}
+		}
+	}
+	sb := &unit.Sandbox{NoNewPrivs: true, ReadOnly: []string{"/"}, ReadWrite: []string{bind}, Caps: []string{"net_bind_service"}}
+	if _, _, err := runCaps(t, self, ident, sb, "SAHT_CAPS_PROBE=status"); err != nil {
+		t.Fatalf("net_bind_service: %v", err)
+	}
+}
