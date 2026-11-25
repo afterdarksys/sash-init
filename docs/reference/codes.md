@@ -242,6 +242,9 @@ holds the policy token) and, for sash units, `sash_start`, `sash_run`, `sash_sto
 | `sash_order_mismatch` | describe's dependency names are invalid, or differ from the unit's `needs`/`after`/`wants`. | Remove the unit's lists or make them match. |
 | `sash_lifecycle_mismatch` | The unit's `restart` disagrees with describe's. | Remove it from the unit. |
 | `sash_lifecycle_limit` | A ready or stop timeout or restart delay over 5 minutes, a restart burst over 5, or a restart window shorter than the restart delay. | Lower it in the script. |
+| `sash_boot_ops` | A boot-ops unit (`"sash": {"boot_ops": true}`) with `"boot": false`, or whose describe is not a oneshot (restart other than never, no `start` entry, a `run`, or ready other than none); before a start, a `sash/3` grant on a unit without `boot_ops` or a `sash/2` grant on one with it; a boot verb from a unit without `boot_ops`. | Fix the unit, the script or the grant. |
+| `host_decl_invalid` | Log `host_decl_invalid FILE` for each boot-ops unit: `host.json` is malformed (an unknown, misspelt or repeated key, a null, over 64 entries in a table, a bad name, path, kind, match attribute, fstype, option or address, two mounts on one target, a public static address without `requires`), or a unit profile names a missing unit or a boot unit. | Fix `host.json`; see [files](config-files.md#host-declarations-hostjson). |
+| `host_decl_perm` | Log `host_decl_perm FILE` for each boot-ops unit: `host.json` is a symlink, fails the trusted walk or the owner and mode rule, is over 64 KiB, or `--host-decl` names a file that does not exist. | `chown root:root`, `chmod 644`. |
 
 ## sash units: grant and floor (before every start)
 
@@ -253,12 +256,13 @@ Every grant failure except `sash_floor_busy` fails the unit without restart and 
 | `sash_grant` | Log prefix: `sash_grant SERVICE TOKEN`. | Read TOKEN below. |
 | `sash_unavailable` | The supervisor has no sash configuration (key or floor store) for a start. | Start `supervise` with the sash flags. |
 | `grant_missing` | The grant file cannot be read. | |
-| `grant_bad_shape` | The grant is not a well-formed `sash/2` document with purpose `service`, or is over 64 KiB, or has a bad root path. | Re-issue it. |
+| `grant_bad_shape` | The grant is not a well-formed `sash/2` document with purpose `service` or `sash/3` document with purpose `boot` (every field present, no null list, each boot list at most 64 names in its grammar with no duplicate), or is over 64 KiB, has a bad root path, or lists `ensure` as a mount source. | Re-issue it. |
 | `grant_bad_sig` | The signature does not verify with the fleet key (also a sash/1 or v1-domain signature). | Re-sign with the current fleet key. |
 | `grant_star` | A list holds `"*"`. | Re-issue with explicit entries. |
 | `grant_root_slash` | `file_read`/`file_write` names `/`. | |
 | `grant_expired` | `exp` is set and in the past. | Re-issue. |
 | `grant_service_mismatch` | The grant's `service` is not this unit's name. | |
+| `sash_grant_host` | A `sash/3` grant's `host` is not the trust file's `host_id`, or the supervisor has no `--trust`. | Issue the grant for this host; start `supervise` with `--trust`. |
 | `grant_identity_mismatch` | The grant's `user`/`group` differ from describe's. | |
 | `sash_grant_revoked` | The grant's `serial` is below the service's floor. | Install a grant with a serial at or above the floor. |
 | `sash_floor_busy` | A floor install held the store lock for over 2 s (every grant check takes that lock, so a concurrent `floor-install` can cause it). Transient; the restart policy may retry. | Retry. |
@@ -302,6 +306,33 @@ Every grant failure except `sash_floor_busy` fails the unit without restart and 
 | `sash_umount` | Log `sash_umount SERVICE TOKEN`: unmounting a service's mount at its end failed. | Unmount by hand. |
 | `sash_output` | Log `sash_output SERVICE NAME STREAM: LINE`: a spawned process's journal line. | |
 | `sash_output_dropped` | Log `sash_output_dropped SERVICE N`: N journal lines over the rate limit (200 at once, 50/s) were not logged. | |
+| `boot_ops_lingering` | A boot-ops unit's `start` entry exited 0 with a spawned process still running; the start fails, without restart. Logged as `boot_ops_lingering SERVICE`. | Start long-running daemons as their own units (`service start`). |
+
+## sash units: boot verbs
+
+A boot verb's refusal reaches the script as `refused boot.KEY: CODE (why)`.
+The gates come first, in this order; each is checked before the next.
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `denied` | The key is not in `entitlements`; the grant is not `sash/3` purpose `boot`; a field other than `key` and `argv` is set; the argv is not the verb's exact shape; or the name is not in the grant's list for that verb. | Extend the grant, or fix the script. |
+| `sash_boot_ops` | The unit has no `boot_ops`. | |
+| `boot_entry` | The session is not a `start` entry (`stop`, `reload`, `check`, `run`). | Call boot verbs from `start`. |
+| `boot_over` | The boot waves have ended. Boot verbs run once per boot. | Reboot to run them again. |
+| `boot_call_limit` | More than 64 boot verbs from this service in this boot, counted across its sessions, refused calls included. | |
+| `not_found` | A device, mount or network profile not declared in `host.json` (or no `host.json`); a unit not in the catalog. | |
+| `device_changed` | `mount ensure` of a device for which no `device wait` succeeded earlier in this boot. | Call `device wait NAME` first. |
+| `mount_overlap` | A host mount's target at, under or above one of the grant's `file_write` roots. | |
+| `net_unguarded` | A static profile's `requires` unit is not ready (or a oneshot that exited 0). | Start the firewall first, or wait for it. |
+| `boot_self` | `service start` or `stop` of the calling unit. | |
+| `boot_chain` | `service start` or `stop` of another boot-ops unit. | |
+| `boot_unit_auto` | `service start` of a boot unit; the boot waves own those. | Give the unit `"boot": false`. |
+| `boot_cycle` | `service start` of a unit that needs or comes after the caller, directly or through other units. | |
+| `boot_essential` | `service stop` of an essential unit. | |
+| `boot_once` | A second `service start` (or a second `stop`) of one unit in this boot; a unit network profile counts as a start. | |
+| `module_tree` | `modules.dep` is over 8 MiB, or the module's line names a path that is absolute, unclean or leaves the tree, or a file that is not a module, or the module has two lines. | Run `depmod`. |
+| `module_unknown` | No `modules.dep` line's file is the module (the base name less `.ko` and at most one of `.xz`, `.zst`, `.gz`, `-` read as `_`). | Use the kernel's canonical name. |
+| `unsupported` | The kernel side of the boot verbs is not built yet (phase 3): every verb that passes its checks answers this. | |
 
 ## Boot policy (`sahinit policy`)
 

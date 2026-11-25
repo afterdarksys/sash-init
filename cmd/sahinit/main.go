@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/afterdarksys/sahinit/internal/bootpolicy"
 	"github.com/afterdarksys/sahinit/internal/cgroup"
 	"github.com/afterdarksys/sahinit/internal/deploy"
 	"github.com/afterdarksys/sahinit/internal/fail"
@@ -32,7 +33,7 @@ const usageText = policyUsage + sashUsage +
 	"usage: sahinit ctl --socket PATH --dir DIR diff|apply\n" +
 	"usage: sahinit plan --dir DIR\n" +
 	"usage: sahinit validate --dir DIR\n" +
-	"usage: sahinit supervise --dir DIR --socket PATH [--deployment-root DIR --trust FILE [--trust-system-clock]] [--uid UID]... [--gid GID] [--no-cgroups] [--cgroup-sweep DURATION] [--boot-strict] [--log-dir DIR] [--sash PATH] [--sash-fleet-pub PATH] [--sash-floor-dir DIR]\n" +
+	"usage: sahinit supervise --dir DIR --socket PATH [--deployment-root DIR --trust FILE [--trust-system-clock]] [--uid UID]... [--gid GID] [--no-cgroups] [--cgroup-sweep DURATION] [--boot-strict] [--log-dir DIR] [--trust FILE] [--host-decl PATH] [--sash PATH] [--sash-fleet-pub PATH] [--sash-floor-dir DIR]\n" +
 	"usage: sahinit migrate --from FORMAT --source DIR [--out NEW_DIR] [--boot]\n"
 
 func main() {
@@ -207,6 +208,7 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&sf.binary, "sash", "/usr/bin/sash", "")
 	fs.StringVar(&sf.fleetPub, "sash-fleet-pub", "", "")
 	fs.StringVar(&sf.floorDir, "sash-floor-dir", "", "")
+	fs.StringVar(&sf.hostDecl, "host-decl", "", "")
 	var uids []uint32
 	passed := false
 	fs.Func("uid", "", func(s string) error {
@@ -228,7 +230,7 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 		gid = &g
 		return nil
 	})
-	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || (*dir == "") == (*deploymentRoot == "") || (*deploymentRoot == "" && (*trustPath != "" || *trustClock)) || *sock == "" || *sweep < 0 {
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || (*dir == "") == (*deploymentRoot == "") || (*deploymentRoot == "" && *trustClock) || (*deploymentRoot != "" && sf.hostDecl != "") || *sock == "" || *sweep < 0 {
 		fmt.Fprint(stderr, usageText)
 		return 2
 	}
@@ -280,6 +282,20 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintln(stderr, "failed")
 		return 2
+	}
+	if *trustPath != "" {
+		// The trust file's host_id binds sash/3 boot grants; with --dir it
+		// is read for that alone.
+		raw, err := policyFile(*trustPath, 64*1024, true)
+		var trust bootpolicy.Trust
+		if err == nil {
+			trust, err = bootpolicy.DecodeTrust(raw)
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, fail.Token(err))
+			return 2
+		}
+		sf.hostID = trust.HostID
 	}
 	sashCfg, sashRefused := setupSash(sf, svcs, root, self, stderr)
 	if *strict && sashRefused > 0 {

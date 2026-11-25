@@ -316,7 +316,8 @@ func (sup *Supervisor) session(ctx context.Context, s *runtime, entry string, ch
 	defer cancel()
 	id := s.addSession(cancel)
 	defer s.dropSession(id)
-	srv := &sash.Server{G: g, Table: s.sashTable(), Host: &sashHost{sup: sup, s: s}, Check: check, CapCeiling: svc.Sandbox.Caps, Deadline: time.Now().Add(timeout)}
+	srv := &sash.Server{G: g, Table: s.sashTable(), Host: &sashHost{sup: sup, s: s}, Check: check, CapCeiling: svc.Sandbox.Caps, Deadline: time.Now().Add(timeout),
+		BootOps: svc.Sash.BootOps, Entry: entry, Boot: sup.bootState(), Decl: sup.Sash.HostDecl}
 	served := make(chan struct{})
 	go func() {
 		sash.Serve(ctx, mine, srv)

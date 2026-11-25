@@ -22,13 +22,16 @@ type Config struct {
 	LogDir string
 	// DeploymentRoot and Trust select a verified deployment catalog
 	// instead of --dir; TrustClock accepts the system clock as the initial
-	// time anchor.
+	// time anchor. With --dir, Trust is read only for its host_id, which
+	// binds sash/3 boot grants.
 	DeploymentRoot, Trust string
 	TrustClock            bool
 	// Sash settings passed to the supervisor when set (supervise's --sash,
 	// --sash-fleet-pub and --sash-floor-dir); without them sash units are
 	// refused at load, which strict boot treats as a failed boot.
 	Sash, SashFleetPub, SashFloorDir string
+	// HostDecl is supervise's --host-decl (--dir only).
+	HostDecl string
 }
 
 // SuperviseArgs is the supervisor's command line for c.
@@ -40,7 +43,10 @@ func (c Config) SuperviseArgs() []string {
 			args = append(args, "--trust-system-clock")
 		}
 	}
-	for _, f := range []struct{ name, value string }{{"--log-dir", c.LogDir}, {"--sash", c.Sash}, {"--sash-fleet-pub", c.SashFleetPub}, {"--sash-floor-dir", c.SashFloorDir}} {
+	if c.DeploymentRoot == "" && c.Trust != "" {
+		args = append(args, "--trust", c.Trust)
+	}
+	for _, f := range []struct{ name, value string }{{"--log-dir", c.LogDir}, {"--sash", c.Sash}, {"--sash-fleet-pub", c.SashFleetPub}, {"--sash-floor-dir", c.SashFloorDir}, {"--host-decl", c.HostDecl}} {
 		if f.value != "" {
 			args = append(args, f.name, f.value)
 		}
@@ -63,6 +69,7 @@ func Parse(args []string) (Config, error) {
 	f.StringVar(&c.Sash, "sash", "", "")
 	f.StringVar(&c.SashFleetPub, "sash-fleet-pub", "", "")
 	f.StringVar(&c.SashFloorDir, "sash-floor-dir", "", "")
+	f.StringVar(&c.HostDecl, "host-decl", "", "")
 	if err := f.Parse(args); err != nil {
 		return c, err
 	}
@@ -70,12 +77,12 @@ func Parse(args []string) (Config, error) {
 		(c.Recovery != "" && !filepath.IsAbs(c.Recovery)) || c.ShutdownTimeout < time.Second || c.ShutdownTimeout > 10*time.Minute {
 		return c, fmt.Errorf("invalid init configuration")
 	}
-	for _, p := range []string{c.Sash, c.SashFleetPub, c.SashFloorDir, c.LogDir} {
+	for _, p := range []string{c.Sash, c.SashFleetPub, c.SashFloorDir, c.LogDir, c.Trust, c.HostDecl} {
 		if p != "" && !filepath.IsAbs(p) {
 			return c, fmt.Errorf("invalid init configuration")
 		}
 	}
-	if (c.DeploymentRoot != "" && (!filepath.IsAbs(c.DeploymentRoot) || !filepath.IsAbs(c.Trust))) || (c.DeploymentRoot == "" && (c.Trust != "" || c.TrustClock)) {
+	if (c.DeploymentRoot != "" && (!filepath.IsAbs(c.DeploymentRoot) || !filepath.IsAbs(c.Trust))) || (c.DeploymentRoot == "" && c.TrustClock) || (c.DeploymentRoot != "" && c.HostDecl != "") {
 		return c, fmt.Errorf("invalid init configuration")
 	}
 	return c, nil

@@ -13,7 +13,7 @@ func TestConfig(t *testing.T) {
 	if err != nil || c.Units != "/etc/sahinit/units" || c.Recovery != "" || c.ShutdownTimeout != 30*time.Second {
 		t.Fatalf("%+v %v", c, err)
 	}
-	for _, args := range [][]string{{"--dir", "relative"}, {"--socket", "sock"}, {"--recovery", "sh"}, {"--shutdown-timeout", "0s"}, {"--shutdown-timeout", "24h"}, {"unexpected"}, {"--unknown"}, {"--sash", "sash"}, {"--sash-fleet-pub", "fleet.pub"}, {"--sash-floor-dir", "floors"}, {"--log-dir", "log"}, {"--trust", "/t.json"}, {"--trust-system-clock"}, {"--deployment-root", "/d"}, {"--deployment-root", "d", "--trust", "/t.json"}} {
+	for _, args := range [][]string{{"--dir", "relative"}, {"--socket", "sock"}, {"--recovery", "sh"}, {"--shutdown-timeout", "0s"}, {"--shutdown-timeout", "24h"}, {"unexpected"}, {"--unknown"}, {"--sash", "sash"}, {"--sash-fleet-pub", "fleet.pub"}, {"--sash-floor-dir", "floors"}, {"--log-dir", "log"}, {"--trust", "t.json"}, {"--host-decl", "host.json"}, {"--deployment-root", "/d", "--trust", "/t.json", "--host-decl", "/h.json"}, {"--trust-system-clock"}, {"--deployment-root", "/d"}, {"--deployment-root", "d", "--trust", "/t.json"}} {
 		if _, err := Parse(args); err == nil {
 			t.Fatalf("accepted %v", args)
 		}
@@ -28,6 +28,15 @@ func TestSuperviseArgs(t *testing.T) {
 	c, err := Parse([]string{"--sash", "/sash", "--sash-fleet-pub", "/etc/fleet.pub", "--sash-floor-dir", "/var/lib/floors"})
 	if got := strings.Join(c.SuperviseArgs(), " "); err != nil || !strings.HasSuffix(got, "--boot-strict --sash /sash --sash-fleet-pub /etc/fleet.pub --sash-floor-dir /var/lib/floors") {
 		t.Fatalf("sash %q %v", got, err)
+	}
+}
+
+// With --dir, --trust is passed for the boot grants' host binding, beside
+// --host-decl.
+func TestSuperviseArgsHostBinding(t *testing.T) {
+	c, err := Parse([]string{"--trust", "/etc/sahinit/trust.json", "--host-decl", "/etc/sahinit/host.json"})
+	if got := strings.Join(c.SuperviseArgs(), " "); err != nil || got != "supervise --dir /etc/sahinit/units --socket /run/sahinit/control.sock --boot-strict --trust /etc/sahinit/trust.json --host-decl /etc/sahinit/host.json" {
+		t.Fatalf("%q %v", got, err)
 	}
 }
 

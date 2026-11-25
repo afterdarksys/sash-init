@@ -298,7 +298,8 @@ action the script asks for is checked against its signed grant. See
 | --- | --- | --- | --- | --- |
 | `name` | string | yes | | As for exec units; must also equal the describe output's name (`sash_name_mismatch`). |
 | `sash.file` | string | yes | | Absolute, clean path to the service script (`sash_file_perm`). At load and before every start: resolved by the trusted walk, a regular file owned by root or the supervisor's uid, not group- or other-writable, no setuid, setgid or sticky bit (`sash_file_perm`). |
-| `sash.grant` | string | yes | | Absolute path to the signed `sash/2` grant (`sash_grant_perm`). The same checks, and mode exactly 0600 (`sash_grant_perm`). |
+| `sash.grant` | string | yes | | Absolute path to the signed `sash/2` grant, or a `sash/3` boot grant for a boot-ops unit (`sash_grant_perm`). The same checks, and mode exactly 0600 (`sash_grant_perm`). |
+| `sash.boot_ops` | bool | no | `false` | Opts the unit in to the [boot verbs](#boot-ops-units). Needs `"boot": true` (`sash_boot_ops`). |
 | `execution.uid`, `execution.gid` | integers | yes | | Non-zero (`sash_root`). They must equal what the describe output's `user` and `group` resolve to through the system user and group databases (`sash_identity_mismatch`). |
 | `sandbox` | object | yes | | Required (`sash_sandbox`); rules as above. The unit must not be cgroup-trusted (`sash_cgroup_trusted`). |
 | `restart` | string | no | from describe | If set, must equal describe's policy (`no` equals sash's `never`) (`sash_lifecycle_mismatch`). |
@@ -319,6 +320,31 @@ a run that stayed ready for the stable period, as for exec units. Ordering names
 must be valid unit names (`sash_order_mismatch`). A non-zero exit, malformed
 output or no `start`/`run` entry is `sash_describe`. `sahinit plan` does not
 run describe; it checks only the unit file and the file permissions.
+
+### Boot-ops units
+
+A unit with `"sash": {..., "boot_ops": true}` may use the boot verbs
+(`module load`, `device wait`, `mount ensure`, `network apply`,
+`service start`, `service stop`; sash's boot verbs contract). It prepares the
+host and ends:
+
+- it must be a boot unit (`"boot": true`, the default) (`sash_boot_ops`);
+- its describe must say restart `never` (or none), have a `start` entry, no
+  `run`, and ready `none` (or none) (`sash_boot_ops`);
+- its grant must be a `sash/3` boot grant, and only a boot-ops unit may hold
+  one (`sash_boot_ops`, before every start). The grant's `host` must be the
+  trust file's `host_id` (`sash_grant_host`; see `supervise --trust`);
+- when `start` exits 0 every process it spawned must have ended
+  (`boot_ops_lingering`, and the start fails); the unit is then `exited` and
+  ready, as an exec oneshot that exited 0, so units that `need` it start;
+- if `host.json` is not usable the unit is refused at load
+  (`host_decl_invalid`, `host_decl_perm`).
+
+Other boot units order after it with `"needs": ["hostprep"]`. The boot
+verbs run only in its `start` entry, before the boot waves end, at most 64
+times per boot; see [codes](codes.md#sash-units-boot-verbs). In this build
+the verb server checks every rule but the kernel side is not wired yet:
+each verb that passes its checks answers `unsupported`.
 
 ## Refusal tokens by field
 

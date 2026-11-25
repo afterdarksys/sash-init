@@ -40,6 +40,7 @@ import (
 	"github.com/afterdarksys/sahinit/internal/graph"
 	"github.com/afterdarksys/sahinit/internal/journal"
 	"github.com/afterdarksys/sahinit/internal/sandbox"
+	"github.com/afterdarksys/sahinit/internal/sash"
 	"github.com/afterdarksys/sahinit/internal/unit"
 )
 
@@ -115,7 +116,10 @@ type Supervisor struct {
 	shuttingDown    atomic.Bool
 	// booted is set by the caller once the boot waves ended without a
 	// strict failure; catalog changes wait for it (boot_in_progress).
-	booted        atomic.Bool
+	booted atomic.Bool
+	// bootRec is this boot's record for the boot verbs, made on first use.
+	bootOnce      sync.Once
+	bootRec       *sash.BootState
 	RestartBurst  int
 	RestartWindow time.Duration
 	// stableMin replaces the 10 s minimum a run must stay ready to reset

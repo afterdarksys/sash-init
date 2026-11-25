@@ -32,7 +32,8 @@ Two rules recur:
 | `sash-mounts.json` | | `supervise` | written in the state directory | in the state directory |
 | Service script | unit `sash.file` | `supervise` | trusted walk; owner and mode rule; no setuid/setgid/sticky | |
 | Grant | unit `sash.grant` | `supervise` | trusted walk; owner and mode rule; mode exactly 0600 | |
-| Trust file | `--trust` | `sahinit policy` | owner root or effective uid, not group- or other-writable; regular; not a symlink; at most 64 KiB | |
+| Host declarations | `--host-decl` (`supervise`, `init`) | `supervise`, at start | not a symlink; trusted walk; owner and mode rule; regular; at most 64 KiB | `/etc/sahinit/host.json` |
+| Trust file | `--trust` | `sahinit policy`, `supervise` (`host_id`) | owner root or effective uid, not group- or other-writable; regular; not a symlink; at most 64 KiB | |
 | Policy or floor document | `--document` | `sahinit policy` | regular; not a symlink; at most 384 KiB | |
 | Policy cache directory | `--cache` | `sahinit policy` | owned by the effective uid, no group or other access | |
 | `policy.json`, `floor.json`, `lock`, `pending-*` | | policy store | 0600, owned by the effective uid, one link | in the cache directory |
@@ -153,6 +154,55 @@ future (`grant_expired`), `service` equal to the unit name
 sahinit: `service`, `user`, `group`, `serial`, `exp`, `exec`, `env_names`,
 `file_read`, `file_write`, `mounts`, `mount_sources`, `caps`,
 `allow_private`. The fleet signer that produces grants is not part of sahinit.
+
+A boot-ops unit's grant is `sash/3` instead: signed over `sash-grant-v3\n`
+and the canonical body, `"purpose":"boot"`, `"actor":"boot:SERVICE"`, every
+field present (no null list, `file_read` and `file_write` included), and six
+more lists, each at most 64 names with no duplicate: `modules`
+(`[a-z0-9][a-z0-9_]{0,54}`), `devices`, `host_mounts`, `net_profiles`
+(`[a-z][a-z0-9_-]{0,31}`), `units_start`, `units_stop` (unit names). Its
+`host` must equal the trust file's `host_id` (`sash_grant_host`). `sash/2`
+and `sash/3` share the service's floor and serial. No grant may list
+`ensure` as a mount source (`grant_bad_shape`).
+
+### Host declarations (`host.json`)
+
+`--host-decl`, default `/etc/sahinit/host.json`. What each boot verb name
+means on this host: the grant says which names a script may use, this file
+says what they are. Read once at start, under the unit file rules. A missing
+file at the default path is no declarations (the device, mount and network
+verbs answer `not_found`); any other problem refuses every boot-ops unit
+(`host_decl_perm`, `host_decl_invalid`). Strict JSON: every key exact and
+once, no null anywhere, nothing after the document, at most 64 entries per
+table.
+
+```json
+{
+  "devices": {"data": {"path": "/dev/vdb", "kind": "block", "match": {"serial": "DATA0001"}}},
+  "mounts": {"data": {"target": "/data", "fstype": "ext4", "source": "data", "options": ["noatime"]}},
+  "network": {
+    "lan": {"kind": "static", "link": "52:54:00:12:34:56", "mtu": 1500, "addresses": ["10.0.2.15/24"],
+            "routes": [{"dst": "0.0.0.0/0", "gw": "10.0.2.2"}]},
+    "dhcp": {"kind": "unit", "unit": "dhcp"}
+  }
+}
+```
+
+- `devices`: `path` a clean path under `/dev`; `kind` `block` or `char`;
+  `match` at most 8 of `serial`, `wwid`, `device/serial`, `device/wwid`,
+  `size`, `partition`, `dm/uuid`, each 1 to 256 bytes. Prefer `wwid` or
+  `dm/uuid`.
+- `mounts`: `target` a clean absolute path other than `/`, no two the same;
+  `fstype` `ext4`, `xfs`, `vfat` or `tmpfs`; `source` a declared device, or
+  `tmpfs` exactly for tmpfs; `options` from `ro`, `rw`, `noexec`, `noatime`,
+  `relatime`, `nosuid`, `nodev`, `suid`, `dev`, and for tmpfs `size=` and
+  `mode=`, each once, never `ro` with `rw`, `suid` with `nosuid` or `dev` with
+  `nodev`.
+- `network`: `kind` `static` (`link` a lower-case MAC, optional `name`,
+  `mtu` 0 to 65535, at most 8 `addresses` and 16 `routes`, optional
+  `requires` units) or `unit` (`unit` only: a unit in the catalog with
+  `"boot": false`). A static profile with an address that is not private,
+  loopback or link-local must list `requires`.
 
 ### sash state directory
 

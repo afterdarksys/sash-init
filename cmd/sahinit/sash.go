@@ -133,16 +133,41 @@ func runSash(args []string, stdout, stderr io.Writer) int {
 	return code
 }
 
-// sashFlags are supervise's sash settings.
+// sashFlags are supervise's sash settings. hostDecl is --host-decl ("" is
+// the default path, where a missing file means no declarations); hostID is
+// the trust file's host_id ("" without --trust).
 type sashFlags struct {
 	binary, fleetPub, floorDir string
+	hostDecl, hostID           string
+}
+
+// loadHostDecl reads host.json and checks the units it names against the
+// catalog: a unit profile's unit must exist and not be a boot unit.
+func loadHostDecl(f sashFlags, svcs map[string]*unit.Service) (*sash.HostDecl, error) {
+	p := f.hostDecl
+	if p == "" {
+		p = unit.DefaultHostDecl
+	}
+	decl, err := unit.LoadHostDecl(p, f.hostDecl != "")
+	if err != nil || decl == nil {
+		return decl, err
+	}
+	units, _ := decl.ProfileUnits()
+	for _, u := range units {
+		if svc, ok := svcs[u]; !ok || svc.Boot {
+			return nil, fail.E("host_decl_invalid")
+		}
+	}
+	return decl, nil
 }
 
 // setupSash prepares every sash unit in svcs: the sash binary, the fleet
 // key and the floor store, then sash --describe for each, deriving its
 // unit. A unit that fails is left out and named on stderr as "TOKEN FILE";
-// the rest of the catalog still loads. It returns the config for the
-// supervisor (nil when there is no sash unit) and how many were refused.
+// the rest of the catalog still loads. A boot-ops unit is also refused when
+// host.json is not usable (host_decl_invalid or host_decl_perm). It returns
+// the config for the supervisor (nil when there is no sash unit) and how
+// many were refused.
 func setupSash(f sashFlags, svcs map[string]*unit.Service, root *cgroup.Root, self string, stderr io.Writer) (*supervise.SashConfig, int) {
 	var names []string
 	for name, svc := range svcs {
@@ -183,10 +208,17 @@ func setupSash(f sashFlags, svcs map[string]*unit.Service, root *cgroup.Root, se
 		store.Close()
 		return refuse("sash_cgroups")
 	}
+	decl, declErr := loadHostDecl(f, svcs)
 	lookUser, lookGroup := supervise.LookupIDs()
 	refused := 0
 	for _, n := range names {
 		svc := svcs[n]
+		if svc.Sash.BootOps && declErr != nil {
+			fmt.Fprintln(stderr, fail.Token(declErr), n+".json")
+			delete(svcs, n)
+			refused++
+			continue
+		}
 		d, err := supervise.Describe(context.Background(), root, self, bin, svc)
 		if err == nil {
 			err = unit.ApplyDescribe(svc, d, lookUser, lookGroup)
@@ -197,5 +229,5 @@ func setupSash(f sashFlags, svcs map[string]*unit.Service, root *cgroup.Root, se
 			refused++
 		}
 	}
-	return &supervise.SashConfig{Binary: bin, Fleet: key, Floors: store, StateDir: f.floorDir}, refused
+	return &supervise.SashConfig{Binary: bin, Fleet: key, Floors: store, StateDir: f.floorDir, HostID: f.hostID, HostDecl: decl}, refused
 }

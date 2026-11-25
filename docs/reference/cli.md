@@ -43,6 +43,7 @@ with the init flags below. No other command can run as PID 1.
 sahinit init [--dir DIR] [--socket PATH] [--recovery EXECUTABLE]
              [--shutdown-timeout DURATION] [--log-dir DIR]
              [--deployment-root DIR --trust FILE [--trust-system-clock]]
+             [--trust FILE] [--host-decl PATH]
              [--sash PATH] [--sash-fleet-pub PATH] [--sash-floor-dir DIR]
 ```
 
@@ -59,19 +60,21 @@ Linux, `init requires Linux PID 1`) and exits 1. As PID 1 it never exits. See
 | `--shutdown-timeout` | duration | `30s` | From `1s` to `10m`. How long PID 1 waits for the supervisor to stop before it terminates every remaining process. |
 | `--log-dir` | path | empty (no journal) | Absolute when set. Passed on as `supervise --log-dir`. |
 | `--deployment-root` | path | empty | Absolute when set; needs `--trust`. The supervisor runs the active [deployment](../deployments.md) generation instead of `--dir`. |
-| `--trust` | path | empty | Absolute; only with `--deployment-root`. The boot-policy trust file. |
+| `--trust` | path | empty | Absolute when set; required with `--deployment-root`. The boot-policy trust file. With `--dir` it is passed on as `supervise --trust`, for the boot grants' host binding only. |
 | `--trust-system-clock` | bool | false | Only with `--deployment-root`. Passed on; see `supervise`. |
 | `--sash` | path | empty | Absolute when set. Passed on as `supervise --sash`; when empty the supervisor's default `/usr/bin/sash` applies. |
 | `--sash-fleet-pub` | path | empty | Absolute when set. Passed on as `supervise --sash-fleet-pub`. |
 | `--sash-floor-dir` | path | empty | Absolute when set. Passed on as `supervise --sash-floor-dir`. |
+| `--host-decl` | path | empty | Absolute when set; not with `--deployment-root`. Passed on as `supervise --host-decl`. |
 
 The supervisor is always started as
-`sahinit supervise --dir DIR --socket PATH --boot-strict [--log-dir ...] [--sash ...] [--sash-fleet-pub ...] [--sash-floor-dir ...]`,
+`sahinit supervise --dir DIR --socket PATH --boot-strict [--trust ...] [--log-dir ...] [--sash ...] [--sash-fleet-pub ...] [--sash-floor-dir ...] [--host-decl ...]`,
 or with `--deployment-root DIR --trust FILE [--trust-system-clock]` in place
 of `--dir DIR`.
 
-Errors: an extra argument, a relative path, `--trust` or
-`--trust-system-clock` without `--deployment-root` (or the reverse), or a
+Errors: an extra argument, a relative path, `--trust-system-clock` or
+`--host-decl` with the wrong mode (see the table), `--deployment-root`
+without `--trust`, or a
 timeout outside the range is
 `invalid init configuration`; an unknown flag or a value that does not parse
 is Go's flag error text (for example `flag provided but not defined: -x`). As
@@ -84,8 +87,8 @@ enters recovery (it does not exit). Signals to PID 1 are listed in
 ```text
 sahinit supervise --dir DIR --socket PATH [--uid UID]... [--gid GID]
                   [--no-cgroups] [--cgroup-sweep DURATION] [--boot-strict]
-                  [--log-dir DIR] [--sash PATH] [--sash-fleet-pub PATH]
-                  [--sash-floor-dir DIR]
+                  [--log-dir DIR] [--trust FILE] [--host-decl PATH]
+                  [--sash PATH] [--sash-fleet-pub PATH] [--sash-floor-dir DIR]
 sahinit supervise --deployment-root DIR --trust FILE [--trust-system-clock]
                   --socket PATH [the other flags above]
 ```
@@ -99,7 +102,7 @@ every service in reverse dependency order.
 | --- | --- | --- | --- |
 | `--dir` | path | required unless `--deployment-root` | The unit directory. See [units](units.md#the-unit-directory). Exactly one of `--dir` and `--deployment-root` is given. |
 | `--deployment-root` | path | none | The [deployment](../deployments.md) root: the units are the active generation's, each start is admitted by its signed policy, and `ctl activate` is enabled. Units the cgroup root cannot limit refuse the start (`boot_refused`), as in strict boot. |
-| `--trust` | path | none | Required with, and only with, `--deployment-root`: the boot-policy trust file (as `policy --trust`). |
+| `--trust` | path | none | Required with `--deployment-root`: the boot-policy trust file (as `policy --trust`). With `--dir` it is optional and read only for its `host_id`, which every `sash/3` boot grant must name (`sash_grant_host`); without it every boot grant is refused. A file that fails its checks or does not decode is fatal (exit 2). |
 | `--trust-system-clock` | bool | false | Only with `--deployment-root`. Accept the system clock as the time anchor for expiring (`renew`) policies; without it their admission fails closed (`policy_clock_uncertain`). `never` policies do not read the clock. |
 | `--log-dir` | path | none | Absolute. The [journal](operations.md#journal) directory. If it cannot be opened (read-only, wrong owner or mode, held by another supervisor) the supervisor prints `journal_unavailable TOKEN` and runs without a journal; it never refuses the start for it. |
 | `--socket` | path | required | Absolute and clean. Its directory must be private (see [files](config-files.md#control-socket-and-lock)). |
@@ -111,6 +114,7 @@ every service in reverse dependency order.
 | `--sash` | path | `/usr/bin/sash` | The sash binary, resolved and checked like a unit executable (`sash_binary`). Only used when a unit has `sash`. |
 | `--sash-fleet-pub` | path | empty | The fleet public key file. Required by sash units (`sash_fleet_key`). |
 | `--sash-floor-dir` | path | empty | The sash state directory: floors and the mount table. Required by sash units (`sash_floor_store`). |
+| `--host-decl` | path | `/etc/sahinit/host.json` | Not with `--deployment-root` (deployments carry exec units only). The [host declarations](config-files.md#host-declarations-hostjson) for the boot verbs. A missing file at the default path is no declarations; a missing file named here, or any unusable file, refuses every boot-ops unit (`host_decl_perm`, `host_decl_invalid`). Read once, at start. |
 
 Startup order and what each step can print on stderr:
 
