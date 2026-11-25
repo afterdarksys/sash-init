@@ -1,0 +1,17 @@
+{
+  "name": "sinetd",
+  "exec": ["/usr/local/sbin/sinetd", "run", "--config", "/etc/sinetd/sinetd.toml"],
+  "type": "simple",
+  "ready": "notify",
+  "restart": "on-failure",
+  "boot": true,
+  "timeout": "10s",
+  "execution": {"uid": 65532, "gid": 65532, "directory": "/"},
+  "sandbox": {
+    "no_new_privs": true,
+    "read_only_paths": ["/etc/sinetd", "/usr"],
+    "read_write_paths": ["/run/sinetd"],
+    "caps": ["net_bind_service"]
+  },
+  "pids_max": 256
+}

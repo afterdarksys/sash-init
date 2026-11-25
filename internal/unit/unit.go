@@ -56,20 +56,40 @@ var unitKeys = map[string]struct{}{
 
 var sandboxKeys = map[string]struct{}{
 	"no_new_privs": {}, "read_only_paths": {}, "read_write_paths": {}, "caps": {},
+	"setuid_to": {}, "setgid_to": {},
 }
 
-// Closed capability names. Numbers are the Linux capability indexes.
+// capByName is the allowlist of capabilities a sandboxed unit may hold
+// (docs/design/unit-caps-1.md). Numbers are the Linux capability indexes.
+//
+// Threats: every other capability either bypasses file permissions (and so
+// leaves Landlock as the only file limit), manufactures capabilities, or
+// reaches the kernel or other processes directly. setuid and setgid are
+// root-equivalent on their own, so they are granted only with a list of
+// target ids that the helper's seccomp filter enforces (MaxIDs, sandbox_ids).
 var capByName = map[string]uint32{
-	"chown":            0,
-	"dac_override":     1,
-	"fowner":           3,
-	"kill":             5,
 	"setgid":           6,
 	"setuid":           7,
 	"net_bind_service": 10,
-	"net_admin":        12,
-	"sys_admin":        21,
 }
+
+// linuxCaps are the names of every Linux capability (bits 0 to 40), so that
+// a real capability off the allowlist is sandbox_cap_denied and a typo is
+// sandbox_cap.
+var linuxCaps = map[string]bool{
+	"chown": true, "dac_override": true, "dac_read_search": true, "fowner": true, "fsetid": true,
+	"kill": true, "setgid": true, "setuid": true, "setpcap": true, "linux_immutable": true,
+	"net_bind_service": true, "net_broadcast": true, "net_admin": true, "net_raw": true,
+	"ipc_lock": true, "ipc_owner": true, "sys_module": true, "sys_rawio": true, "sys_chroot": true,
+	"sys_ptrace": true, "sys_pacct": true, "sys_admin": true, "sys_boot": true, "sys_nice": true,
+	"sys_resource": true, "sys_time": true, "sys_tty_config": true, "mknod": true, "lease": true,
+	"audit_write": true, "audit_control": true, "setfcap": true, "mac_override": true,
+	"mac_admin": true, "syslog": true, "wake_alarm": true, "block_suspend": true, "audit_read": true,
+	"perfmon": true, "bpf": true, "checkpoint_restore": true,
+}
+
+// MaxIDs is the most entries setuid_to or setgid_to may hold.
+const MaxIDs = 64
 
 // Service is one catalog entry. Boot is the resolved boot-set bit.
 type Service struct {
@@ -107,6 +127,23 @@ type Sandbox struct {
 	ReadOnly   []string
 	ReadWrite  []string
 	Caps       []string
+	// SetuidTo and SetgidTo are the ids a unit holding setuid or setgid may
+	// switch to (besides its own); the helper's id filter enforces them.
+	SetuidTo []uint32
+	SetgidTo []uint32
+}
+
+// HasCap reports whether the sandbox lists the capability name.
+func (sb *Sandbox) HasCap(name string) bool {
+	if sb == nil {
+		return false
+	}
+	for _, c := range sb.Caps {
+		if c == name {
+			return true
+		}
+	}
+	return false
 }
 
 // NameOK reports whether name is a catalog key we will accept on the socket.
@@ -681,11 +718,33 @@ func parseSandbox(raw json.RawMessage) (*Sandbox, error) {
 			return nil, err
 		}
 	}
+	for key, dest := range map[string]*[]uint32{"setuid_to": &sb.SetuidTo, "setgid_to": &sb.SetgidTo} {
+		if raw, ok := obj[key]; ok {
+			if err := jsonobj.Unmarshal(raw, dest); err != nil {
+				return nil, err
+			}
+			if *dest == nil {
+				*dest = []uint32{}
+			}
+		}
+	}
 	sb.ReadOnly = ro
 	sb.ReadWrite = rw
 	sb.Caps = caps
 	if err := FinishSandbox(sb, present, privs); err != nil {
 		return nil, err
+	}
+	// The supervisor's own ids are trusted principals (the control socket,
+	// cgroupfs); a service must not be able to become them.
+	for _, id := range sb.SetuidTo {
+		if id == uint32(os.Geteuid()) {
+			return nil, fail.E("sandbox_ids")
+		}
+	}
+	for _, id := range sb.SetgidTo {
+		if id == uint32(os.Getegid()) {
+			return nil, fail.E("sandbox_ids")
+		}
 	}
 	return sb, nil
 }
@@ -713,10 +772,39 @@ func FinishSandbox(sb *Sandbox, privsPresent, privs bool) error {
 		}
 		seen[p] = struct{}{}
 	}
+	seenCap := make(map[string]bool, len(sb.Caps))
 	for _, name := range sb.Caps {
-		if _, ok := capByName[name]; !ok {
-			return fail.E("sandbox_cap")
+		if seenCap[name] {
+			return fail.E("duplicate_field")
 		}
+		seenCap[name] = true
+		if _, ok := capByName[name]; ok {
+			continue
+		}
+		if linuxCaps[name] {
+			return fail.E("sandbox_cap_denied")
+		}
+		return fail.E("sandbox_cap")
+	}
+	if err := checkIDs(sb.SetuidTo, sb.HasCap("setuid")); err != nil {
+		return err
+	}
+	return checkIDs(sb.SetgidTo, sb.HasCap("setgid"))
+}
+
+// checkIDs checks a setuid_to or setgid_to list: present exactly when the
+// cap is held (nil means absent), 1 to MaxIDs unique ids, never 0 and never
+// the all-ones "unchanged" value.
+func checkIDs(ids []uint32, held bool) error {
+	if (ids != nil) != held || held && (len(ids) == 0 || len(ids) > MaxIDs) {
+		return fail.E("sandbox_ids")
+	}
+	seen := make(map[uint32]bool, len(ids))
+	for _, id := range ids {
+		if id == 0 || id == ^uint32(0) || seen[id] {
+			return fail.E("sandbox_ids")
+		}
+		seen[id] = true
 	}
 	return nil
 }

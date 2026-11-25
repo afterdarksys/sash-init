@@ -255,3 +255,28 @@ func TestExecNeedsArtifactPrefix(t *testing.T) {
 		}
 	}
 }
+
+// A deployment unit may not hold capabilities: the signed policy does not
+// say anything about them. The same unit without caps stages.
+func TestCapsRefused(t *testing.T) {
+	for _, sandbox := range []string{`{}`, `{"caps":["net_bind_service"]}`, `{"caps":["setuid"],"setuid_to":[70001]}`} {
+		f := setup(t)
+		u := []byte(`{"name":"app","type":"simple","ready":"exec","exec":["@/artifacts/app"],"boot":true,"essential":true,"execution":{"uid":65534,"gid":65534},"sandbox":` + sandbox + `}`)
+		os.WriteFile(filepath.Join(f.bundle, "units/app.json"), u, 0600)
+		var m Manifest
+		json.Unmarshal(f.manifest, &m)
+		m.Units[0].SHA256 = Hash(u)
+		f.manifest, _ = json.Marshal(m)
+		f.p.CatalogSHA256 = Hash(f.manifest)
+		_, err := f.m.Stage(f.sign(), f.manifest, f.bundle)
+		if sandbox == `{}` {
+			if err != nil {
+				t.Fatalf("no caps: %v", err)
+			}
+			continue
+		}
+		if fail.Token(err) != "deployment_caps" {
+			t.Fatalf("%s: %v", sandbox, err)
+		}
+	}
+}

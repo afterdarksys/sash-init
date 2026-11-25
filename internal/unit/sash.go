@@ -121,6 +121,11 @@ func parseSashUnit(obj map[string]json.RawMessage, stem string) (*Service, error
 	if err != nil {
 		return nil, err
 	}
+	// Threats: caps given to the sash process itself were never reviewed
+	// against the grant model, whose spawn caps are refused.
+	if len(sb.Caps) > 0 {
+		return nil, fail.E("sash_caps")
+	}
 	execution, err := parseExecution(obj["execution"])
 	if err != nil {
 		return nil, err

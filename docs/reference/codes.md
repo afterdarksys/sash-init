@@ -81,7 +81,9 @@ holds the policy token) and, for sash units, `sash_start`, `sash_run`, `sash_sto
 | `essential_requires_boot` | `"essential": true` on a unit with `"boot": false`. | Remove it; only boot units are essential. |
 | `restart_delay_invalid` | `restart_delay` or `restart_max_delay` is not a duration string from `10ms` to `5m`, or the maximum is below the delay. | See [restart](units.md#types-readiness-and-restart). |
 | `watchdog_invalid` | `watchdog` is not a duration string from `100ms` to `5m`, or the unit's `ready` is not `notify`. | |
-| `sandbox_cap` | An unknown capability name, or the helper could not keep a listed capability (always the case today for a non-root unit). | Leave `caps` empty. |
+| `sandbox_cap` | At load, an unknown capability name. At start, the supervisor is not root (it has no capability to give), or the sandbox helper could not reach or verify exactly the granted set (see [unit capabilities](../design/unit-caps-1.md)). | Use a name from the allowlist; run the supervisor as root. |
+| `sandbox_cap_denied` | A real Linux capability that is not on the allowlist (`net_bind_service`, `setuid`, `setgid`). | Remove it; the others are never grantable. |
+| `sandbox_ids` | `setuid` without `setuid_to` (or `setgid` without `setgid_to`), a list without its cap, an empty list, more than 64 ids, a repeated id, 0, 4294967295, or the supervisor's own uid or gid. | List the non-root ids the service switches to. |
 
 ## Dependency graph
 
@@ -164,6 +166,7 @@ holds the policy token) and, for sash units, `sash_start`, `sash_run`, `sash_sto
 | `deployment_durability` | The active pointer was renamed but its directory could not be synced: the candidate runs and is active, but may not survive a crash. | Check the storage before the next change. |
 | `deployment_jobs` | The policy has `jobs` or `offline_jobs`, or the manifest has `jobs` or `resources`. Boot jobs are not supported. | Remove them; run setup as oneshot units. |
 | `deployment_sash` | A deployment unit is a sash unit. Deployments carry exec units only. | Deploy sash units through `--dir`. |
+| `deployment_caps` | A deployment unit's sandbox lists capabilities. The signed policy does not cover them. | Run units that need caps through `--dir`. |
 | `deployment_no_pending` | `ctl activate` with no pending generation. | `deploy stage` first. |
 | `deployment_not_configured` | `ctl activate` on a supervisor without `--deployment-root`. | |
 | `boot_in_progress` | `ctl apply`, `rollback` or `activate` before the boot waves ended, after a strict boot failed, or while the supervisor stops. | Wait for boot. |
@@ -229,7 +232,8 @@ holds the policy token) and, for sash units, `sash_start`, `sash_run`, `sash_sto
 | `sash_unit_field` | A sash unit sets `exec`, `type`, `ready`, `timeout`, `execution.groups`, `execution.directory` or `execution.environment`. | Remove it; the service script owns those. |
 | `sash_root` | A sash unit has no uid/gid or uid or gid 0. | Run it as a dedicated service account. |
 | `sash_sandbox` | A sash unit has no `sandbox`. | Add one. |
-| `sash_cgroup_trusted` | A sash unit is cgroup-trusted (a cgroupfs path in `read_write_paths`, or a cgroup-bypass cap). | Remove it. |
+| `sash_cgroup_trusted` | A sash unit is cgroup-trusted (a cgroupfs path in `read_write_paths`). | Remove it. |
+| `sash_caps` | A sash unit's sandbox lists capabilities. | Remove them; sash units cannot hold capabilities. |
 | `sash_file_perm` | The service script fails the trusted walk or the owner and mode rule, or has a setuid/setgid/sticky bit. | `chown root:root`, `chmod 644`. |
 | `sash_grant_perm` | The grant file fails the same checks, or is not mode exactly 0600. | `chown root:root`, `chmod 600`. |
 | `sash_binary` | Log `sash_binary FILE`: `--sash` does not resolve to a trusted executable. | Install sash at a root-owned path. |

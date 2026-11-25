@@ -29,8 +29,8 @@ func TestParseDefaults(t *testing.T) {
 	if boxed.Sandbox == nil || !boxed.Sandbox.NoNewPrivs {
 		t.Fatalf("%+v", boxed.Sandbox)
 	}
-	capped := mustParse(t, `{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","execution":{"uid":65534,"gid":65534},"sandbox":{"caps":["kill"]}}`, "a")
-	if len(capped.Sandbox.Caps) != 1 || capped.Sandbox.Caps[0] != "kill" || !capped.Sandbox.NoNewPrivs {
+	capped := mustParse(t, `{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","execution":{"uid":65534,"gid":65534},"sandbox":{"caps":["net_bind_service"]}}`, "a")
+	if len(capped.Sandbox.Caps) != 1 || capped.Sandbox.Caps[0] != "net_bind_service" || !capped.Sandbox.NoNewPrivs {
 		t.Fatalf("%+v", capped.Sandbox)
 	}
 	timed := mustParse(t, `{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","timeout":"5m"}`, "a")
@@ -67,7 +67,8 @@ func TestParseRejects(t *testing.T) {
 		{`{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","timeout":"5m1s"}`, "a", "timeout_range"},
 		{`{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","timeout":"nope"}`, "a", "timeout_range"},
 		{`{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","sandbox":{"no_new_privs":false}}`, "a", "sandbox_privs"},
-		{`{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","sandbox":{"caps":["net_raw"]}}`, "a", "sandbox_cap"},
+		{`{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","sandbox":{"caps":["net_raw"]}}`, "a", "sandbox_cap_denied"},
+		{`{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","sandbox":{"caps":["net_bind"]}}`, "a", "sandbox_cap"},
 		{`{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","sandbox":{"read_only_paths":["tmp"]}}`, "a", "sandbox_path"},
 		{`{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","sandbox":{"read_only_paths":["/tmp/a"],"read_write_paths":["/tmp/a"]}}`, "a", "sandbox_overlap"},
 		{`{"name":"a","exec":["/bin/sh"],"type":"simple","ready":"exec","sandbox":{"read_only_paths":["/tmp/a","/tmp/a"]}}`, "a", "duplicate_field"},
@@ -263,15 +264,9 @@ func TestNameAndCap(t *testing.T) {
 		}
 	}
 	caps := map[string]uint32{
-		"chown":            0,
-		"dac_override":     1,
-		"fowner":           3,
-		"kill":             5,
 		"setgid":           6,
 		"setuid":           7,
 		"net_bind_service": 10,
-		"net_admin":        12,
-		"sys_admin":        21,
 	}
 	for name, id := range caps {
 		got, ok := LookupCap(name)
@@ -279,8 +274,10 @@ func TestNameAndCap(t *testing.T) {
 			t.Fatalf("%s %d %v", name, got, ok)
 		}
 	}
-	if _, ok := LookupCap("net_raw"); ok {
-		t.Fatal("net_raw")
+	for _, name := range []string{"net_raw", "chown", "dac_override", "fowner", "kill", "net_admin", "sys_admin"} {
+		if _, ok := LookupCap(name); ok {
+			t.Fatal(name)
+		}
 	}
 }
 
@@ -338,11 +335,11 @@ func TestParseArgvAndPaths(t *testing.T) {
 		"name": "a", "exec": []string{"/bin/sh", "a\x00b"}, "type": "simple", "ready": "exec",
 	}, "failed")
 
-	caps := []string{"chown", "dac_override", "fowner", "kill", "setgid", "setuid", "net_bind_service", "net_admin", "sys_admin"}
+	caps := []string{"setgid", "setuid", "net_bind_service"}
 	raw = unitJSON(t, map[string]any{
 		"name": "a", "exec": []string{"/bin/sh"}, "type": "simple", "ready": "exec",
 		"execution": map[string]any{"uid": 65534, "gid": 65534},
-		"sandbox":   map[string]any{"caps": caps},
+		"sandbox":   map[string]any{"caps": caps, "setuid_to": []int{70001}, "setgid_to": []int{70001}},
 	})
 	boxed := mustParse(t, string(raw), "a")
 	if boxed.Sandbox == nil || !boxed.Sandbox.NoNewPrivs || len(boxed.Sandbox.Caps) != len(caps) {

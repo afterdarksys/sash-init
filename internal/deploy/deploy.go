@@ -449,6 +449,11 @@ func (m *Manager) loadDir(dir, id string) (*Catalog, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Threats: the signed policy admits a unit file but says nothing
+		// about capabilities, so a signer could grant them unannounced.
+		if svc.Sandbox != nil && len(svc.Sandbox.Caps) > 0 {
+			return nil, fail.E("deployment_caps")
+		}
 		svc.Path = argv[0]
 		for _, a := range manifest.Artifacts {
 			if a.Path == artifact {
