@@ -487,7 +487,7 @@ func TestCapsNeedRootSupervisor(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root")
 	}
-	uid, gid := uint32(os.Getuid()+1), uint32(os.Getgid())
+	uid, gid := uint32(os.Getuid()+1), uint32(os.Getgid()+1)
 	sb := &unit.Sandbox{NoNewPrivs: true, ReadOnly: []string{"/"}, Caps: []string{"net_bind_service"}}
 	_, _, _, err := Launch(context.Background(), "/unused", []string{"/bin/true"}, sb, false, time.Second, Options{Execution: unit.Execution{UID: &uid, GID: &gid}})
 	if fail.Token(err) != "sandbox_cap" {
