@@ -227,9 +227,17 @@ unfiltered process created can still have its id map written by a holder of
 `CAP_SETUID`/`CAP_SETGID` (above). A unit with `setuid` or `setgid` may
 therefore not list `/`, `/proc` or any path under `/proc` in
 `read_write_paths` (`sandbox_proc`, at load and again in the helper on the
-resolved paths). The "no user namespace, never uid or gid 0" guarantee
-depends on that rule. It checks paths, not filesystems: a procfs mounted
-somewhere else beneath a read_write path is not detected.
+resolved paths, and again in `Load` after symlinks resolve, so a link to
+`/proc` is refused by `plan`). Landlock rules attach to inodes, so a
+read_write path that *is* a procfs (a bind mount of `/proc`) makes `/proc`
+itself writable, and one with a procfs mounted beneath it makes that procfs
+writable. So the helper, for such a unit, also `fstatfs`es each read_write
+path it opens and refuses `PROC_SUPER_MAGIC`, and refuses any read_write
+path with a `proc` mount at or beneath it in `/proc/self/mountinfo` (both
+`sandbox_proc`). The "no user namespace, never uid or gid 0" guarantee
+depends on these rules. Not covered: a procfs mounted after the check
+(root only). (Added after the second review, which reproduced the bind
+mount case.)
 
 What the id filter still does **not** stop, stated in units.md and
 security.md:

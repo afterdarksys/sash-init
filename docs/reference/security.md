@@ -67,8 +67,15 @@ code disagree, the code is right and this page is a bug.
   supervisor's ids (checked at start). The user-namespace guarantee also
   **depends on `/proc` staying read-only** for the unit (`sandbox_proc`):
   with `CAP_SETUID`/`CAP_SETGID` a process may write the id map of a
-  namespace that another, unfiltered process created. A procfs mounted
-  elsewhere beneath a read_write path is not detected.
+  namespace that another, unfiltered process created. For a unit holding
+  `setuid` or `setgid` sahinit refuses (`sandbox_proc`): a `read_write_paths`
+  entry that is `/`, `/proc` or below `/proc`, as written and after
+  symlinks are resolved at load; at start, an entry whose open directory is
+  on a procfs (a bind mount of `/proc`, or a directory inside one); and an
+  entry with a procfs mounted at or beneath it in sahinit's mount namespace
+  (`/proc/self/mountinfo`). Not detected: a procfs mounted after the start
+  (only root can mount), and procfs reached other than through a
+  read_write path (an fd passed in; sahinit passes none to such a unit).
 - The status claim (`no_new_privs,landlock_vN,caps`, plus `,id_filter`)
   lists only mechanisms that returned success, and only while a process
   runs.

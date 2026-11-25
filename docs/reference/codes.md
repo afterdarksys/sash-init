@@ -84,7 +84,7 @@ holds the policy token) and, for sash units, `sash_start`, `sash_run`, `sash_sto
 | `sandbox_cap` | At load, an unknown capability name. At start, the supervisor is not root (it has no capability to give), or the sandbox helper could not reach or verify exactly the granted set (see [unit capabilities](../design/unit-caps-1.md)). | Use a name from the allowlist; run the supervisor as root. |
 | `sandbox_cap_denied` | A real Linux capability that is not on the allowlist (`net_bind_service`, `setuid`, `setgid`). | Remove it; the others are never grantable. |
 | `sandbox_ids` | At load: `setuid` without `setuid_to` (or `setgid` without `setgid_to`), a list without its cap, an empty list, a value that is not an integer from 1 to 4294967294 (wrong type, null, negative, fractional, too large), more than 64 ids, a repeated id, 0, or a unit with caps whose gid or groups include 0. At start: a target, the unit's gid or a group is the supervisor's own uid or gid. | List the non-root ids the service switches to; run it with a non-root group. |
-| `sandbox_proc` | A unit with `setuid` or `setgid` has `/`, `/proc` or a path under `/proc` in `read_write_paths`. A writable `/proc` would let it write a user namespace's id map. | Keep `/proc` read-only for it. |
+| `sandbox_proc` | A unit with `setuid` or `setgid` has `/`, `/proc` or a path under `/proc` in `read_write_paths` (at load, also after symlinks resolve), or at start an entry that is on a procfs or has a procfs mounted beneath it. A writable procfs would let it write a user namespace's id map. | Keep every procfs out of its writable paths. |
 
 ## Dependency graph
 
