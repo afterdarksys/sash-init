@@ -235,7 +235,9 @@ the sandbox on; every key is optional.
 | `no_new_privs` | bool | `true` | Always applied; an explicit `false` is `sandbox_privs`. |
 | `read_only_paths` | array of strings | `[]` | Paths the service may read beneath. |
 | `read_write_paths` | array of strings | `[]` | Paths the service may read and write beneath. |
-| `caps` | array of strings | `[]` | Capability names from the closed set: `chown`, `dac_override`, `fowner`, `kill`, `setgid`, `setuid`, `net_bind_service`, `net_admin`, `sys_admin` (`sandbox_cap`). |
+| `caps` | array of strings | `[]` | Capabilities the service holds, from the allowlist `net_bind_service`, `setuid`, `setgid`. Any other real capability is `sandbox_cap_denied`; an unknown name is `sandbox_cap`. |
+| `setuid_to` | array of integers | none | Required with `setuid`, refused without it: the uids the service may switch to besides its own. 1 to 64, unique, from 1 to 4294967294, not the supervisor's uid (`sandbox_ids`). |
+| `setgid_to` | array of integers | none | The same for `setgid` and gids. |
 
 - The unit must set a non-root `execution.uid` (`sandbox_root`); the helper
   also refuses to apply a sandbox while it runs as uid 0.
@@ -249,14 +251,42 @@ the sandbox on; every key is optional.
   knows are handled. No Landlock is `landlock_unavailable`; a right the ABI
   lacks is `landlock_abi`. Everything outside the listed paths is denied for
   file access. Network access is **not** confined.
-- Capabilities: ambient capabilities are cleared and `caps` is the set the
-  helper keeps. Because a sandboxed unit runs as a non-root uid, the helper
-  has no capabilities to keep, so a non-empty `caps` currently fails the start
-  with `sandbox_cap`. Leave it empty. Listing `dac_override`, `fowner`,
-  `chown`, `setuid` or `sys_admin` also makes the unit
+- Capabilities (see [unit capabilities](../design/unit-caps-1.md)): with
+  `caps` empty the service holds no capability (effective, permitted,
+  inheritable and ambient sets empty). With `caps` set, the service holds
+  exactly those capabilities in its effective, permitted, inheritable and
+  ambient sets, and its bounding set is cut to them, so it can never regain
+  another. The supervisor must be root (`sandbox_cap` otherwise). The helper
+  checks the whole state before exec; any difference is `sandbox_cap` and
+  nothing runs. Exec units from `--dir` only: a sash unit is `sash_caps`, a
+  deployment unit `deployment_caps`. Listing `setuid` also makes the unit
   [cgroup-trusted](security.md#the-cgroup_trusted-boundary).
+- **The caps are inherited.** They are ambient, so every program the service
+  executes gets them too, and keeps them after a `setuid` from one non-zero
+  uid to another (the kernel clears capabilities on a uid change only when
+  leaving uid 0). A service that starts children which must not hold them
+  has to clear its own ambient and inheritable sets first, keeping its
+  permitted and effective sets: `prctl(PR_CAP_AMBIENT,
+  PR_CAP_AMBIENT_CLEAR_ALL)` and a `capset` with an empty inheritable set, on
+  every thread (in Go, `syscall.AllThreadsSyscall`). Children then hold
+  nothing whatever uid they run as.
+- **`setuid` and `setgid`** come with the id filter, a seccomp filter
+  installed after `no_new_privs`: `setuid`, `setreuid`, `setresuid` and
+  `setfsuid` may only name the unit's own uid or a `setuid_to` uid (likewise
+  for gids and `setgid_to`), `setgroups` may only clear the list, and
+  `unshare` or `clone` with `CLONE_NEWUSER` is refused (EPERM); `clone3` is
+  ENOSYS; a foreign architecture or an x32 syscall kills the process. It is
+  inherited by every child and cannot be removed. Linux amd64 and arm64 only
+  (`seccomp_unavailable`). Even so the service can act as **every listed
+  id**: its files inside the Landlock domain, `chmod` of its files anywhere
+  (Landlock does not restrict chmod), its processes, and every Unix socket
+  that trusts that id. It can also forge the uid and gid in
+  `SCM_CREDENTIALS`, 0 included; the filter cannot see that.
+- `net_bind_service` lets the service bind any port below 1024 on any
+  address, including one another daemon has not bound yet.
 - The status `sandbox` field reports what was applied, for example
-  `no_new_privs,landlock_v3,caps`, and only while a process runs; an
+  `no_new_privs,landlock_v3,caps`, with `,id_filter` added for a unit
+  holding `setuid` or `setgid`, and only while a process runs; an
   unsandboxed unit reports `none`.
 - The helper's set-up handshake has a deadline (`sandbox_timeout`); a kernel
   without `openat2` (before Linux 5.6) is `openat2_unavailable`.
@@ -300,7 +330,7 @@ action the script asks for is checked against its signed grant. See
 | `sash.file` | string | yes | | Absolute, clean path to the service script (`sash_file_perm`). At load and before every start: resolved by the trusted walk, a regular file owned by root or the supervisor's uid, not group- or other-writable, no setuid, setgid or sticky bit (`sash_file_perm`). |
 | `sash.grant` | string | yes | | Absolute path to the signed `sash/2` grant (`sash_grant_perm`). The same checks, and mode exactly 0600 (`sash_grant_perm`). |
 | `execution.uid`, `execution.gid` | integers | yes | | Non-zero (`sash_root`). They must equal what the describe output's `user` and `group` resolve to through the system user and group databases (`sash_identity_mismatch`). |
-| `sandbox` | object | yes | | Required (`sash_sandbox`); rules as above. The unit must not be cgroup-trusted (`sash_cgroup_trusted`). |
+| `sandbox` | object | yes | | Required (`sash_sandbox`); rules as above, but `caps` must be empty (`sash_caps`). The unit must not be cgroup-trusted (`sash_cgroup_trusted`). |
 | `restart` | string | no | from describe | If set, must equal describe's policy (`no` equals sash's `never`) (`sash_lifecycle_mismatch`). |
 | `needs`, `after`, `wants` | arrays | no | from describe | If set, must be the same set as describe's `requires`, `after`, `wants` (`sash_order_mismatch`). |
 | `boot` | bool | no | `true` | A sash boot unit is always essential in strict boot; it has no `essential` field. |
@@ -332,7 +362,7 @@ run describe; it checks only the unit file and the file permissions.
 | `essential_requires_boot`, `restart_delay_invalid`, `watchdog_invalid` | `essential`, the restart delays, `watchdog` |
 | `edge_empty` | an empty dependency name |
 | `execution_invalid` | any `execution` rule |
-| `sandbox_root`, `sandbox_privs`, `sandbox_path`, `sandbox_overlap`, `sandbox_cap` | sandbox rules |
+| `sandbox_root`, `sandbox_privs`, `sandbox_path`, `sandbox_overlap`, `sandbox_cap`, `sandbox_cap_denied`, `sandbox_ids` | sandbox rules |
 | `limit_invalid` | a limit value |
 | `sash_*` | sash unit rules above |
 | `cycle`, `missing_needs`, `missing_after`, `boot_needs` | the dependency graph |

@@ -53,9 +53,19 @@ code disagree, the code is right and this page is a bug.
 - Landlock restricts file access to the listed paths, with the rights the
   kernel's ABI knows; the absence of Landlock, or of a needed right, refuses
   the start rather than weakening it.
-- Ambient capabilities are cleared.
-- The status claim (`no_new_privs,landlock_vN,caps`) lists only mechanisms
-  that returned success, and only while a process runs.
+- Capabilities: a unit without `caps` holds none (the ambient set is
+  cleared). A unit with `caps` holds exactly the listed ones from the
+  allowlist `net_bind_service`, `setuid`, `setgid`, in its effective,
+  permitted, inheritable and ambient sets, with the bounding set cut to them;
+  the helper checks all five sets on entry and just before exec and refuses
+  any difference (`sandbox_cap`). Every other capability is refused at load
+  (`sandbox_cap_denied`). See [unit capabilities](../design/unit-caps-1.md).
+- `setuid` and `setgid` come only with explicit target lists and a seccomp
+  id filter: no uid or gid 0, no supervisor id, no unlisted id, no
+  supplementary groups, no new user namespace.
+- The status claim (`no_new_privs,landlock_vN,caps`, plus `,id_filter`)
+  lists only mechanisms that returned success, and only while a process
+  runs.
 
 ### The cgroup_trusted boundary
 
@@ -70,7 +80,7 @@ A unit is *cgroup-trusted*, and the guarantees are not promised for it, when:
 - it has no sandbox and runs as root or as the supervisor's uid; or
 - its sandbox's `read_write_paths` include `/`, `/sys`, `/sys/fs`,
   `/sys/fs/cgroup` or a path below it; or
-- it keeps `dac_override`, `fowner`, `chown`, `setuid` or `sys_admin`.
+- it keeps `setuid`.
 
 Such units are allowed, and named (`plan` prints `cgroup_trusted FILE`;
 status has `cgroup_trusted: true`). A sash unit may never be cgroup-trusted.
@@ -182,8 +192,18 @@ bounded sizes and times, and a credential that is never printed.
 - **Without cgroups** (`--no-cgroups`, or not Linux), a service that calls
   `setsid` escapes kill-all and the peer check, and there are no limits.
 - **Network access is not confined** by the sandbox.
-- **Capabilities:** a sandboxed unit cannot be given a capability today
-  (`sandbox_cap`); a sash spawn cannot either (`caps_unsupported`).
+- **Capabilities are inherited** by everything a capped service executes,
+  across uid changes between non-zero uids, unless the service clears its
+  own ambient and inheritable sets.
+- **A `setuid`/`setgid` service can act as every id it lists**: files in its
+  Landlock domain, `chmod` of their files anywhere (Landlock cannot restrict
+  chmod, chown, utime or truncate by path), their processes and every Unix
+  socket that trusts them. It can **forge `SCM_CREDENTIALS`** with any uid
+  and gid, 0 included. The id filter exists on Linux amd64 and arm64 only.
+- **`net_bind_service`** binds any port below 1024 on any address.
+- **Landlock does not confine Unix socket connects** (nor the network).
+- A sash unit cannot hold capabilities (`sash_caps`), nor can a sash spawn
+  (`ceiling`); a deployment unit cannot (`deployment_caps`).
 - **Peer pinning before Linux 6.5** leaves a narrow pid-reuse window between
   connect and accept.
 - **The grant's `host` is not checked**: sahinit has no host name.

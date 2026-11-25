@@ -12,8 +12,9 @@ cached, never enforced; a [verified deployment](docs/deployments.md)
 (`--deployment-root`, exec units only) is the one mode where a signed policy
 admits units, and it has no issuer yet.
 sash services run with test-made grants and floors: there is no fleet signer
-and no policy issuer yet. Sandboxed units cannot hold capabilities and the
-network is not confined. There are no packaged releases.
+and no policy issuer yet. Sandboxed exec units may hold only `net_bind_service`, `setuid` and
+`setgid` ([unit capabilities](docs/design/unit-caps-1.md)), and the network is
+not confined. There are no packaged releases.
 
 A Go userspace service supervisor with strict JSON units, dependency boot waves,
 readiness checks, restart limits, explicit execution identities, bounded output tails,

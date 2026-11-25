@@ -86,10 +86,10 @@ kill sahinit). That is:
 - a service with no sandbox that runs as root or as the supervisor's uid;
 - a sandboxed service whose `read_write_paths` include `/`, `/sys`,
   `/sys/fs`, `/sys/fs/cgroup`, or a path inside it;
-- a sandboxed service that keeps `dac_override`, `fowner`, `chown`,
-  `setuid` or `sys_admin`. These bypass file permissions on cgroupfs,
-  take a file over, become the supervisor's uid, or mount a cgroupfs of
-  their own. `dac_read_search` only bypasses reads and does not count.
+- a sandboxed service that keeps `setuid` (the only grantable capability
+  that could reach cgroupfs as another owner; `dac_override`, `fowner`,
+  `chown` and `sys_admin` are never grantable, see
+  [unit capabilities](design/unit-caps-1.md)).
 
 Kill-all, limits and `peer_supervised` are promised only for the other
 services. Trusted units are allowed, not refused. `plan` names each one on
