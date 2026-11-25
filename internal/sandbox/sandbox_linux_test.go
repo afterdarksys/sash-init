@@ -36,6 +36,12 @@ func TestMain(m *testing.M) {
 		}
 		unix.Exit(ApplyCLI(os.Args[1:]))
 	}
+	if mode := os.Getenv("SAHT_CAPS_PROBE"); mode != "" {
+		unix.Exit(capsProbe(mode))
+	}
+	if path.Base(os.Args[0]) == "sinetd" && len(os.Args) > 1 && os.Args[1] == "run" {
+		unix.Exit(sinetdStandIn())
+	}
 	os.Exit(m.Run())
 }
 
@@ -241,7 +247,7 @@ func TestChildStatusWaitsForExec(t *testing.T) {
 				}
 				result <- err
 			}()
-			if _, err := w.Write(okLine(3)); err != nil {
+			if _, err := w.Write(okLine(3, false)); err != nil {
 				t.Fatal(err)
 			}
 			select {

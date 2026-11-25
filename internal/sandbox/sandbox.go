@@ -47,10 +47,15 @@ func SandboxClaim(abi int) string {
 	return "no_new_privs,landlock_v" + strconv.Itoa(abi) + ",caps"
 }
 
-// IsSandboxClaim reports whether claim is a sandbox claim for a known ABI.
+// idFilterClaim ends the claim of a sandbox that also installed the id
+// filter (a unit holding setuid or setgid).
+const idFilterClaim = ",id_filter"
+
+// IsSandboxClaim reports whether claim is a sandbox claim for a known ABI,
+// with or without the id filter.
 func IsSandboxClaim(claim string) bool {
 	for abi := 1; abi <= MaxLandlockABI; abi++ {
-		if claim == SandboxClaim(abi) {
+		if claim == SandboxClaim(abi) || claim == SandboxClaim(abi)+idFilterClaim {
 			return true
 		}
 	}
@@ -79,6 +84,11 @@ func Launch(ctx context.Context, self string, argv []string, sb *unit.Sandbox, n
 	}
 	if sb != nil && runsAsRoot(opts.Execution) {
 		return nil, "", nil, fail.E("sandbox_root")
+	}
+	// Only a root supervisor has capabilities to give, and only to an
+	// explicit identity.
+	if sb != nil && len(sb.Caps) > 0 && (os.Geteuid() != 0 || opts.Execution.UID == nil) {
+		return nil, "", nil, fail.E("sandbox_cap")
 	}
 	if err := checkArgv(argv); err != nil {
 		return nil, "", nil, err

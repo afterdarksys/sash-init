@@ -52,7 +52,7 @@ func TestSandboxClaim(t *testing.T) {
 			t.Fatalf("%q accepted", c)
 		}
 	}
-	if _, err := parseStatus(okLine(MaxLandlockABI+1), true); err == nil {
+	if _, err := parseStatus(okLine(MaxLandlockABI+1, false), true); err == nil {
 		t.Fatal("unknown ABI claim accepted")
 	}
 }

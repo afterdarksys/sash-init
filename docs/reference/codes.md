@@ -104,6 +104,7 @@ holds the policy token) and, for sash units, `sash_start`, `sash_run`, `sash_sto
 | `landlock_unavailable` | The kernel has no Landlock (or refused a ruleset). | Enable Landlock (Linux 5.13+, `lsm=` including `landlock`), or drop the sandbox. |
 | `landlock_abi` | The sandbox needs a Landlock right the kernel's ABI lacks. | Use a newer kernel. |
 | `openat2_unavailable` | No `openat2` (Linux before 5.6). | Use a newer kernel. |
+| `seccomp_unavailable` | A unit holding `setuid` or `setgid` needs the id filter, and this kernel or architecture cannot install it (seccomp filters off, or not amd64 or arm64). | Use a supported kernel and architecture, or drop the caps. |
 | `sandbox_timeout` | The sandbox helper did not report within the deadline. | Check system load; see the unit's diagnostics. |
 | `sandbox_unsupported` | A sandbox was asked for off Linux. | Run on Linux or drop the sandbox. |
 | `launch_failed` | Event kind: a launch failed; its `code` holds the reason. | Read the event's code. |

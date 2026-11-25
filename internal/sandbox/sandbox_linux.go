@@ -105,6 +105,7 @@ var specKeys = map[string]struct{}{
 	"no_new_privs": {}, "read_only_paths": {}, "read_write_paths": {}, "caps": {},
 	"notify": {}, "sandbox": {}, "cgroup": {}, "pass": {}, "umask": {}, "rlimits": {},
 	"stdout_file": {}, "stderr_file": {}, "stderr_stdout": {},
+	"setuid_to": {}, "setgid_to": {},
 }
 
 var childTokens = map[string]struct{}{
@@ -112,10 +113,15 @@ var childTokens = map[string]struct{}{
 	"openat2_unavailable": {}, "landlock_unavailable": {}, "landlock_abi": {},
 	"exec_relative": {}, "exec_not_file": {}, "failed": {}, "sandbox_root": {},
 	"cgroup_join": {}, "stream_denied": {},
+	"sandbox_cap_denied": {}, "sandbox_ids": {}, "seccomp_unavailable": {},
 }
 
-func okLine(abi int) []byte {
-	return []byte("{\"ok\":true,\"claim\":\"" + SandboxClaim(abi) + "\"}\n")
+func okLine(abi int, idFilter bool) []byte {
+	claim := SandboxClaim(abi)
+	if idFilter {
+		claim += idFilterClaim
+	}
+	return []byte("{\"ok\":true,\"claim\":\"" + claim + "\"}\n")
 }
 
 // noneLine is the success status of a helper that only joined a cgroup.
@@ -194,6 +200,13 @@ func ApplyCLI(args []string) int {
 	if sb != nil && (unix.Geteuid() == 0 || unix.Getuid() == 0) {
 		return writeStatus("sandbox_root")
 	}
+	// First, before anything else runs: cut the capability state the
+	// supervisor raised down to exactly the granted set.
+	if sb != nil && len(sb.Caps) > 0 {
+		if err := enterCaps(sb.Caps); err != nil {
+			return writeStatus(fail.Token(err))
+		}
+	}
 	var st unix.Stat_t
 	if err := unix.Fstat(fdExec, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Mode&0o111 == 0 {
 		return writeStatus("exec_not_file")
@@ -224,7 +237,7 @@ func ApplyCLI(args []string) int {
 		if cerr != nil {
 			return writeStatus("failed")
 		}
-		status = okLine(abi)
+		status = okLine(abi, needsIDFilter(sb))
 	}
 	if err := setRlimits(limits); err != nil {
 		return writeStatus("failed")
@@ -478,6 +491,16 @@ func decodeSandbox(obj map[string]json.RawMessage) (*unit.Sandbox, error) {
 			return nil, err
 		}
 	}
+	for key, dest := range map[string]*[]uint32{"setuid_to": &sb.SetuidTo, "setgid_to": &sb.SetgidTo} {
+		if raw, ok := obj[key]; ok {
+			if err := jsonobj.Unmarshal(raw, dest); err != nil {
+				return nil, err
+			}
+			if *dest == nil {
+				*dest = []uint32{}
+			}
+		}
+	}
 	if err := unit.FinishSandbox(sb, present, privs); err != nil {
 		return nil, err
 	}
@@ -697,12 +720,37 @@ func restrict(sb *unit.Sandbox) (*held, int, error) {
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return h, 0, fail.E("failed")
 	}
-	if err := unix.Prctl(unix.PR_CAP_AMBIENT, uintptr(unix.PR_CAP_AMBIENT_CLEAR_ALL), 0, 0, 0); err != nil {
-		return h, 0, fail.E("failed")
+	// A unit with caps keeps them ambient, or its exec would lose them
+	// (capabilities(7)); enterCaps already made the ambient set exactly
+	// the granted set.
+	if len(sb.Caps) == 0 {
+		if err := unix.Prctl(unix.PR_CAP_AMBIENT, uintptr(unix.PR_CAP_AMBIENT_CLEAR_ALL), 0, 0, 0); err != nil {
+			return h, 0, fail.E("failed")
+		}
 	}
 	_, _, errno = unix.Syscall(unix.SYS_LANDLOCK_RESTRICT_SELF, uintptr(h.ruleset), 0, 0)
 	if errno != 0 {
 		return h, 0, fail.E("landlock_unavailable")
+	}
+	if len(sb.Caps) == 0 {
+		return h, abi, nil
+	}
+	if needsIDFilter(sb) {
+		if err := installIDFilter(sb); err != nil {
+			return h, 0, err
+		}
+	}
+	// The last check before exec: exactly the granted set in all five sets,
+	// and no_new_privs on.
+	want, err := capMask(sb.Caps)
+	if err != nil {
+		return h, 0, err
+	}
+	if err := checkCaps(want); err != nil {
+		return h, 0, err
+	}
+	if nnp, err := unix.PrctlRetInt(unix.PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0); err != nil || nnp != 1 {
+		return h, 0, fail.E("failed")
 	}
 	return h, abi, nil
 }
@@ -789,6 +837,8 @@ func marshalSpecPass(sb *unit.Sandbox, notify, join bool, pass int, umask *int, 
 		ReadOnly   []string          `json:"read_only_paths"`
 		ReadWrite  []string          `json:"read_write_paths"`
 		Caps       []string          `json:"caps"`
+		SetuidTo   []uint32          `json:"setuid_to,omitempty"`
+		SetgidTo   []uint32          `json:"setgid_to,omitempty"`
 		Notify     bool              `json:"notify"`
 		Sandbox    bool              `json:"sandbox"`
 		Cgroup     bool              `json:"cgroup"`
@@ -812,6 +862,8 @@ func marshalSpecPass(sb *unit.Sandbox, notify, join bool, pass int, umask *int, 
 		ReadOnly:   emptyStr(sb.ReadOnly),
 		ReadWrite:  emptyStr(sb.ReadWrite),
 		Caps:       emptyStr(sb.Caps),
+		SetuidTo:   sb.SetuidTo,
+		SetgidTo:   sb.SetgidTo,
 	}
 	buf, err := json.Marshal(body)
 	if err != nil || len(buf) == 0 || len(buf) > maxSpec {
@@ -849,6 +901,17 @@ func launchHelper(ctx context.Context, self string, argv []string, execF *os.Fil
 	spec, err := marshalSpecPass(sb, notify, join, len(opts.Pass), opts.Umask, opts.Rlimits, opts)
 	if err != nil {
 		return nil, "", nil, err
+	}
+	// The helper starts as the unit's uid holding the granted caps and
+	// CAP_SETPCAP in every set but the bounding set (caps_linux.go).
+	var ambient []uintptr
+	if sb != nil && len(sb.Caps) > 0 {
+		if opts.Execution.UID == nil {
+			return nil, "", nil, fail.E("sandbox_cap")
+		}
+		if ambient, err = ambientCaps(sb.Caps); err != nil {
+			return nil, "", nil, err
+		}
 	}
 	specR, specW, err := os.Pipe()
 	if err != nil {
@@ -915,6 +978,7 @@ func launchHelper(ctx context.Context, self string, argv []string, execF *os.Fil
 		SysProcAttr: procAttr(clone),
 	}
 	opts.configure(cmd)
+	cmd.SysProcAttr.AmbientCaps = ambient
 	if err := cmd.Start(); err != nil {
 		null.Close()
 		closePair(specR, specW)
@@ -961,6 +1025,9 @@ func launchHelper(ctx context.Context, self string, argv []string, execF *os.Fil
 	if cerr := statusR.Close(); cerr != nil && err == nil {
 		err = fail.E("failed")
 	}
+	if err == nil && sb != nil {
+		err = checkClaim(claim, sb)
+	}
 	if err != nil {
 		if notifyR != nil {
 			notifyR.Close()
@@ -969,6 +1036,15 @@ func launchHelper(ctx context.Context, self string, argv []string, execF *os.Fil
 		return nil, "", nil, err
 	}
 	return cmd, claim, notifyR, nil
+}
+
+// checkClaim requires the id filter to be claimed exactly when the unit
+// holds setuid or setgid.
+func checkClaim(claim string, sb *unit.Sandbox) error {
+	if strings.HasSuffix(claim, idFilterClaim) != needsIDFilter(sb) {
+		return fail.E("sandbox_cap")
+	}
+	return nil
 }
 
 func closeChildEnds(files ...*os.File) error {

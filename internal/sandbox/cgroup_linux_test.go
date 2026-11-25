@@ -132,7 +132,7 @@ func TestHelperStatusMatchesRequest(t *testing.T) {
 	if _, err := parseStatus(noneLine, true); err == nil {
 		t.Fatal("none accepted from a sandboxing helper")
 	}
-	if _, err := parseStatus(okLine(3), false); err == nil {
+	if _, err := parseStatus(okLine(3, false), false); err == nil {
 		t.Fatal("sandbox claim accepted from a join-only helper")
 	}
 	if claim, err := parseStatus(noneLine, false); err != nil || claim != claimNone {
