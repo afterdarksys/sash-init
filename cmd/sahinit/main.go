@@ -57,6 +57,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if args[0] == "apply" {
 		return sandbox.ApplyCLI(args)
 	}
+	if args[0] == "--skill" {
+		return runSkill(args[1:], stdout, stderr)
+	}
 	switch args[0] {
 	case "codes":
 		return runCodes(args[1:], stdout, stderr)

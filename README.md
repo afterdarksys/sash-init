@@ -66,7 +66,8 @@ A unit may name a sash service script instead of `exec`. sahinit then runs `sash
 For scripts and AI agents: `plan`, `validate`, `ctl status|explain|diff`,
 `logs`, `events`, `codes` and `version` take `--json` (one JSON object on
 stdout, stable fields, a stable `code` on failure); `sahinit codes` prints
-every code with its meaning and fix. See
+every code with its meaning and fix; `sahinit --skill` prints an embedded
+usage guide for agents (`skills/install.sh` installs it from a checkout). See
 [JSON output](docs/reference/cli.md#json-output).
 
 Execution context, local control commands, and lifecycle diagnostics are documented

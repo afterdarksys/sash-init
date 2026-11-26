@@ -38,6 +38,7 @@ Top-level dispatch (`cmd/sahinit/main.go`):
 | `migrate` | [convert systemd, daemontools or OpenRC catalogs](#sahinit-migrate) |
 | `codes` | [the catalog of every stable code](#sahinit-codes) |
 | `version` | [version and capabilities](#sahinit-version) |
+| `--skill` | [the usage guide for AI agents](#sahinit---skill) |
 | `apply` | internal sandbox helper; see [below](#sahinit-apply-internal) |
 | anything else, or nothing | usage text, exit 2 |
 
@@ -342,6 +343,19 @@ without one). There are no packaged releases. Exit 0; 2 for a usage error.
 | Flag | Type | Default | Constraints |
 | --- | --- | --- | --- |
 | `--json` | bool | false | Print the version object. |
+
+## sahinit --skill
+
+```text
+sahinit --skill
+```
+
+Prints the usage guide for AI agents (markdown) embedded in the binary, for
+example `sahinit --skill > ~/.claude/skills/sahinit/SKILL.md`; from a
+checkout, `skills/install.sh [SKILLS_DIR]` copies it. `--skill` must be the
+only argument: anything after it is a usage error (exit 2, nothing on
+stdout), and after another command it is that command's unknown flag. It
+reads no file, opens no socket and runs nothing.
 
 ## JSON output
 
