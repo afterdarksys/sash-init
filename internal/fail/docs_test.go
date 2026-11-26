@@ -3,73 +3,26 @@
 package fail
 
 import (
-	"io/fs"
+	"flag"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"testing"
+
+	"github.com/afterdarksys/sahinit/internal/docscan"
 )
 
 // The reference documentation must not drift from the code: every token the
-// source can emit must be explained in docs/reference/codes.md, and every flag
-// and subcommand a flag set defines must be listed in docs/reference/cli.md.
-// The source is scanned as text, so a new token or flag fails this test until
-// it is documented.
+// source can emit must be in the catalog (catalog_table.go), codes.md must
+// be the catalog's rendering, and every flag and subcommand a flag set
+// defines must be listed in docs/reference/cli.md. The source is scanned as
+// text, so a new token or flag fails these tests until it is catalogued or
+// documented.
 
 const repoRoot = "../.."
 
-// tokenPatterns find tokens the source emits: errors, socket responses,
-// status fields, helper statuses and log lines.
-var tokenPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`fail\.E\("([a-z][a-z0-9_]*)"\)`),
-	regexp.MustCompile(`Fprintln\([^,()]+, "([a-z][a-z0-9_]*)"`),
-	regexp.MustCompile(`logf\("([a-z][a-z0-9_]*)[ "]`),
-	regexp.MustCompile(`Error: "([a-z][a-z0-9_]*)"`),
-	regexp.MustCompile(`\bs\.lastError = "([a-z][a-z0-9_]*)"`),
-	regexp.MustCompile(`s\.state, s\.lastError = "[a-z]+", "([a-z][a-z0-9_]*)"`),
-	regexp.MustCompile(`writeStatus\("([a-z][a-z0-9_]*)"\)`),
-	regexp.MustCompile(`refuse\("([a-z][a-z0-9_]*)"\)`),
-	regexp.MustCompile(`sashFail\([^"]*"([a-z][a-z0-9_]*)"`),
-	regexp.MustCompile(`return "([a-z]+(?:_[a-z0-9]+)+)"`),
-	regexp.MustCompile(`eventLocked\("([a-z][a-z0-9_]*)",`),
-}
-
-// flagPattern finds flag definitions in a flag.FlagSet.
-var flagPattern = regexp.MustCompile(`\.(?:String|Bool|Duration|Int|Uint|Uint64|Int64|Func|StringVar|BoolVar|DurationVar|IntVar)\((?:&[^,]+, )?"([a-z][a-z0-9-]*)"`)
-
-// usagePattern finds usage lines in the CLI's usage text.
-var usagePattern = regexp.MustCompile(`"usage: sahinit ([^"\\]+)`)
-
-func sourceFiles(t *testing.T, dirs ...string) map[string]string {
-	t.Helper()
-	out := map[string]string{}
-	for _, dir := range dirs {
-		root := filepath.Join(repoRoot, dir)
-		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
-				return nil
-			}
-			raw, err := os.ReadFile(p)
-			if err != nil {
-				return err
-			}
-			out[p] = string(raw)
-			return nil
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if len(out) == 0 {
-		t.Fatal("no source files found")
-	}
-	return out
-}
+var update = flag.Bool("update", false, "rewrite the generated region of docs/reference/codes.md")
 
 func readDoc(t *testing.T, name string) string {
 	t.Helper()
@@ -80,70 +33,114 @@ func readDoc(t *testing.T, name string) string {
 	return string(raw)
 }
 
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
-// sourceTokens maps each token to one file that emits it.
-func sourceTokens(t *testing.T) map[string]string {
-	t.Helper()
-	tokens := map[string]string{}
-	files := sourceFiles(t, "cmd", "internal")
-	for _, p := range sortedKeys(files) {
-		for _, re := range tokenPatterns {
-			for _, m := range re.FindAllStringSubmatch(files[p], -1) {
-				if _, ok := tokens[m[1]]; !ok {
-					tokens[m[1]] = p
-				}
-			}
-		}
-	}
-	return tokens
-}
-
 func TestCodesDocumented(t *testing.T) {
-	doc := readDoc(t, "codes.md")
-	tokens := sourceTokens(t)
+	tokens, err := docscan.Tokens(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// A sanity floor, so a broken pattern cannot pass by finding nothing.
 	for _, must := range []string{"failed", "unit_perm", "peer_supervised", "cgroup_stray", "sash_grant", "sash_file_perm", "restart_limit", "policy_refresh_stale"} {
 		if _, ok := tokens[must]; !ok {
 			t.Errorf("scanner did not find %s in the source", must)
 		}
 	}
-	for _, tok := range sortedKeys(tokens) {
-		if !strings.Contains(doc, "`"+tok+"`") {
-			t.Errorf("token %s (emitted in %s) is not documented in docs/reference/codes.md", tok, tokens[tok])
+	for _, tok := range docscan.SortedKeys(tokens) {
+		if _, ok := Lookup(tok); !ok {
+			t.Errorf("token %s (emitted in %s) is not in the catalog (internal/fail/catalog_table.go)", tok, tokens[tok])
 		}
+	}
+}
+
+const (
+	beginCatalog = "<!-- BEGIN CATALOG: generated from internal/fail/catalog_table.go by go test ./internal/fail -run TestCodesDocGenerated -update; do not edit by hand -->\n"
+	endCatalog   = "<!-- END CATALOG -->\n"
+)
+
+// renderCatalog is the generated region of codes.md: one table per group.
+func renderCatalog() string {
+	var b strings.Builder
+	b.WriteString(beginCatalog)
+	for _, g := range Groups() {
+		b.WriteString("\n## " + g.Title + "\n\n")
+		if g.Intro != "" {
+			b.WriteString(g.Intro + "\n\n")
+		}
+		b.WriteString("| Code | Meaning | What to do |\n| --- | --- | --- |\n")
+		for _, c := range g.Codes {
+			b.WriteString("| `" + c.Code + "` | " + c.Meaning + " | " + c.Fix + " |\n")
+		}
+	}
+	b.WriteString("\n" + endCatalog)
+	return b.String()
+}
+
+func TestCodesDocGenerated(t *testing.T) {
+	path := filepath.Join(repoRoot, "docs", "reference", "codes.md")
+	doc := readDoc(t, "codes.md")
+	start := strings.Index(doc, beginCatalog)
+	end := strings.Index(doc, endCatalog)
+	if start < 0 || end < start {
+		t.Fatalf("codes.md has no generated catalog region (%q ... %q)", beginCatalog, endCatalog)
+	}
+	want := doc[:start] + renderCatalog() + doc[end+len(endCatalog):]
+	if want == doc {
+		return
+	}
+	if *update {
+		if err := os.WriteFile(path, []byte(want), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	t.Fatal("docs/reference/codes.md differs from the catalog; run go test ./internal/fail -run TestCodesDocGenerated -update")
+}
+
+var codeRE = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+
+func TestCatalogShape(t *testing.T) {
+	all := Catalog()
+	if len(all) < 200 {
+		t.Fatalf("catalog has %d codes", len(all))
+	}
+	seen := map[string]bool{}
+	for i, c := range all {
+		if !codeRE.MatchString(c.Code) || seen[c.Code] {
+			t.Errorf("code %q is malformed or repeated", c.Code)
+		}
+		seen[c.Code] = true
+		if i > 0 && all[i-1].Code >= c.Code {
+			t.Errorf("catalog not sorted at %q", c.Code)
+		}
+		for _, s := range []string{c.Meaning, c.Fix} {
+			if len(s) < 6 || !(strings.HasSuffix(s, ".") || strings.HasSuffix(s, ".)")) || strings.Contains(s, "\n") || strings.Contains(s, " | ") {
+				t.Errorf("%s: %q is not a table-safe sentence ending in a period", c.Code, s)
+			}
+		}
+		m := Message(c.Code)
+		if len(m) < 8 || !strings.HasSuffix(m, ".") || strings.Contains(m, "`") || strings.Contains(m[:len(m)-1], ". ") {
+			t.Errorf("%s: message %q is not one sentence", c.Code, m)
+		}
+	}
+	if Message("no_such_code") != Message("failed") {
+		t.Fatal("an unknown code must read as failed")
 	}
 }
 
 func TestCLIDocumented(t *testing.T) {
 	doc := readDoc(t, "cli.md")
-	files := sourceFiles(t, "cmd/sahinit", "internal/hostinit")
-	flags := map[string]string{}
-	usage := map[string]string{}
-	for _, p := range sortedKeys(files) {
-		for _, m := range flagPattern.FindAllStringSubmatch(files[p], -1) {
-			flags[m[1]] = p
-		}
-		for _, m := range usagePattern.FindAllStringSubmatch(files[p], -1) {
-			usage[m[1]] = p
-		}
+	flags, usage, err := docscan.CLI(repoRoot)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if len(flags) < 20 || len(usage) < 7 {
 		t.Fatalf("scanner found %d flags and %d usage lines; the patterns are broken", len(flags), len(usage))
 	}
-	for _, f := range sortedKeys(flags) {
+	for _, f := range docscan.SortedKeys(flags) {
 		if !strings.Contains(doc, "`--"+f+"`") {
 			t.Errorf("flag --%s (defined in %s) is not documented in docs/reference/cli.md", f, flags[f])
 		}
 	}
-	for _, line := range sortedKeys(usage) {
+	for _, line := range docscan.SortedKeys(usage) {
 		words := strings.Fields(line)
 		if !strings.Contains(doc, "## sahinit "+words[0]) {
 			t.Errorf("command %q (%s) has no section in docs/reference/cli.md", words[0], usage[line])
