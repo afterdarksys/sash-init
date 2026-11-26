@@ -104,8 +104,9 @@ list from the constants the code uses.
    names the strict schema documented in `units.md`; a change that would make
    an existing valid unit mean something else, or be refused, raises it.
 8. **`version`/`commit`** come from `-ldflags "-X main.version=..."` when
-   set, else the Go build info (`(devel)` for a source build) and its
-   `vcs.revision` (`unknown` without VCS stamping). `build` is `[]`: this
+   set, else the Go build info (a pseudo-version for a build in a git
+   checkout, `(devel)` without VCS information) and its `vcs.revision`
+   (`unknown` without VCS stamping). `build` is `[]`: this
    branch has no behaviour-changing build tags.
 9. **`--skill`** is recognised only as the first argument. `sahinit --skill`
    prints the guide; `sahinit --skill ANYTHING` is a usage error. Elsewhere

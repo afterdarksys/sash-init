@@ -336,9 +336,10 @@ sahinit version [--json]
 
 Prints the version and what this binary supports, as `key value` lines or,
 with `--json`, the [version object](#version). `version` is the `-ldflags
-"-X main.version=..."` value, else the Go module version (`(devel)` for a
-build from a checkout); `commit` is the VCS revision Go stamped (`unknown`
-without one). There are no packaged releases. Exit 0; 2 for a usage error.
+"-X main.version=..."` value, else the Go module version Go stamped (a
+pseudo-version such as `v0.0.0-20261126093614-ad9a44dc2d67` for a build in a
+git checkout, `(devel)` without VCS information); `commit` is the VCS
+revision Go stamped (`unknown` without one). There are no packaged releases. Exit 0; 2 for a usage error.
 
 | Flag | Type | Default | Constraints |
 | --- | --- | --- | --- |

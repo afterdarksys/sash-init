@@ -20,8 +20,8 @@ import (
 const versionUsage = "usage: sahinit version [--json]\n"
 
 // version is set with -ldflags "-X main.version=..."; without it the
-// module version from the build info is reported ("(devel)" for a build
-// from a checkout).
+// module version from the build info is reported (a pseudo-version in a
+// git checkout, "(devel)" without VCS information).
 var version string
 
 // buildTags are the build tags that change what this binary does. This
