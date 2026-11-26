@@ -39,7 +39,7 @@ func TestCodesDocumented(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A sanity floor, so a broken pattern cannot pass by finding nothing.
-	for _, must := range []string{"failed", "unit_perm", "peer_supervised", "cgroup_stray", "sash_grant", "sash_file_perm", "restart_limit", "policy_refresh_stale"} {
+	for _, must := range []string{"failed", "unit_perm", "peer_supervised", "cgroup_stray", "sash_grant", "sash_file_perm", "restart_limit", "policy_refresh_stale", "usage"} {
 		if _, ok := tokens[must]; !ok {
 			t.Errorf("scanner did not find %s in the source", must)
 		}

@@ -37,6 +37,8 @@ const (
 	MaxGrant       = 64 * 1024
 	PurposeService = "service"
 	grantDomain    = "sash-grant-v2\n"
+	// GrantVersion is the one grant version ("v") sahinit accepts.
+	GrantVersion = "sash/2"
 )
 
 // ServiceName is a service name, in the grant and the service block.
@@ -183,7 +185,7 @@ func parseGrant(doc []byte) (Grant, string, error) {
 			return bad()
 		}
 	}
-	if w.V != "sash/2" || w.Purpose != PurposeService || w.Host == "" || w.LeaseID == "" || w.Sig == "" {
+	if w.V != GrantVersion || w.Purpose != PurposeService || w.Host == "" || w.LeaseID == "" || w.Sig == "" {
 		return bad()
 	}
 	if !ServiceName.MatchString(w.Service) || w.Actor != "service:"+w.Service || w.Serial < 1 || w.Exp < 0 {

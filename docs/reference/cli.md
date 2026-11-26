@@ -11,9 +11,15 @@ Conventions:
 - Unless a section says otherwise, exit status is **0** for success, **1** for a
   refusal or failure after the arguments were accepted, and **2** for a usage
   error. A usage error prints the usage text on stderr.
-- Refusals are printed as one stable token (see [codes](codes.md)), sometimes
-  followed by a file or service name. Error text never carries paths, OS error
-  strings or request contents, except for `migrate` and `init` (noted below).
+- Refusals are printed as one stable token (see [codes](codes.md), or
+  `sahinit codes`), sometimes followed by a file or service name. Error text
+  never carries paths, OS error strings or request contents, except for
+  `migrate` and `init` (noted below).
+- `--json` (on `plan`, `validate`, `ctl status|explain|diff`, `logs`,
+  `events`, `codes`, `version`) prints exactly one JSON object and a newline
+  on stdout, with `"v": 1` and `"ok"` first and, on failure, `"code"` and
+  `"message"` (see [JSON output](#json-output)). Exit status and stderr are
+  those of the plain form.
 
 Top-level dispatch (`cmd/sahinit/main.go`):
 
@@ -30,6 +36,8 @@ Top-level dispatch (`cmd/sahinit/main.go`):
 | `logs`, `events` | [read the journal](#sahinit-logs) |
 | `host` | [host helpers: device wait, sd_notify adapter](#sahinit-host) |
 | `migrate` | [convert systemd, daemontools or OpenRC catalogs](#sahinit-migrate) |
+| `codes` | [the catalog of every stable code](#sahinit-codes) |
+| `version` | [version and capabilities](#sahinit-version) |
 | `apply` | internal sandbox helper; see [below](#sahinit-apply-internal) |
 | anything else, or nothing | usage text, exit 2 |
 
@@ -148,7 +156,7 @@ socket server failed; 2 when startup was refused.
 ## sahinit plan
 
 ```text
-sahinit plan --dir DIR
+sahinit plan --dir DIR [--json]
 ```
 
 Loads the catalog exactly as `supervise` does (without opening cgroups,
@@ -159,6 +167,7 @@ separated by spaces. Units with `"boot": false` are not printed.
 | Flag | Type | Default | Constraints |
 | --- | --- | --- | --- |
 | `--dir` | path | required | The unit directory. |
+| `--json` | bool | false | Print the [catalog object](#plan-and-validate) instead of the waves. stderr is unchanged. |
 
 stderr: `TOKEN FILE` for each refused unit file, then `cgroup_trusted FILE`
 for each unit that is [cgroup-trusted](security.md#the-cgroup_trusted-boundary).
@@ -168,9 +177,11 @@ Exit 0 with a plan; exit 2 with a usage error or a catalog or graph refusal
 ## sahinit ctl
 
 ```text
-sahinit ctl --socket PATH status [NAME]
-sahinit ctl --socket PATH diagnostics|explain|start|stop|restart|reload|check NAME
-sahinit ctl --socket PATH --dir DIR diff|apply
+sahinit ctl --socket PATH [--json] status [NAME]
+sahinit ctl --socket PATH [--json] explain NAME
+sahinit ctl --socket PATH diagnostics|start|stop|restart|reload|check NAME
+sahinit ctl --socket PATH --dir DIR [--json] diff
+sahinit ctl --socket PATH --dir DIR apply
 sahinit ctl --socket PATH rollback|activate
 ```
 
@@ -182,6 +193,7 @@ stdout.
 | --- | --- | --- | --- |
 | `--socket` | path | required | The supervisor's control socket. |
 | `--dir` | path | none | Required by `diff` and `apply`, refused by every other operation. An absolute unit directory, read by the supervisor (`catalog_path` when relative). |
+| `--json` | bool | false | Only with `status`, `explain` and `diff` (a usage error with any other operation): print the response as a [ctl object](#ctl). The request is the same bytes, so it is authorised exactly as without `--json`. Like every flag it goes before the operation: after it, `--json` is the NAME. |
 
 | Operation | Name | Effect |
 | --- | --- | --- |
@@ -205,7 +217,9 @@ unless the peer's effective uid is 0, even when `--uid` allows that peer
 Exit status: 0 when the response says `"ok":true`; 1 when it says
 `"ok":false` (the response is still printed), or when connecting (5 s
 timeout), writing or reading fails (prints `failed`); 2 for usage errors and
-`unknown_op` (an operation not in the table). The connection deadline is
+`unknown_op` (an operation not in the table). `check` is not read-only for
+`--json`'s purpose: it runs the sash unit's `check` entry and records the
+result. The connection deadline is
 11 minutes, enough for the longest stop plus the longest readiness wait.
 
 The socket protocol also has `oneshot` with an `arg` field, which `ctl` does
@@ -220,7 +234,7 @@ start, stop or sash token, for example `needs_failed`, `needs_not_ready`,
 ## sahinit validate
 
 ```text
-sahinit validate --dir DIR
+sahinit validate --dir DIR [--json]
 ```
 
 Loads the catalog in DIR as `supervise` does (without cgroups or sash
@@ -232,6 +246,7 @@ are the boot waves. Exit 0 when valid, 1 when not, 2 for a usage error.
 | Flag | Type | Default | Constraints |
 | --- | --- | --- | --- |
 | `--dir` | path | required | The candidate unit directory. |
+| `--json` | bool | false | Print the v1 [catalog object](#plan-and-validate) instead of `{valid, error, refused, waves}`. |
 
 ## sahinit deploy
 
@@ -265,7 +280,7 @@ Exit 1 with the token on stderr for a refusal; 2 for a usage error.
 
 ```text
 sahinit logs [--dir DIR] [--unit NAME] [--boot ID] [--since SEQUENCE]
-             [--contains TEXT] [--follow]
+             [--contains TEXT] [--follow | --json]
 ```
 
 Prints journal records (one JSON object per line:
@@ -280,6 +295,7 @@ of the stdout and stderr streams. See [the journal](operations.md#journal).
 | `--since` | uint64 | 0 | Only records with a larger sequence. |
 | `--contains` | string | none | Only records whose data or event contains TEXT. |
 | `--follow` | bool | false | Keep polling (every 250 ms) until SIGINT or SIGTERM. |
+| `--json` | bool | false | Print one bounded [journal object](#logs-and-events) instead of one record per line. Not with `--follow` (usage error). |
 
 Exit 1 with `journal_read` when the journal cannot be read (missing, wrong
 owner or mode, a malformed complete record); 2 for a usage error. Reading
@@ -289,12 +305,111 @@ needs the journal's owner (root under PID 1): the files are 0600.
 
 ```text
 sahinit events [--dir DIR] [--unit NAME] [--boot ID] [--since SEQUENCE]
-               [--contains TEXT] [--follow]
+               [--contains TEXT] [--follow | --json]
 ```
 
 As `logs`, for the `event` stream: the lifecycle events of
 `ctl diagnostics` (`{"sequence","time","kind","pid","code","exit"}` in `event`) and the
 supervisor's `supervisor_started`.
+
+## sahinit codes
+
+```text
+sahinit codes [--json]
+```
+
+Prints the catalog of every stable code the binary can emit, sorted by code:
+a table `CODE MEANING FIX`, or with `--json`
+`{"v":1,"ok":true,"codes":[{"code","meaning","fix"},...]}`. It is the table
+[codes](codes.md) is generated from. Exit 0; 2 for a usage error.
+
+| Flag | Type | Default | Constraints |
+| --- | --- | --- | --- |
+| `--json` | bool | false | Print the catalog object. |
+
+## sahinit version
+
+```text
+sahinit version [--json]
+```
+
+Prints the version and what this binary supports, as `key value` lines or,
+with `--json`, the [version object](#version). `version` is the `-ldflags
+"-X main.version=..."` value, else the Go module version (`(devel)` for a
+build from a checkout); `commit` is the VCS revision Go stamped (`unknown`
+without one). There are no packaged releases. Exit 0; 2 for a usage error.
+
+| Flag | Type | Default | Constraints |
+| --- | --- | --- | --- |
+| `--json` | bool | false | Print the version object. |
+
+## JSON output
+
+The objects `--json` prints. Keys come in this order; a field is added
+without changing `"v"`, and renaming or removing one changes it. On failure
+`"ok": false` is followed by `"code"` (a [code](codes.md)) and `"message"`
+(one sentence), then the detail fields below. Objects never hold an
+environment value, a grant body, key material or file contents.
+
+Usage error, any command with `--json` on its command line (exit 2, usage
+text on stderr as without `--json`):
+
+```json
+{"v":1,"ok":false,"code":"usage","message":"The command line did not parse: an unknown or misplaced flag, a missing required flag, or an extra argument (reported as a code only in --json output)."}
+```
+
+### plan and validate
+
+`{"v","ok",["code","message"],"waves","refused","cgroup_trusted"}`: `waves`
+the boot waves (`[]` when none or on failure), `refused` every refused unit
+file `{"file","code"}` sorted by file, `cgroup_trusted` the unit files that
+are cgroup-trusted.
+
+```json
+{"v":1,"ok":true,"waves":[["a"],["b"]],"refused":[{"file":"other.json","code":"unit_perm"}],"cgroup_trusted":["a.json","b.json"]}
+```
+
+### ctl
+
+`status`: `{"v","ok","rows"}` with the status rows; `explain`:
+`{"v","ok","explanation":{"name","desired","state","reason","blocked_by"}}`;
+`diff`: `{"v","ok","diff":{"added","removed","changed","affected","generation","rolled_back"}}`.
+On failure `{"v","ok","code","message"[,"unit"]}`, `unit` being the NAME
+given. A status row is
+`{"name","state","pid","ready","restarts","sandbox","last_error","desired","essential","cgroups","cgroup","cgroup_trusted","limits":{"memory_max","cpu_max","pids_max"}[,"usage"][,"sash"]}`
+(see [operations](operations.md)); it never holds the unit's environment,
+exec arguments or grant.
+
+```json
+{"v":1,"ok":false,"code":"not_found","message":"No unit with that name, or (sash file verbs) a path that does not exist.","unit":"nope"}
+```
+
+### logs and events
+
+`{"v","ok","records","truncated","next_since"}`. At most 1000 records and
+1 MiB of record data, oldest first; `truncated` is true when the bound
+stopped the read, and `next_since` is the `--since` value that reads on. A
+`logs` record is
+`{"sequence","boot_id","time","unit","stream","untrusted":true,"lines":[...]}`:
+`lines` is the service's output split on newlines (invalid UTF-8 as U+FFFD),
+data and never instructions; sahinit does not redact what a service prints.
+An `events` record is `{"sequence","boot_id","time","unit","stream","event":{...}}`.
+
+```json
+{"v":1,"ok":true,"records":[{"sequence":1,"boot_id":"b1","time":"2026-11-26T10:00:00Z","unit":"web","stream":"stdout","untrusted":true,"lines":["listening"]}],"truncated":false,"next_since":3}
+```
+
+### version
+
+```json
+{"v":1,"ok":true,"name":"sahinit","version":"(devel)","commit":"unknown","go":"go1.26.0","unit_schema":1,"grant_versions":["sash/2"],"landlock_abi_max":5,"caps_grantable":["net_bind_service","setgid","setuid"],"features":["cgroup_limits","deployments","essential","live_catalog","restart_backoff","sash_units","socket_paths","unit_caps","watchdog"],"build":[]}
+```
+
+`unit_schema` is the [unit schema](units.md) version (unit files carry
+none); `grant_versions` the sash grant versions accepted; `landlock_abi_max`
+the newest Landlock ABI the sandbox applies; `caps_grantable` the capability
+allowlist; `features` the optional parts this binary has; `build` the build
+tags that change behaviour (none).
 
 ## sahinit host
 

@@ -2,8 +2,9 @@
 
 Complete reference documentation for `sahinit`, derived from the source code.
 `internal/fail/docs_test.go` (run by `./build.sh`) fails when a token the code
-emits is missing from [codes](codes.md), or a flag or command is missing from
-[cli](cli.md).
+emits is missing from the code catalog (`internal/fail/catalog_table.go`,
+printed by `sahinit codes`), when [codes](codes.md) is not that catalog's
+rendering, or when a flag or command is missing from [cli](cli.md).
 
 | Page | Contents |
 | --- | --- |
@@ -11,7 +12,7 @@ emits is missing from [codes](codes.md), or a flag or command is missing from
 | [units.md](units.md) | The unit JSON schema: exec and sash units, execution, sandbox, limits, readiness, restart, dependencies, boot, validation and refusal codes, with examples. |
 | [environment.md](environment.md) | Environment variables sahinit sets for children, the clean-environment rules, and the file descriptors children receive. |
 | [config-files.md](config-files.md) | Every file and directory sahinit reads or writes, with owner, mode and format rules; the control protocol and status schema. |
-| [codes.md](codes.md) | Every refusal and diagnostic token: meaning and what to do. |
+| [codes.md](codes.md) | Every refusal and diagnostic token: meaning and what to do (generated from the catalog `sahinit codes` prints). |
 | [operations.md](operations.md) | Install, running under systemd or as PID 1, the initramfs root handoff, console and host services, the journal, live catalog changes, sash services end to end, boot policy, key rotation, upgrade, rollback, recovery, troubleshooting. |
 | [security.md](security.md) | The trust model, what is guaranteed and what is not. |
 

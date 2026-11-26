@@ -63,6 +63,12 @@ each one says why.
 
 A unit may name a sash service script instead of `exec`. sahinit then runs `sash --describe` at load, verifies the service's signed `sash/2` grant and its per-service floor before every start, and performs the script's process verbs itself after re-checking each one. See [sash services, batch 1](docs/design/sash-services-1.md). `./scripts/test-sash-docker.sh` builds sash from its repository and runs the end-to-end tests against it.
 
+For scripts and AI agents: `plan`, `validate`, `ctl status|explain|diff`,
+`logs`, `events`, `codes` and `version` take `--json` (one JSON object on
+stdout, stable fields, a stable `code` on failure); `sahinit codes` prints
+every code with its meaning and fix. See
+[JSON output](docs/reference/cli.md#json-output).
+
 Execution context, local control commands, and lifecycle diagnostics are documented
 in [execution and diagnostics](docs/execution.md).
 

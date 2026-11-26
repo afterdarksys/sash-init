@@ -58,6 +58,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return sandbox.ApplyCLI(args)
 	}
 	switch args[0] {
+	case "codes":
+		return runCodes(args[1:], stdout, stderr)
+	case "version":
+		return runVersion(args[1:], stdout, stderr)
 	case "deploy":
 		return runDeploy(args[1:], stdout, stderr)
 	case "host":
@@ -94,46 +98,54 @@ func runPlan(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	dir := fs.String("dir", "", "")
+	asJSON := fs.Bool("json", false, "")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || *dir == "" {
-		fmt.Fprint(stderr, usageText)
-		return 2
+		return usage(args, usageText, stdout, stderr)
 	}
-	svcs, err := loadUnits(*dir, stderr)
+	svcs, refused, err := loadUnits(*dir, stderr)
+	var waves [][]string
+	if err == nil {
+		waves, err = graph.Plan(svcs)
+	}
 	if err != nil {
 		fmt.Fprintln(stderr, fail.Token(err))
+		if *asJSON {
+			writeJSON(stdout, catalogJSON(err, waves, refused, svcs))
+		}
 		return 2
 	}
-	waves, err := graph.Plan(svcs)
-	if err != nil {
-		fmt.Fprintln(stderr, fail.Token(err))
-		return 2
+	if *asJSON {
+		if !writeJSON(stdout, catalogJSON(nil, waves, refused, svcs)) {
+			return 1
+		}
+	} else {
+		for _, wave := range waves {
+			fmt.Fprintln(stdout, strings.Join(wave, " "))
+		}
 	}
-	for _, wave := range waves {
-		fmt.Fprintln(stdout, strings.Join(wave, " "))
+	for _, file := range trustedFiles(svcs) {
+		fmt.Fprintln(stderr, "cgroup_trusted", file)
 	}
-	flagTrusted(svcs, stderr)
 	return 0
 }
 
-// flagTrusted names, as "cgroup_trusted FILE", each unit that runs without a
-// sandbox as root or as the supervisor's uid: it can leave its cgroup, so
-// the cgroup guarantees are not promised for it.
-func flagTrusted(svcs map[string]*unit.Service, stderr io.Writer) {
-	names := make([]string, 0, len(svcs))
+// trustedFiles names, as FILE, each unit that runs without a sandbox as
+// root or as the supervisor's uid: it can leave its cgroup, so the cgroup
+// guarantees are not promised for it (plan prints "cgroup_trusted FILE").
+func trustedFiles(svcs map[string]*unit.Service) []string {
+	names := []string{}
 	for name, svc := range svcs {
 		if unit.CgroupTrusted(svc) {
-			names = append(names, name)
+			names = append(names, name+".json")
 		}
 	}
 	sort.Strings(names)
-	for _, name := range names {
-		fmt.Fprintln(stderr, "cgroup_trusted", name+".json")
-	}
+	return names
 }
 
 // loadUnits loads the catalog and names each refused unit file on stderr as
 // "TOKEN FILE". A refused unit is left out; the rest of the catalog loads.
-func loadUnits(dir string, stderr io.Writer) (map[string]*unit.Service, error) {
+func loadUnits(dir string, stderr io.Writer) (map[string]*unit.Service, map[string]string, error) {
 	svcs, refused, err := unit.Load(dir)
 	files := make([]string, 0, len(refused))
 	for file := range refused {
@@ -143,7 +155,7 @@ func loadUnits(dir string, stderr io.Writer) (map[string]*unit.Service, error) {
 	for _, file := range files {
 		fmt.Fprintln(stderr, refused[file], file)
 	}
-	return svcs, err
+	return svcs, refused, err
 }
 
 // openCgroups opens the supervisor's own cgroup as the root for service
@@ -255,7 +267,7 @@ func runSupervise(args []string, stdout, stderr io.Writer) int {
 			err = fail.E("boot_refused")
 		}
 	} else {
-		svcs, err = loadUnits(*dir, stderr)
+		svcs, _, err = loadUnits(*dir, stderr)
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, fail.Token(err))

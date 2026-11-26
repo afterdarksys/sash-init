@@ -5,16 +5,21 @@ sahinit reports every failure as one stable token from a closed vocabulary
 request id or an OS error string never reaches the control socket or a log.
 An error that is not a token becomes `failed`.
 
-Tokens appear in four places:
+Tokens appear in five places:
 
 - on **stderr** of a command, alone or as `TOKEN FILE` / `TOKEN NAME`;
 - in a control-socket response's `error`;
 - in a status row's `last_error`, and in a diagnostics event's `code`;
-- in the supervisor's **log lines** (its stderr; the console under PID 1).
+- in the supervisor's **log lines** (its stderr; the console under PID 1);
+- in the `"code"` of a failed `--json` object (see [JSON output](cli.md#json-output)).
 
-`internal/fail/docs_test.go` fails the build when a token defined in the
+The tables below are generated from the catalog in
+`internal/fail/catalog_table.go`, which `sahinit codes [--json]` prints.
+`internal/fail/docs_test.go` fails the build when a token emitted in the
 source (every `fail.E("...")` literal, every log-line and status token) is
-missing from this page.
+missing from the catalog, or when this page differs from the catalog's
+rendering. Edit the catalog, then run
+`go test ./internal/fail -run TestCodesDocGenerated -update`.
 
 Each group below lists the code, what it means, and what to do.
 

@@ -22,6 +22,8 @@ type Execution struct {
 	Environment []string `json:"environment,omitempty"`
 }
 
+var executionKeys = map[string]struct{}{"uid": {}, "gid": {}, "groups": {}, "directory": {}, "environment": {}}
+
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func parseExecution(raw json.RawMessage) (Execution, error) {
@@ -29,7 +31,7 @@ func parseExecution(raw json.RawMessage) (Execution, error) {
 	if raw == nil {
 		return e, nil
 	}
-	obj, err := jsonobj.Decode(raw, map[string]struct{}{"uid": {}, "gid": {}, "groups": {}, "directory": {}, "environment": {}})
+	obj, err := jsonobj.Decode(raw, executionKeys)
 	if err != nil {
 		return e, err
 	}

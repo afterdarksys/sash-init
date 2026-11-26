@@ -18,6 +18,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -86,6 +87,57 @@ var linuxCaps = map[string]bool{
 	"audit_write": true, "audit_control": true, "setfcap": true, "mac_override": true,
 	"mac_admin": true, "syslog": true, "wake_alarm": true, "block_suspend": true, "audit_read": true,
 	"perfmon": true, "bpf": true, "checkpoint_restore": true,
+}
+
+// Schema is the version of the unit schema this loader reads
+// (docs/reference/units.md). Unit files carry no version field: a change
+// that makes a valid unit mean something else, or be refused, raises it.
+const Schema = 1
+
+// GrantableCaps returns the capability allowlist, sorted.
+func GrantableCaps() []string {
+	out := make([]string, 0, len(capByName))
+	for name := range capByName {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// HasField reports whether the loader reads field: a unit key, or
+// "sandbox.", "execution." or "sash." and a key of that object.
+func HasField(field string) bool {
+	keys := unitKeys
+	if obj, key, ok := strings.Cut(field, "."); ok {
+		switch obj {
+		case "sandbox":
+			keys = sandboxKeys
+		case "execution":
+			keys = executionKeys
+		case "sash":
+			keys = sashUnitKeys
+		default:
+			return false
+		}
+		field = key
+	}
+	_, ok := keys[field]
+	return ok
+}
+
+// Fields returns every field HasField accepts, sorted.
+func Fields() []string {
+	var out []string
+	for k := range unitKeys {
+		out = append(out, k)
+	}
+	for prefix, keys := range map[string]map[string]struct{}{"sandbox": sandboxKeys, "execution": executionKeys, "sash": sashUnitKeys} {
+		for k := range keys {
+			out = append(out, prefix+"."+k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // MaxIDs is the most entries setuid_to or setgid_to may hold.

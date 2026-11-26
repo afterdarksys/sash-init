@@ -175,7 +175,7 @@ on a catalog or graph refusal (exit 2).
 
 ```json
 {"v":1,"ok":true,"waves":[["a"],["b"]],"refused":[{"file":"other.json","code":"unit_perm"}],"cgroup_trusted":["a.json","b.json"]}
-{"v":1,"ok":false,"code":"cycle","message":"needs, after and wants form a cycle (across the whole catalog).","waves":[],"refused":[],"cgroup_trusted":[]}
+{"v":1,"ok":false,"code":"cycle","message":"needs, after and wants form a cycle (across the whole catalog).","waves":[],"refused":[],"cgroup_trusted":["a.json","b.json"]}
 ```
 
 ### ctl --json status [NAME]
