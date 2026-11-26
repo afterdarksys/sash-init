@@ -3,6 +3,7 @@
 package fail
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -40,6 +41,23 @@ func Catalog() []Code {
 	return out
 }
 
+var mdLink = regexp.MustCompile(`\[([^\]]+)\]\([^)]*\)`)
+
+// Plain is s without markdown: links become their text, backticks go.
+// The binary prints catalog text plain; codes.md keeps the markdown.
+func Plain(s string) string {
+	return strings.ReplaceAll(mdLink.ReplaceAllString(s, "$1"), "`", "")
+}
+
+// PlainCatalog is Catalog with every meaning and fix in plain text.
+func PlainCatalog() []Code {
+	out := Catalog()
+	for i := range out {
+		out[i].Meaning, out[i].Fix = Plain(out[i].Meaning), Plain(out[i].Fix)
+	}
+	return out
+}
+
 // Lookup returns the entry for code.
 func Lookup(code string) (Code, bool) {
 	for _, g := range groups {
@@ -53,13 +71,13 @@ func Lookup(code string) (Code, bool) {
 }
 
 // Message is one human sentence for code: the first sentence of its
-// meaning, without markdown backticks. An unknown code is "failed"'s.
+// meaning, in plain text. An unknown code is "failed"'s.
 func Message(code string) string {
 	c, ok := Lookup(code)
 	if !ok {
 		c, _ = Lookup("failed")
 	}
-	m := strings.ReplaceAll(c.Meaning, "`", "")
+	m := Plain(c.Meaning)
 	for i := 0; i+1 < len(m); i++ {
 		if m[i] == '.' && m[i+1] == ' ' && !strings.HasSuffix(m[:i], "e.g") && !strings.HasSuffix(m[:i], "i.e") {
 			return m[:i+1]

@@ -33,7 +33,14 @@ var TokenPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`return "([a-z]+(?:_[a-z0-9]+)+)"`),
 	regexp.MustCompile(`eventLocked\("([a-z][a-z0-9_]*)",`),
 	regexp.MustCompile(`jsonFail\([^,()]+, "([a-z][a-z0-9_]*)"`),
+	regexp.MustCompile(`fail\.Message\("([a-z][a-z0-9_]*)"\)`),
+	regexp.MustCompile(`\.(?:Reason|Error|LastError) = "([a-z][a-z0-9_]*)"`),
 }
+
+// BuiltPattern finds codes built at run time: a fail.E or eventLocked
+// whose code argument is not one string literal. Each must be listed, with
+// the codes it can produce, in the drift test's allowlist.
+var BuiltPattern = regexp.MustCompile(`(?:fail\.E|eventLocked)\(((?:[^")\n][^,)\n]*)|(?:"[^"\n]*"\s*\+[^,)\n]*))[,)]`)
 
 // FlagPattern finds flag definitions in a flag.FlagSet.
 var FlagPattern = regexp.MustCompile(`\.(?:String|Bool|Duration|Int|Uint|Uint64|Int64|Func|StringVar|BoolVar|DurationVar|IntVar)\((?:&[^,]+, )?"([a-z][a-z0-9-]*)"`)

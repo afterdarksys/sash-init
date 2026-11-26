@@ -22,7 +22,7 @@ func runCodes(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		return usage(args, codesUsage, stdout, stderr)
 	}
-	codes := fail.Catalog()
+	codes := fail.PlainCatalog()
 	if *asJSON {
 		if !writeJSON(stdout, struct {
 			V     int         `json:"v"`

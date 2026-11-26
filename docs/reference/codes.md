@@ -31,11 +31,11 @@ Each group below lists the code, what it means, and what to do.
 | --- | --- | --- |
 | `failed` | A failure with no more specific token: malformed JSON, a missing required field, an I/O error, a credential that cannot be set, a connection that failed. As a state, the last start or run failed; see `last_error`. | Check the input against the reference; for `ctl`, check the socket path and that the supervisor runs. Under PID 1 look for the `sahinit-init:` log lines. |
 | `empty` | The unit directory has no units, every unit was left out, or the graph is empty. | Add units, or fix the per-file refusals printed before it. |
-| `busy` | The service is already starting, running or stopping; another operation holds it; the socket has 32 requests in flight; a sash mount is in use. | Retry after the current operation; for a mount, stop what uses it. |
-| `timeout` | A start did not become ready within the unit's `timeout`, a sash start's readiness ran out, or a sash `wait` verb ran out. (A plain stop never times out: it escalates to SIGKILL.) | Raise `timeout` (at most `5m`), or fix the readiness signal (notify writes to fd 3). |
+| `busy` | The service is already starting, running or stopping; another operation holds it; the socket has 32 requests in flight; a sash mount is in use. | Wait for the current operation to finish and ask again; for a mount, what stops using it is the operator's decision. |
+| `timeout` | A start did not become ready within the unit's `timeout`, a sash start's readiness ran out, or a sash `wait` verb ran out. (A plain stop never times out: it escalates to SIGKILL.) | Read the unit's diagnostics; the operator decides whether to fix the readiness signal (notify writes to fd 3) or raise `timeout` (at most `5m`). |
 | `not_found` | No unit with that name, or (sash file verbs) a path that does not exist. | Check the name with `ctl status`. |
 | `unsupported` | Not implemented here: a sash verb sahinit does not serve, an rbind on a kernel without `open_tree`, a kernel with no mount IDs. | Use a supported verb or a newer kernel. |
-| `usage` | The command line did not parse: an unknown or misplaced flag, a missing required flag, or an extra argument (reported as a code only in `--json` output). | Run the command as its usage line shows; with `ctl`, put `--json` before the operation. |
+| `usage` | The command line did not parse: an unknown or misplaced flag, a missing required flag, or an extra argument. | Run the command as the usage text in the object's `usage` shows; with `ctl`, put `--json` before the operation. |
 
 ## Service states and event kinds
 
@@ -43,29 +43,30 @@ These are not errors, but they are part of the same vocabulary: states appear in
 
 | Code | Meaning | What to do |
 | --- | --- | --- |
-| `stopped` | State: Not running; never started, stopped, or a `simple` unit that exited 0 without restart. | Informational; `ctl start NAME` starts it. |
+| `stopped` | State: Not running; never started, stopped, or a `simple` unit that exited 0 without restart. | Informational; whether to start it is the operator's decision. |
 | `starting` | State and event: A start is in progress (waiting for readiness). | Informational; wait for `running`, or read `ctl explain NAME`. |
 | `running` | State: Started and, for notify, ready. | Informational; nothing to do. |
 | `stopping` | State and event: A stop is in progress. | Informational; wait for the stop to finish. |
 | `exited` | State and event: A oneshot that exited 0; as an event, the main process exited (with `exit`). | Informational; a oneshot that exited 0 is done. |
-| `blocked` | State and event: Desired, but a `needs` provider is not ready (`last_error` `needs_not_ready`) or failed (`needs_failed`). The supervisor starts it when the provider is ready again. `ctl stop` makes it `stopped`. | Start or fix the `needs` provider that `ctl explain NAME` names in `blocked_by`. |
+| `blocked` | State and event: Desired, but a `needs` provider is not ready (`last_error` `needs_not_ready`) or failed (`needs_failed`). The supervisor starts it when the provider is ready again. `ctl stop` makes it `stopped`. | Read `ctl explain NAME`; how to fix the `needs` provider it names in `blocked_by` is the operator's decision. |
 | `started` | Event: The process was launched. | Informational; nothing to do. |
 | `ready` | Event: Readiness was reached. | Informational; nothing to do. |
-| `ended` | Event: A sash service ended: no spawned process is left. | Informational; the restart policy decides what follows. |
-| `admission_denied` | Event: A deployment's policy refused a start; `code` holds the policy token. | Read the event's `code`, then stage and activate a policy that admits the start. |
-| `sash_start` | Event: A sash unit's `start` entry ended; `exit` holds its exit code and `code` its token. | Informational; a failed entry is explained by `code`. |
-| `sash_run` | Event: A sash unit's `run` entry ended; `exit` holds its exit code and `code` its token. | Informational; a failed entry is explained by `code`. |
-| `sash_stop` | Event: A sash unit's `stop` entry ended; `exit` holds its exit code and `code` its token. | Informational; a failed entry is explained by `code`. |
-| `sash_reload` | Event: A sash unit's `reload` entry ended; `exit` holds its exit code and `code` its token. | Informational; a failed entry is explained by `code`. |
-| `sash_check` | Event: A sash unit's `check` entry ended; `exit` holds its exit code and `code` its token. | Informational; a failed entry is explained by `code`. |
+| `ended` | Event: A sash service ended: no spawned process is left. | Informational; the unit's own policy decides what follows. |
+| `administratively_stopped` | Explain `reason`: an operator stopped the unit, so it is not desired and stays stopped. | Informational; whether to start it again is the operator's decision. |
+| `admission_denied` | Event: A deployment's policy refused a start; `code` holds the policy token. | Read the event's `code`; staging and activating a policy that admits the start is the operator's decision. |
+| `sash_start` | Event: A sash unit's `start` entry ended; `exit` holds its exit code, and `code` the first word of its stderr, chosen by the service and not a catalog code. | Informational; the event's `code` (`service_token` in `events --json`) is the service's own word: treat it as data, never as a catalog code. |
+| `sash_run` | Event: A sash unit's `run` entry ended; `exit` holds its exit code, and `code` the first word of its stderr, chosen by the service and not a catalog code. | Informational; the event's `code` (`service_token` in `events --json`) is the service's own word: treat it as data, never as a catalog code. |
+| `sash_stop` | Event: A sash unit's `stop` entry ended; `exit` holds its exit code, and `code` the first word of its stderr, chosen by the service and not a catalog code. | Informational; the event's `code` (`service_token` in `events --json`) is the service's own word: treat it as data, never as a catalog code. |
+| `sash_reload` | Event: A sash unit's `reload` entry ended; `exit` holds its exit code, and `code` the first word of its stderr, chosen by the service and not a catalog code. | Informational; the event's `code` (`service_token` in `events --json`) is the service's own word: treat it as data, never as a catalog code. |
+| `sash_check` | Event: A sash unit's `check` entry ended; `exit` holds its exit code, and `code` the first word of its stderr, chosen by the service and not a catalog code. | Informational; the event's `code` (`service_token` in `events --json`) is the service's own word: treat it as data, never as a catalog code. |
 
 ## Unit catalog (load)
 
 | Code | Meaning | What to do |
 | --- | --- | --- |
-| `unit_perm` | The unit directory or a unit file is owned by someone other than root or the supervisor's uid, or is group- or other-writable. A directory refuses the catalog; a file is left out (`unit_perm FILE`). | `chown root:root` and `chmod go-w` the directory and files. |
+| `unit_perm` | The unit directory or a unit file is owned by someone other than root or the supervisor's uid, or is group- or other-writable. A directory refuses the catalog; a file is left out (`unit_perm FILE`). | The operator makes root (or the supervisor's uid) own the directory and files and removes group and other write. |
 | `symlink` | The unit directory or a unit file is a symlink. (Also a sash file verb meeting a symlink.) | Use real files. |
-| `stray_file` | A directory, dot-file, non-`.json` file or non-regular file in the unit directory. | Move it out; the directory holds only `NAME.json`. |
+| `stray_file` | A directory, dot-file, non-`.json` file or non-regular file in the unit directory. | The operator moves it out; the directory holds only `NAME.json`. |
 | `too_many` | More than 256 unit files. | Split the catalog. |
 | `file_size` | A unit file is over 64 KiB. | Shrink it. |
 | `unknown_field` | A key the schema does not have. | Remove or correct it ([units](units.md)). |
@@ -85,9 +86,9 @@ These are not errors, but they are part of the same vocabulary: states appear in
 | `sandbox_path` | A sandbox path is not absolute and clean, or at launch is missing or contains a symlink, or a `socket_paths` entry is not a directory. | Use the resolved real path; create the socket directory before the start. |
 | `sandbox_overlap` | A path is listed twice, or in both lists after resolution. | List each resolved path once, in only one of the lists. |
 | `essential_requires_boot` | `"essential": true` on a unit with `"boot": false`. | Remove it; only boot units are essential. |
-| `restart_delay_invalid` | `restart_delay` or `restart_max_delay` is not a duration string from `10ms` to `5m`, or the maximum is below the delay. | See [restart](units.md#types-readiness-and-restart). |
+| `restart_delay_invalid` | `restart_delay` or `restart_max_delay` is not a duration string from `10ms` to `5m`, or the maximum is below the delay. | Use duration strings from `10ms` to `5m`, with the maximum at or above the delay. |
 | `watchdog_invalid` | `watchdog` is not a duration string from `100ms` to `5m`, or the unit's `ready` is not `notify`. | Use a duration from `100ms` to `5m`, on a unit whose `ready` is `notify`. |
-| `sandbox_cap` | At load, an unknown capability name. At start, the supervisor is not root (it has no capability to give), or the sandbox helper could not reach or verify exactly the granted set (see [unit capabilities](../design/unit-caps-1.md)). | Use a name from the allowlist; run the supervisor as root. |
+| `sandbox_cap` | At load, an unknown capability name. At start, the supervisor is not root (it has no capability to give), or the sandbox helper could not reach or verify exactly the granted set (see [unit capabilities](../design/unit-caps-1.md)). | Use a name from the allowlist; at start, read the unit's diagnostics: the helper could not reach or verify exactly the granted set, and how the supervisor runs is the operator's decision. |
 | `sandbox_cap_denied` | A real Linux capability that is not on the allowlist (`net_bind_service`, `setuid`, `setgid`). | Remove it; the others are never grantable. |
 | `sandbox_ids` | At load: `setuid` without `setuid_to` (or `setgid` without `setgid_to`), a list without its cap, an empty list, a value that is not an integer from 1 to 4294967294 (wrong type, null, negative, fractional, too large), more than 64 ids, a repeated id, 0, or a unit with caps whose gid or groups include 0. At start: a target, the unit's gid or a group is the supervisor's own uid or gid. | List the non-root ids the service switches to; run it with a non-root group. |
 | `sandbox_proc` | A unit with `setuid` or `setgid` has `/`, `/proc` or a path under `/proc` in `read_write_paths` (at load, also after symlinks resolve), or at start an entry that is on a procfs or has a procfs mounted beneath it. A writable procfs would let it write a user namespace's id map. | Keep every procfs out of its writable paths. |
@@ -106,35 +107,35 @@ These are not errors, but they are part of the same vocabulary: states appear in
 
 | Code | Meaning | What to do |
 | --- | --- | --- |
-| `exec_not_file` | The executable (or a path component) is missing, not a regular executable file, or a symlink chain is too long; the helper's exec fd is not a regular executable. | Install the program; check `ls -l` of the resolved path. |
+| `exec_not_file` | The executable (or a path component) is missing, not a regular executable file, or a symlink chain is too long; the helper's exec fd is not a regular executable. | The operator installs the program; check `ls -l` of the resolved path. |
 | `exec_perm` | The executable or a directory on its path is owned by someone other than root or the supervisor's uid, or writable by group or other (a sticky directory may be writable by others, but still needs that owner). | Fix ownership and modes along the whole path. |
 | `exec_interp` | A `#!` script's interpreter is relative, is `env` (or `busybox env`), is itself a script, or the line is over 256 bytes. | Name the real interpreter, e.g. `#!/usr/bin/python3`. |
-| `landlock_unavailable` | The kernel has no Landlock (or refused a ruleset). | Enable Landlock (Linux 5.13+, `lsm=` including `landlock`), or drop the sandbox. |
+| `landlock_unavailable` | The kernel has no Landlock (or refused a ruleset). | The operator runs the unit on a kernel with Landlock (Linux 5.13+, `lsm=` including `landlock`); removing the unit's sandbox removes its file confinement and is not a fix. |
 | `landlock_abi` | The sandbox needs a Landlock right the kernel's ABI lacks. | Use a newer kernel. |
 | `openat2_unavailable` | No `openat2` (Linux before 5.6). | Use a newer kernel. |
-| `seccomp_unavailable` | A unit holding `setuid` or `setgid` needs the id filter, and this kernel or architecture cannot install it (seccomp filters off, or not amd64 or arm64). | Use a supported kernel and architecture, or drop the caps. |
+| `seccomp_unavailable` | A unit holding `setuid` or `setgid` needs the id filter, and this kernel or architecture cannot install it (seccomp filters off, or not amd64 or arm64). | The operator runs the unit on a kernel with seccomp filters on amd64 or arm64; removing its caps is the operator's decision, not a fix. |
 | `sandbox_timeout` | The sandbox helper did not report within the deadline. | Check system load; see the unit's diagnostics. |
-| `sandbox_unsupported` | A sandbox was asked for off Linux. | Run on Linux or drop the sandbox. |
+| `sandbox_unsupported` | A sandbox was asked for off Linux. | The operator runs the unit on Linux; a sandbox is never applied elsewhere, and running the unit without one is not a fix. |
 | `launch_failed` | Event kind: a launch failed; its `code` holds the reason. | Read the event's code. |
-| `artifact_digest` | A deployment unit's executable does not hash to its signed `sha256` at launch (it is hashed on every start), or a bundle or generation file does not match the manifest. | The generation was changed on disk: stage a fresh one from a trusted bundle. |
-| `verified_exec_unavailable` | A deployment unit's executable could not be opened for reading (only an `O_PATH` descriptor), or the platform is not Linux, so it cannot be hashed; the launch is refused. | Run deployments on Linux, as root. |
+| `artifact_digest` | A deployment unit's executable does not hash to its signed `sha256` at launch (it is hashed on every start), or a bundle or generation file does not match the manifest. | The generation was changed on disk: staging a fresh one from a trusted bundle is the operator's decision. |
+| `verified_exec_unavailable` | A deployment unit's executable could not be opened for reading (only an `O_PATH` descriptor), or the platform is not Linux, so it cannot be hashed; the launch is refused. | Deployments need Linux and a supervisor that can read the executable; where they run is the operator's decision. |
 | `watchdog` | `last_error` and event kind: a notify unit with `watchdog` closed its notify pipe or sent no byte within the interval, and its process group was killed. The restart policy then applies. | Read its diagnostics; with `notify-adapter`, match `--watchdog` to the unit. |
 
 ## Lifecycle and control
 
 | Code | Meaning | What to do |
 | --- | --- | --- |
-| `needs_failed` | A `needs` dependency is failed; the unit is marked failed. | Fix and start the dependency first. |
-| `needs_not_ready` | A `needs` dependency is not yet running and ready (or exited OK). | Start it, or wait. |
-| `restart_limit` | More than 5 restarts within 30 s; the unit is failed. | Find the crash in `ctl diagnostics NAME`, then `ctl start NAME`. |
+| `needs_failed` | A `needs` dependency is failed; the unit is marked failed. | Read the dependency's diagnostics; its fix, and when to start it again, are the operator's decision. |
+| `needs_not_ready` | A `needs` dependency is not yet running and ready (or exited OK). | Wait for the dependency, or read `ctl explain` on it; starting it is the operator's decision. |
+| `restart_limit` | More than 5 restarts within 30 s; the unit is failed. | Find the crash in `ctl diagnostics NAME`; when to start the unit again, after the cause is fixed, is the operator's decision. |
 | `arg_required` | A oneshot was started without an argument through the socket (`ctl start` on a oneshot). | Oneshots run at boot, or through the `oneshot` socket op with `arg`. |
 | `arg_rejected` | The oneshot argument is not `[A-Za-z0-9._-]{1,64}` or contains `..`. | Pass 1 to 64 letters, digits, dots, underscores or dashes, without `..`. |
-| `not_oneshot` | The `oneshot` op on a unit that is not a oneshot. | Use `ctl start` for a unit that is not a oneshot. |
+| `not_oneshot` | The `oneshot` op on a unit that is not a oneshot. | The unit is not a oneshot; whether to start it is the operator's decision. |
 | `unknown_op` | An operation the socket or `ctl` does not know. | Use an operation from the `ctl` table in the CLI reference. |
-| `uid_denied` | The peer's uid is not allowed (not the supervisor's uid, or not in `--uid`), or its credentials could not be read. | Run `ctl` as an allowed uid. |
-| `peer_supervised` | The peer is a supervised process: inside the cgroup root (a service, the supervisor's leaf, an unknown cgroup), in a process group a service led, or gone before the check. A process in the root itself or `.control` is accepted only while the root is protected. | Run `ctl` from outside the services, e.g. an admin shell or the outer manager. |
-| `frame_size` | A control frame is empty or over 64 KiB. | Send one request of at most 64 KiB; `ctl` always does. |
-| `root_required` | `diff`, `apply`, `rollback` or `activate` from a peer whose effective uid is not 0. | Run `ctl` as root. |
+| `uid_denied` | The peer's uid is not allowed (not the supervisor's uid, or not in `--uid`), or its credentials could not be read. | Stop and ask the operator: only the uids the supervisor allows may use the socket; never switch user or use sudo to get past it. |
+| `peer_supervised` | The peer is a supervised process: inside the cgroup root (a service, the supervisor's leaf, an unknown cgroup), in a process group a service led, or gone before the check. A process in the root itself or `.control` is accepted only while the root is protected. | Run `ctl` from outside the services, for example an admin shell; never from inside a service. |
+| `frame_size` | A control frame is empty or over 64 KiB. | Requests are at most 64 KiB; `ctl` never sends more. |
+| `root_required` | `diff`, `apply`, `rollback` or `activate` from a peer whose effective uid is not 0. | Stop and ask the operator: `diff`, `apply`, `rollback` and `activate` are for uid 0 only; never use sudo to get past it. |
 
 ## Live catalog changes (`ctl diff`, `apply`, `rollback`, `validate`)
 
@@ -142,44 +143,45 @@ These are not errors, but they are part of the same vocabulary: states appear in
 | --- | --- | --- |
 | `catalog_path` | The `--dir` sent with `diff` or `apply` is not absolute. | Pass an absolute directory. |
 | `catalog_refused` | A unit file in the candidate catalog was refused (`validate` lists them in `refused`). | Fix each refused file. |
-| `catalog_sash` | The running or the candidate catalog has a sash unit: live changes replace runtimes, and a sash unit's described script, grant and mounts are not carried across. | Change such a catalog by restarting the supervisor. |
-| `apply_rolled_back` | A unit of the new catalog failed to stop or start, and the old catalog and desired states were restored. `rolled_back` is true in the diff. | Read the failing unit's diagnostics; fix and apply again. |
-| `rollback_failed` | Restoring the old catalog after a failed apply or activation also failed. The running state is the mix the response's diff describes. | Inspect `ctl status`; restart the supervisor if needed. |
-| `no_previous_catalog` | `rollback` with no earlier `apply`. | There is nothing to roll back; `ctl apply` the catalog you want instead. |
-| `shutting_down` | A catalog change while the supervisor is stopping. | Start the supervisor again and make the change then. |
-| `signed_activation_required` | `apply` while running a deployment: unsigned catalogs are refused. | Stage a generation and `ctl activate`. |
+| `catalog_sash` | The running or the candidate catalog has a sash unit: live changes replace runtimes, and a sash unit's described script, grant and mounts are not carried across. | A catalog with sash units changes only when the supervisor is started again with it, which is the operator's decision. |
+| `apply_rolled_back` | A unit of the new catalog failed to stop or start, and the old catalog and desired states were restored. `rolled_back` is true in the diff. | Read the failing unit's diagnostics; a fix and a new `apply` are the operator's decision. |
+| `rollback_failed` | Restoring the old catalog after a failed apply or activation also failed. The running state is the mix the response's diff describes. | Read `ctl status`; whether to restart the supervisor is the operator's decision. |
+| `no_previous_catalog` | `rollback` with no earlier `apply`. | There is nothing to roll back; any other catalog change is the operator's decision. |
+| `shutting_down` | A catalog change while the supervisor is stopping. | The supervisor is stopping; a change can be made only after the operator starts it again. |
+| `signed_activation_required` | `apply` while running a deployment: unsigned catalogs are refused. | Stage a signed generation; activating it is the operator's decision. |
 | `new_policy_required` | `rollback` while running a deployment. | Restore earlier content with a newly signed, higher-sequence generation. |
 
 ## Journal
 
 | Code | Meaning | What to do |
 | --- | --- | --- |
-| `journal_unavailable` | Log `journal_unavailable TOKEN`: `--log-dir` could not be opened; the supervisor runs without a journal (output stays in the in-memory tails). TOKEN is one of the codes below or `failed` (for example a read-only file system). | Fix the directory, then restart the supervisor. |
-| `journal_path` | `--log-dir` is not absolute. | Pass an absolute `--log-dir`. |
+| `journal_unavailable` | Log `journal_unavailable TOKEN`: `--log-dir` could not be opened; the supervisor runs without a journal (output stays in the in-memory tails). TOKEN is one of the codes below or `failed` (for example a read-only file system). | The operator fixes the directory; the journal opens when the supervisor next starts. |
+| `journal_path` | `--log-dir` is not absolute. | The operator passes an absolute `--log-dir`. |
 | `journal_limits` | Internal size limits out of range. | Report it as a bug: the limits are compiled in. |
-| `journal_perm` | The directory or a journal file fails the trusted walk, has group or other access, is not a regular file with one link, or is owned by someone other than root or the supervisor's uid. | `install -d -m 700 -o root /var/log/sahinit`. |
+| `journal_perm` | The directory or a journal file fails the trusted walk, has group or other access, is not a regular file with one link, or is owned by someone other than root or the supervisor's uid. | The operator makes the directory owned by root with mode 0700 (`install -d -m 700 -o root /var/log/sahinit`). |
 | `journal_busy` | Another supervisor holds the journal's lock. | One supervisor per journal. |
-| `journal_torn_record` | The current file ends in a record larger than the limit without a newline; it is not repaired automatically. | Move the file aside. |
-| `journal_size` | A journal file is over 64 MiB. | Move the file aside. |
-| `journal_read` | `logs` or `events` could not read the journal. | Check the directory, the owner and that you run as it. |
+| `journal_torn_record` | The current file ends in a record larger than the limit without a newline; it is not repaired automatically. | The operator moves the file aside. |
+| `journal_size` | A journal file is over 64 MiB. | The operator moves the file aside. |
+| `journal_read` | `logs` or `events` could not read the journal. | Check the directory exists; reading it needs the journal's owner, so on a permission error stop and ask the operator, and never use sudo to get past it. |
+| `journal_write` | Diagnostics `journal.error`: the supervisor could not write a journal record; records may be missing. | The operator checks the journal directory's disk and permissions. |
 
 ## Deployments (`deploy`, `ctl activate`, `supervise --deployment-root`)
 
 | Code | Meaning | What to do |
 | --- | --- | --- |
 | `deployment_path` | `--root` is not absolute and clean. | Pass an absolute, clean `--root`. |
-| `deployment_perm` | The root, a pointer or a generation file fails the trusted walk, has the wrong owner, or the root has group or other access. | `chmod 700`, owner root. |
-| `deployment_busy` | Another `deploy` or activation holds the deployment lock. | Retry. |
+| `deployment_perm` | The root, a pointer or a generation file fails the trusted walk, has the wrong owner, or the root has group or other access. | The operator makes the root mode 0700, owned by root. |
+| `deployment_busy` | Another `deploy` or activation holds the deployment lock. | Wait for the other deploy or activation to finish, then ask again. |
 | `deployment_size` | A unit file over 64 KiB, an artifact over 64 MiB, or a bundle over 256 MiB. | Shrink the unit file, artifact or bundle below its limit. |
 | `deployment_state` | `state.json` names an invalid generation. | Repair the pointer file from `deploy status` of a good copy. |
 | `deployment_durability` | The active pointer was renamed but its directory could not be synced: the candidate runs and is active, but may not survive a crash. | Check the storage before the next change. |
-| `deployment_jobs` | The policy has `jobs` or `offline_jobs`, or the manifest has `jobs` or `resources`. Boot jobs are not supported. | Remove them; run setup as oneshot units. |
-| `deployment_sash` | A deployment unit is a sash unit. Deployments carry exec units only. | Deploy sash units through `--dir`. |
-| `deployment_caps` | A deployment unit's sandbox lists capabilities. The signed policy does not cover them. | Run units that need caps through `--dir`. |
-| `deployment_no_pending` | `ctl activate` with no pending generation. | `deploy stage` first. |
-| `deployment_not_configured` | `ctl activate` on a supervisor without `--deployment-root`. | Start `supervise` with `--deployment-root` and `--trust`, or use `ctl apply` for a `--dir` catalog. |
+| `deployment_jobs` | The policy has `jobs` or `offline_jobs`, or the manifest has `jobs` or `resources`. Boot jobs are not supported. | Remove them from the policy and manifest; setup runs as oneshot units. |
+| `deployment_sash` | A deployment unit is a sash unit. Deployments carry exec units only. | Deployments carry exec units only; running a sash unit from a `--dir` catalog gives up signed-policy admission, so it is the operator's decision. |
+| `deployment_caps` | A deployment unit's sandbox lists capabilities. The signed policy does not cover them. | Deployments cannot carry caps; running such a unit from a `--dir` catalog gives up signed-policy admission, so it is the operator's decision. |
+| `deployment_no_pending` | `ctl activate` with no pending generation. | Staging a generation with `deploy stage` is the operator's decision. |
+| `deployment_not_configured` | `ctl activate` on a supervisor without `--deployment-root`. | This supervisor runs no deployment: `ctl activate` works only with `--deployment-root`, and how the supervisor runs is the operator's decision. |
 | `boot_in_progress` | `ctl apply`, `rollback` or `activate` before the boot waves ended, after a strict boot failed, or while the supervisor stops. | Wait for boot. |
-| `bootstrap_refused` | `deploy bootstrap` with an active generation already, or no pending one. | Use `ctl activate` for later changes. |
+| `bootstrap_refused` | `deploy bootstrap` with an active generation already, or no pending one. | Later changes go through `ctl activate`, which is the operator's decision. |
 | `manifest_read` | The manifest file could not be read (missing, wrong owner or mode, over 256 KiB). | Make the manifest a regular file of at most 256 KiB, owned by root or the effective uid and not writable by others. |
 | `manifest_shape` | Wrong `version`, missing arrays, no units, over 256 units or artifacts, or nesting too deep. | See [the bundle format](../deployments.md#bundle-format). |
 | `manifest_path` | A manifest path is absolute, unclean, escapes the bundle, repeats, or its digest is not 64 lowercase hex digits. | Use clean relative paths inside the bundle, each once, with digests of 64 lowercase hex digits. |
@@ -189,40 +191,40 @@ These are not errors, but they are part of the same vocabulary: states appear in
 | `catalog_digest` | The manifest's bytes do not hash to the policy's `catalog_sha256`. | Sign the manifest you ship, byte for byte. |
 | `catalog_units` | The policy's unit list and the manifest's units differ in number. | Make the policy's unit list and the manifest's units the same set. |
 | `catalog_dependencies` | A policy unit is missing from the manifest, or its `needs` differ from the unit file's. | List every policy unit in the manifest, with the same `needs` as its unit file. |
-| `generation_conflict` | A generation with this ID exists with a different policy, or an ID does not match its content. | Do not reuse a generation ID for other content; stage a fresh bundle. |
+| `generation_conflict` | A generation with this ID exists with a different policy, or an ID does not match its content. | Do not reuse a generation ID for other content; a fresh bundle is the operator's decision. |
 | `generation_invalid` | A pointer names a malformed generation ID. | Repair the pointer file from `deploy status` of a good copy. |
-| `pending_changed` | The pending pointer changed during activation. | Retry `ctl activate`. |
-| `activation_commit` | The new generation ran but the active pointer could not be written; the old catalog was restored. | Check the storage, then activate again. |
-| `policy_unit_denied` | The policy does not admit this start now: the unit is not in it, or the policy is in grace and the unit is not in `offline_units`, or it is expired and this is not an automatic restart of a `runtime_restart_units` unit. | Renew the policy (stage and activate a newer one). |
+| `pending_changed` | The pending pointer changed during activation. | Read `deploy status`; activating again is the operator's decision. |
+| `activation_commit` | The new generation ran but the active pointer could not be written; the old catalog was restored. | The operator checks the storage, then decides whether to activate again. |
+| `policy_unit_denied` | The policy does not admit this start now: the unit is not in it, or the policy is in grace and the unit is not in `offline_units`, or it is expired and this is not an automatic restart of a `runtime_restart_units` unit. | The policy does not admit the start; renewing it (stage and activate a newer one) is the operator's decision. |
 
 ## Host helpers (`sahinit host`)
 
 | Code | Meaning | What to do |
 | --- | --- | --- |
-| `device_timeout` | `device-wait` timed out before the device node appeared. | Check the driver or raise `--timeout`. |
+| `device_timeout` | `device-wait` timed out before the device node appeared. | Check the driver; raising `--timeout` is the operator's decision. |
 | `notify_pipe_missing` | `notify-adapter` was not given the notify pipe as fd 3: the unit is not `"ready": "notify"`. | Set `"ready": "notify"`. |
 
 ## Control socket (supervise start)
 
 | Code | Meaning | What to do |
 | --- | --- | --- |
-| `socket_perm` | The socket's directory fails the trusted walk, or is writable by group or other (including sticky `/tmp`). | Use a private directory, e.g. `install -d -m 700 /run/sahinit`. |
-| `socket_busy` | Another supervisor holds `SOCKET.lock`. | Stop it, or use another socket. |
-| `socket_exists` | Something other than our own stale socket is at the path, or the lock file is not ours. | Remove it after checking nothing uses it. |
-| `socket_group` | `--uid` allows another uid but no `--gid` was given. | Add `--gid GID`. |
+| `socket_perm` | The socket's directory fails the trusted walk, or is writable by group or other (including sticky `/tmp`). | The operator uses a private directory, for example `install -d -m 700 /run/sahinit`. |
+| `socket_busy` | Another supervisor holds `SOCKET.lock`. | Another supervisor holds the socket; whether to stop it or use another socket is the operator's decision. |
+| `socket_exists` | Something other than our own stale socket is at the path, or the lock file is not ours. | The operator removes it after checking that nothing uses it. |
+| `socket_group` | `--uid` allows another uid but no `--gid` was given. | The operator adds `--gid GID`. |
 
 ## Cgroups
 
 | Code | Meaning | What to do |
 | --- | --- | --- |
-| `cgroup_unavailable` | No cgroup2 at `/sys/fs/cgroup`, or the supervisor's cgroup is not writable (not delegated). | Run under `Delegate=yes`, in a private cgroup namespace, or as PID 1; or use `--no-cgroups`. |
+| `cgroup_unavailable` | No cgroup2 at `/sys/fs/cgroup`, or the supervisor's cgroup is not writable (not delegated). | The operator runs the supervisor under `Delegate=yes`, in a private cgroup namespace, or as PID 1; `--no-cgroups` gives up kill-all, limits and the peer check and is not a fix. |
 | `cgroup_busy` | Another supervisor holds the cgroup root's lock. | One supervisor per root. |
-| `cgroup_controller` | A unit's limits need a controller the root does not offer, or limits without cgroups. Printed as `cgroup_controller FILE`. | Enable the controller above the root, or remove the limit. |
+| `cgroup_controller` | A unit's limits need a controller the root does not offer, or limits without cgroups. Printed as `cgroup_controller FILE`. | The operator enables the controller above the root; removing the limit is the operator's decision, not a fix. |
 | `cgroup_join` | The child could not join its service cgroup. | Check the root is not populated by other processes; see the diagnostics. |
-| `cgroup_stuck` | A service cgroup did not empty within the unit timeout after kill-all; the service is failed. | Look for processes in uninterruptible sleep (`D` state); the next start retries. |
-| `cgroup_trusted` | Printed by `plan` as `cgroup_trusted FILE`, and a status field: the unit can leave its cgroup, so cgroup guarantees are not promised for it. | Informational; sandbox it with a non-root uid to make it untrusted. |
+| `cgroup_stuck` | A service cgroup did not empty within the unit timeout after kill-all; the service is failed. | Look for processes in uninterruptible sleep (`D` state); the next start retries, and when to start is the operator's decision. |
+| `cgroup_trusted` | Printed by `plan` as `cgroup_trusted FILE`, and a status field: the unit can leave its cgroup, so cgroup guarantees are not promised for it. | Informational; the operator can make it untrusted by sandboxing it with a non-root uid. |
 | `cgroup_leftover` | Log `cgroup_leftover NAME.service`: a service cgroup an earlier instance left was killed and removed. | Informational. |
-| `cgroup_root_unprotected` | Log `cgroup_root_unprotected ROOT`: no controller is enabled below the root, so root and `.control` members are refused as peers. | Move other processes out of the root so controllers can be enabled; run `ctl` from outside the root. |
+| `cgroup_root_unprotected` | Log `cgroup_root_unprotected ROOT`: no controller is enabled below the root, so root and `.control` members are refused as peers. | The operator moves other processes out of the root so controllers can be enabled; run `ctl` from outside the root. |
 | `cgroup_stray` | Log `cgroup_stray PID`: a process in the supervisor's leaf other than sahinit was killed. | Investigate a cgroup-trusted service. |
 | `cgroup_stray_cgroup` | Log `cgroup_stray_cgroup PATH`: an unknown cgroup under the root was killed and removed. | Investigate a cgroup-trusted service. |
 | `cgroup_root_member` | Log `cgroup_root_member PID`: a process sits in the root itself or `.control` (left alone, logged once). | Normally the outer manager; informational. |
@@ -231,24 +233,24 @@ These are not errors, but they are part of the same vocabulary: states appear in
 
 | Code | Meaning | What to do |
 | --- | --- | --- |
-| `boot_refused` | With `--boot-strict`, a unit file, a limit or a sash unit was refused, so the whole boot is refused. | Run `sahinit plan --dir DIR` (and `supervise` without `--boot-strict` in a test) to see each refusal. |
-| `boot_service_failed` | Log `boot_service_failed NAME`: in strict boot an essential unit (every boot unit not marked `"essential": false`) was not ready when the boot waves ended, or later became `failed` (a non-zero exit, a signal, a failed start, `restart_limit`, `watchdog`) or `stopped` on its own, or waits on a `needs` provider that did. The supervisor stops and PID 1 enters recovery. | Read `NAME`'s diagnostics in recovery; fix (or mark the unit `"essential": false`) and send SIGHUP to PID 1. |
+| `boot_refused` | With `--boot-strict`, a unit file, a limit or a sash unit was refused, so the whole boot is refused. | Run `sahinit plan --dir DIR` to see each refusal. |
+| `boot_service_failed` | Log `boot_service_failed NAME`: in strict boot an essential unit (every boot unit not marked `"essential": false`) was not ready when the boot waves ended, or later became `failed` (a non-zero exit, a signal, a failed start, `restart_limit`, `watchdog`) or `stopped` on its own, or waits on a `needs` provider that did. The supervisor stops and PID 1 enters recovery. | Read `NAME`'s diagnostics in recovery; the fix (or marking the unit `"essential": false`) and the SIGHUP to PID 1 are the operator's decision. |
 
 ## sash units: load
 
 | Code | Meaning | What to do |
 | --- | --- | --- |
 | `sash_unit_field` | A sash unit sets `exec`, `type`, `ready`, `timeout`, `execution.groups`, `execution.directory` or `execution.environment`. | Remove it; the service script owns those. |
-| `sash_root` | A sash unit has no uid/gid or uid or gid 0. | Run it as a dedicated service account. |
+| `sash_root` | A sash unit has no uid/gid or uid or gid 0. | The operator runs it as a dedicated service account. |
 | `sash_sandbox` | A sash unit has no `sandbox`. | Add one. |
 | `sash_cgroup_trusted` | A sash unit is cgroup-trusted (a cgroupfs path in `read_write_paths`). | Remove it. |
 | `sash_caps` | A sash unit's sandbox lists capabilities. | Remove them; sash units cannot hold capabilities. |
-| `sash_file_perm` | The service script fails the trusted walk or the owner and mode rule, or has a setuid/setgid/sticky bit. | `chown root:root`, `chmod 644`. |
-| `sash_grant_perm` | The grant file fails the same checks, or is not mode exactly 0600. | `chown root:root`, `chmod 600`. |
-| `sash_binary` | Log `sash_binary FILE`: `--sash` does not resolve to a trusted executable. | Install sash at a root-owned path. |
+| `sash_file_perm` | The service script fails the trusted walk or the owner and mode rule, or has a setuid/setgid/sticky bit. | The operator makes it owned by root with mode 0644. |
+| `sash_grant_perm` | The grant file fails the same checks, or is not mode exactly 0600. | The operator makes it owned by root with mode 0600. |
+| `sash_binary` | Log `sash_binary FILE`: `--sash` does not resolve to a trusted executable. | The operator installs sash at a root-owned path. |
 | `sash_fleet_key` | No `--sash-fleet-pub`, or the key file fails its checks or format. | See [files](config-files.md#fleet-public-key). |
 | `sash_floor_store` | Log `sash_floor_store FILE`: no `--sash-floor-dir`, or it cannot be opened. | Create it 0700, owned by the supervisor's uid. |
-| `sash_cgroups` | Sash units need cgroups (`--no-cgroups` or no cgroup root). | Run with cgroups. |
+| `sash_cgroups` | Sash units need cgroups (`--no-cgroups` or no cgroup root). | Sash units need cgroups; how the supervisor runs is the operator's decision. |
 | `sash_describe` | `sash --describe` failed, exited non-zero, timed out (5 s), printed over 1 MiB or malformed output, or named no `start`/`run` entry. | Run `sash --describe FILE` as the unit's user and fix the script. |
 | `sash_name_mismatch` | describe's `name` differs from the unit name. | Make the script's service name equal the unit name. |
 | `sash_identity_mismatch` | describe's `user`/`group` are missing or do not resolve to the unit's uid/gid. | Create the account, or fix the unit's ids. |
@@ -263,8 +265,8 @@ Every grant failure except `sash_floor_busy` fails the unit without restart and 
 | Code | Meaning | What to do |
 | --- | --- | --- |
 | `sash_grant` | Log prefix: `sash_grant SERVICE TOKEN`. | Read TOKEN below. |
-| `sash_unavailable` | The supervisor has no sash configuration (key or floor store) for a start. | Start `supervise` with the sash flags. |
-| `grant_missing` | The grant file cannot be read. | Install the grant file the unit names, readable by the supervisor. |
+| `sash_unavailable` | The supervisor has no sash configuration (key or floor store) for a start. | The supervisor has no sash key or floor store; starting it with the sash flags is the operator's decision. |
+| `grant_missing` | The grant file cannot be read. | The operator installs the grant file the unit names, readable by the supervisor. |
 | `grant_bad_shape` | The grant is not a well-formed `sash/2` document with purpose `service`, or is over 64 KiB, or has a bad root path. | Re-issue it. |
 | `grant_bad_sig` | The signature does not verify with the fleet key (also a sash/1 or v1-domain signature). | Re-sign with the current fleet key. |
 | `grant_star` | A list holds `"*"`. | Re-issue with explicit entries. |
@@ -272,8 +274,8 @@ Every grant failure except `sash_floor_busy` fails the unit without restart and 
 | `grant_expired` | `exp` is set and in the past. | Re-issue. |
 | `grant_service_mismatch` | The grant's `service` is not this unit's name. | Re-issue the grant for this unit's name. |
 | `grant_identity_mismatch` | The grant's `user`/`group` differ from describe's. | Re-issue the grant with the script's `user` and `group`. |
-| `sash_grant_revoked` | The grant's `serial` is below the service's floor. | Install a grant with a serial at or above the floor. |
-| `sash_floor_busy` | A floor install held the store lock for over 2 s (every grant check takes that lock, so a concurrent `floor-install` can cause it). Transient; the restart policy may retry. | Retry. |
+| `sash_grant_revoked` | The grant's `serial` is below the service's floor. | The operator installs a grant with a serial at or above the floor. |
+| `sash_floor_busy` | A floor install held the store lock for over 2 s (every grant check takes that lock, so a concurrent `floor-install` can cause it). Transient; the restart policy may retry. | Wait and ask again. |
 | `sash_floor_missing` | `sash floor-show`: no floor for that service. | Informational. |
 | `sash_floor_bad_shape` | A floor document or service name is malformed. | Re-issue the floor as a well-formed `sahinit-sash-floor/1` document. |
 | `sash_floor_bad_signature` | A floor does not verify with the fleet key. | Re-sign. |
@@ -287,10 +289,10 @@ Every grant failure except `sash_floor_busy` fails the unit without restart and 
 | --- | --- | --- |
 | `sash_config` | An entry exited 2: a configuration or grant error in sash. No restart. Logged as `sash_entry_error SERVICE ENTRY TOKEN`. | Read TOKEN (sash's first stderr word). |
 | `sash_entry_error` | Log prefix: `sash_entry_error SERVICE ENTRY TOKEN`. | Read TOKEN, sash's first stderr word, and fix the script or the grant. |
-| `sash_not_ready` | The entry exited 3: not ready in time. Restart policy applies. | Make the entry signal readiness in time, or raise the script's ready timeout (at most 5 minutes). |
+| `sash_not_ready` | The entry exited 3: not ready in time. Restart policy applies. | The script's author makes the entry signal readiness in time, or the operator raises its ready timeout (at most 5 minutes). |
 | `not_sash` | `reload` or `check` on an exec unit. | Use `reload` and `check` only on sash units. |
 | `no_entry` | The script has no such entry. | Add the entry to the script, or call one it has. |
-| `not_running` | `reload`/`check` while the service is not running. | Start the service first. |
+| `not_running` | `reload`/`check` while the service is not running. | The service is not running; starting it is the operator's decision. |
 | `unhealthy` | The `check` entry did not exit 0. | Read the service's diagnostics and fix what the check found. |
 | `check_read_only` | A check session asked for a mutating verb. | Keep `check` read-only. |
 | `unknown_service` | `svc.status` named no such service. | Name the service itself in `svc.status`. |
@@ -298,7 +300,7 @@ Every grant failure except `sash_floor_busy` fails the unit without restart and 
 | `name_in_use` | `svc.spawn` reused a running process name. | Use a new process name, or wait for the old process to end. |
 | `too_many_names` | More than 64 process names. | Reuse process names; a service may have at most 64. |
 | `ceiling` | A spawn cap is outside the unit's sandbox caps, or a limit is above sahinit's ceiling or unknown. | Keep spawn caps within the unit's caps and limits within sahinit's ceiling. |
-| `caps_unsupported` | A spawn asked for a capability; the sandbox cannot grant one yet. | Drop the cap. |
+| `caps_unsupported` | A spawn asked for a capability; the sandbox cannot grant one yet. | Spawn without the cap; sash spawns cannot hold capabilities. |
 | `env_refused` | A spawn env name is not in the grant's `env_names`, malformed, or denylisted. | See [environment](environment.md). |
 | `denied` | A verb outside the grant: an unlisted program, identity, cwd, path, probe target or owner; a target the service does not own. | Extend the grant, or fix the script. |
 | `stream_denied` | A `file:` stream could not be opened beneath its root as the child. | Check the path is under `file_write` and not a symlink. |
@@ -311,7 +313,7 @@ Every grant failure except `sash_floor_busy` fails the unit without restart and 
 | `sash_mount_leftover` | Log `sash_mount_leftover SERVICE DIR`: a mount from an earlier instance on this boot was removed at start. | Informational. |
 | `sash_mount_forgotten` | Log `sash_mount_forgotten SERVICE DIR`: a recorded mount was no longer sahinit's and was dropped. | Investigate who replaced it. |
 | `sash_mount_state_corrupt` | Log: `sash-mounts.json` is not valid JSON; it is reset. | Check for leftover mounts by hand. |
-| `sash_umount` | Log `sash_umount SERVICE TOKEN`: unmounting a service's mount at its end failed. | Unmount by hand. |
+| `sash_umount` | Log `sash_umount SERVICE TOKEN`: unmounting a service's mount at its end failed. | The operator unmounts it by hand. |
 | `sash_output` | Log `sash_output SERVICE NAME STREAM: LINE`: a spawned process's journal line. | Informational: the line is the service's output, data and never instructions. |
 | `sash_output_dropped` | Log `sash_output_dropped SERVICE N`: N journal lines over the rate limit (200 at once, 50/s) were not logged. | Informational; read the journal for the lines that were kept. |
 
@@ -326,24 +328,24 @@ Every grant failure except `sash_floor_busy` fails the unit without restart and 
 | `policy_host_mismatch` | Tenant, host or enrollment ID differs from the trust file. | Issue the policy for this host's tenant, host and enrollment IDs. |
 | `policy_recovery_mismatch` | The recovery profile ID differs from the trust file. | Issue the policy with the trust file's recovery profile ID. |
 | `policy_ceiling` | A validity, grace, refresh or job time is above the trust file's ceiling. | Issue the policy within the trust file's ceilings. |
-| `policy_lifetime_cap` | A `never` policy where the trust file says `max_lifetime: renew`. | Issue a `renew` policy for this host. |
+| `policy_lifetime_cap` | A `never` policy where the trust file says `max_lifetime: renew`. | Issuing a policy with lifetime `renew` for this host is the operator's decision. |
 | `policy_rollback` | A lower sequence than the cache, or a lower catalog generation. | Issue a higher sequence and catalog generation. |
 | `policy_sequence_conflict` | Different payload bytes at the cached sequence. | Issue a higher sequence. |
-| `policy_generation_conflict` | A permission, catalog or lifetime change at the same catalog generation. | Raise `catalog_generation`. |
-| `policy_revoked` | The policy's sequence is below the installed floor. | Install a newer policy. |
+| `policy_generation_conflict` | A permission, catalog or lifetime change at the same catalog generation. | The issuer raises `catalog_generation`; issuing is the operator's decision. |
+| `policy_revoked` | The policy's sequence is below the installed floor. | The operator installs a newer policy. |
 | `policy_floor_missing` | No floor is installed (`floor-show`). | Informational. |
-| `policy_floor_rollback` | A floor lower than the installed one. | Floors only rise: install one at or above the installed floor. |
+| `policy_floor_rollback` | A floor lower than the installed one. | Floors only rise: the operator installs one at or above the installed floor. |
 | `policy_floor_conflict` | A different floor with the same `min_sequence`. | Issue a floor with a higher `min_sequence`. |
 | `policy_missing` | No cached policy. | `policy cache` first. |
-| `policy_store_failed` | The cache directory or a file in it fails its checks, or a commit failed (the store then fails closed). | Fix ownership (owner-only, effective uid); reopen and retry. |
-| `policy_store_busy` | Another process holds the cache lock. | Retry. |
-| `policy_expired` | A `renew` policy is in grace or expired. | Renew. |
+| `policy_store_failed` | The cache directory or a file in it fails its checks, or a commit failed (the store then fails closed). | The operator fixes ownership (owner-only, effective uid); then reopen and try again. |
+| `policy_store_busy` | Another process holds the cache lock. | Wait and ask again. |
+| `policy_expired` | A `renew` policy is in grace or expired. | Renewing the policy is the operator's decision. |
 | `policy_not_yet_valid` | Before `not_before`. | Wait until `not_before`, or check the clock. |
-| `policy_clock_uncertain` | A `renew` policy needs a trusted clock: no `--trust-system-clock`, not Linux, or trust was lost. | Establish trusted time and pass the flag. |
+| `policy_clock_uncertain` | A `renew` policy needs a trusted clock: no `--trust-system-clock`, not Linux, or trust was lost. | Establishing trusted time is the operator's decision: `--trust-system-clock` makes sahinit trust the system clock and is only for an operator who has checked it. |
 | `policy_clock_rollback` | Library only: a trusted time correction would move the anchored clock backwards. The CLI never applies corrections. | Informational; the CLI never applies time corrections. |
 | `policy_not_renewing` | Internal: the host does not renew; `refresh` prints `not_renewing` and exits 0. | Informational; nothing to do. |
 | `policy_refresh_config` | The endpoint is not a plain `https://` URL with a host. | Pass an `https://` URL with a host and no user info, query or fragment. |
-| `policy_refresh_credential` | The credential file fails its owner, mode, link or content rules. | `chmod 600`, owned by the worker uid. |
+| `policy_refresh_credential` | The credential file fails its owner, mode, link or content rules. | The operator makes it mode 0600, owned by the worker uid. |
 | `policy_refresh_transport` | Connection, TLS (1.3 only, system roots) or timeout failure. | Check the network, the endpoint's TLS 1.3 certificate and the system roots. |
 | `policy_refresh_http` | A status other than 200 (401/403 excepted), or a redirect. | Make the endpoint answer 200 without a redirect. |
 | `policy_refresh_denied` | 401 or 403. | Check the credential. |
@@ -351,7 +353,7 @@ Every grant failure except `sash_floor_busy` fails the unit without restart and 
 | `policy_refresh_size` | The response body is over 384 KiB. | Serve a document of at most 384 KiB. |
 | `policy_refresh_stale` | The response is identical to the cache. | The issuer must issue a new sequence. |
 | `not_renewing` | `refresh` event: this host does not renew; exit 0. | Informational; nothing to do. |
-| `clock_uncertain` | Report `state`: no trusted clock for a `renew` policy. Other states: `valid`, `grace`, `expired`, `not_yet_valid`, `missing`, `revoked`. | Establish trusted time and pass `--trust-system-clock`. |
+| `clock_uncertain` | Report `state`: no trusted clock for a `renew` policy. Other states: `valid`, `grace`, `expired`, `not_yet_valid`, `missing`, `revoked`. | Establishing trusted time is the operator's decision: `--trust-system-clock` makes sahinit trust the system clock and is only for an operator who has checked it. |
 | `metadata_only` | The `enforcement` value in every policy report: nothing is enforced. | Informational; only a deployment (`--deployment-root`) enforces a policy. |
 
 <!-- END CATALOG -->

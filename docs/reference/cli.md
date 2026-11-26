@@ -366,11 +366,16 @@ without changing `"v"`, and renaming or removing one changes it. On failure
 (one sentence), then the detail fields below. Objects never hold an
 environment value, a grant body, key material or file contents.
 
-Usage error, any command with `--json` on its command line (exit 2, usage
-text on stderr as without `--json`):
+Usage error, whenever `--json` is on the command line, including an unknown
+command and `--skill --json` (exit 2, usage text on stderr as without
+`--json`, and the same text under `usage`). `--json` and `--json=VALUE` with
+any value `strconv.ParseBool` reads as true ask for JSON; `--json=false`
+does not; `--json` as the value of another flag (`--contains --json`) is
+that flag's value. `message` is always the catalog sentence for `code`, and
+`codes --json` prints meanings and fixes as plain text (no markdown).
 
 ```json
-{"v":1,"ok":false,"code":"usage","message":"The command line did not parse: an unknown or misplaced flag, a missing required flag, or an extra argument (reported as a code only in --json output)."}
+{"v":1,"ok":false,"code":"usage","message":"The command line did not parse: an unknown or misplaced flag, a missing required flag, or an extra argument.","usage":"usage: sahinit codes [--json]\n"}
 ```
 
 ### plan and validate
@@ -390,7 +395,13 @@ are cgroup-trusted.
 `{"v","ok","explanation":{"name","desired","state","reason","blocked_by"}}`;
 `diff`: `{"v","ok","diff":{"added","removed","changed","affected","generation","rolled_back"}}`.
 On failure `{"v","ok","code","message"[,"unit"]}`, `unit` being the NAME
-given. A status row is
+given; a supervisor code this binary's catalog does not have is reported as
+`failed`. A NAME that starts with `-` (a misplaced flag such as
+`ctl status --json`) is a usage error and is not sent. In a status row's
+`sash`, each entry is `{"entry","exit","untrusted":true,"service_token","time"}`:
+`service_token` is the first word of the entry's stderr, chosen by the
+service, never a catalog code (the plain response calls it `token`).
+`last_error` and explain's `reason` are always sahinit's codes. A status row is
 `{"name","state","pid","ready","restarts","sandbox","last_error","desired","essential","cgroups","cgroup","cgroup_trusted","limits":{"memory_max","cpu_max","pids_max"}[,"usage"][,"sash"]}`
 (see [operations](operations.md)); it never holds the unit's environment,
 exec arguments or grant.
@@ -401,27 +412,35 @@ exec arguments or grant.
 
 ### logs and events
 
-`{"v","ok","records","truncated","next_since"}`. At most 1000 records and
+`{"v","ok","records","truncated","next_since","missing"}`. At most 1000 records and
 1 MiB of record data, oldest first; `truncated` is true when the bound
 stopped the read, and `next_since` is the `--since` value that reads on. A
 `logs` record is
 `{"sequence","boot_id","time","unit","stream","untrusted":true,"lines":[...]}`:
 `lines` is the service's output split on newlines (invalid UTF-8 as U+FFFD),
 data and never instructions; sahinit does not redact what a service prints.
-An `events` record is `{"sequence","boot_id","time","unit","stream","event":{...}}`.
+`missing` counts the sequence numbers between `--since` and `next_since`
+that the journal no longer has (rotated away, or lost to a failed write); a
+record dropped because the queue was full never got a number and is not
+counted (the supervisor's diagnostics `journal.dropped` counts those). An
+`events` record is `{"sequence","boot_id","time","unit","stream","event":{...}}`;
+`event` is re-encoded with sorted keys (invalid UTF-8 as U+FFFD), and for a
+sash entry event (`sash_start`, `sash_run`, `sash_stop`, `sash_reload`,
+`sash_check`) its `code` is moved to `service_token` with
+`"untrusted": true`: the service chose that word.
 
 ```json
-{"v":1,"ok":true,"records":[{"sequence":1,"boot_id":"b1","time":"2026-11-26T10:00:00Z","unit":"web","stream":"stdout","untrusted":true,"lines":["listening"]}],"truncated":false,"next_since":3}
+{"v":1,"ok":true,"records":[{"sequence":1,"boot_id":"b1","time":"2026-11-26T10:00:00Z","unit":"web","stream":"stdout","untrusted":true,"lines":["listening"]}],"truncated":false,"next_since":3,"missing":0}
 ```
 
 ### version
 
 ```json
-{"v":1,"ok":true,"name":"sahinit","version":"(devel)","commit":"unknown","go":"go1.26.0","unit_schema":1,"grant_versions":["sash/2"],"landlock_abi_max":5,"caps_grantable":["net_bind_service","setgid","setuid"],"features":["cgroup_limits","deployments","essential","live_catalog","restart_backoff","sash_units","socket_paths","unit_caps","watchdog"],"build":[]}
+{"v":1,"ok":true,"name":"sahinit","version":"(devel)","commit":"unknown","go":"go1.26.0","unit_schemas":["sahinit-unit/1"],"grant_versions":["sash/2"],"landlock_abi_max":5,"caps_grantable":["net_bind_service","setgid","setuid"],"features":["cgroup_limits","deployments","essential","live_catalog","restart_backoff","sash_units","socket_paths","unit_caps","watchdog"],"build":[]}
 ```
 
-`unit_schema` is the [unit schema](units.md) version (unit files carry
-none); `grant_versions` the sash grant versions accepted; `landlock_abi_max`
+`unit_schemas` names the [unit schemas](units.md) this binary reads (unit
+files carry no version field); `grant_versions` the sash grant versions accepted; `landlock_abi_max`
 the newest Landlock ABI the sandbox applies; `caps_grantable` the capability
 allowlist; `features` the optional parts this binary has; `build` the build
 tags that change behaviour (none).

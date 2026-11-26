@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -15,11 +14,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/afterdarksys/sahinit/internal/fail"
 	"github.com/afterdarksys/sahinit/internal/journal"
 )
 
-const logsUsage = "usage: sahinit logs [--dir DIR] [--unit NAME] [--boot ID] [--since SEQUENCE] [--contains TEXT] [--follow]\n" +
-	"usage: sahinit events [--dir DIR] [--unit NAME] [--boot ID] [--since SEQUENCE] [--contains TEXT] [--follow]\n"
+const (
+	logsUsage   = "usage: sahinit logs [--dir DIR] [--unit NAME] [--boot ID] [--since SEQUENCE] [--contains TEXT] [--follow]\n"
+	eventsUsage = "usage: sahinit events [--dir DIR] [--unit NAME] [--boot ID] [--since SEQUENCE] [--contains TEXT] [--follow]\n"
+)
 
 // The bounds of one logs or events --json object: at most this many
 // records and bytes of record data. A larger read is paged with --since
@@ -57,6 +59,30 @@ type logsResult struct {
 	Records   []any  `json:"records"`
 	Truncated bool   `json:"truncated"`
 	NextSince uint64 `json:"next_since"`
+	// Missing counts the sequence numbers in (--since, next_since] that are
+	// not in the journal: rotated away, or lost to a failed write. A record
+	// dropped before it was written leaves no number and no trace.
+	Missing uint64 `json:"missing"`
+}
+
+// eventJSON re-encodes a journal event for --json: through a decode, so
+// invalid UTF-8 becomes U+FFFD and keys come sorted. A sash entry event's
+// code is the first word of the entry's stderr, chosen by the service: it
+// is moved to service_token and the event is marked untrusted.
+func eventJSON(raw []byte) (json.RawMessage, error) {
+	var event map[string]any
+	if err := json.Unmarshal(raw, &event); err != nil || event == nil {
+		return nil, fail.E("journal_read")
+	}
+	if kind, _ := event["kind"].(string); strings.HasPrefix(kind, "sash_") {
+		event["untrusted"] = true
+		event["service_token"] = event["code"]
+		if event["service_token"] == nil {
+			event["service_token"] = ""
+		}
+		delete(event, "code")
+	}
+	return json.Marshal(event)
 }
 
 // outputLines splits output on newlines, without the empty string a final
@@ -82,7 +108,11 @@ func runLogs(op string, args []string, stdout, stderr io.Writer) int {
 	asJSON := f.Bool("json", false, "")
 	// A follow has no end, so it cannot be one object.
 	if err := f.Parse(args); err != nil || f.NArg() != 0 || (*asJSON && *follow) {
-		return usage(args, logsUsage, stdout, stderr)
+		text := logsUsage
+		if op == "events" {
+			text = eventsUsage
+		}
+		return usage(args, text, stdout, stderr)
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -104,10 +134,12 @@ func runLogs(op string, args []string, stdout, stderr io.Writer) int {
 				continue
 			}
 			if (*name != "" && r.Unit != *name) || (*boot != "" && r.BootID != *boot) || (op == "events" && r.Stream != "event") || (op == "logs" && r.Stream == "event") {
+				result.Missing += r.Sequence - last - 1
 				last = r.Sequence
 				continue
 			}
 			if *contains != "" && !strings.Contains(string(r.Data)+string(r.Event), *contains) {
+				result.Missing += r.Sequence - last - 1
 				last = r.Sequence
 				continue
 			}
@@ -119,19 +151,21 @@ func runLogs(op string, args []string, stdout, stderr io.Writer) int {
 				}
 				size += n
 				if op == "events" {
-					var event bytes.Buffer
-					if err := json.Compact(&event, r.Event); err != nil || !bytes.HasPrefix(event.Bytes(), []byte("{")) {
+					event, err := eventJSON(r.Event)
+					if err != nil {
 						fmt.Fprintln(stderr, "journal_read")
 						jsonFail(stdout, "journal_read")
 						return 1
 					}
-					result.Records = append(result.Records, eventRecord{r.Sequence, r.BootID, r.Time, r.Unit, r.Stream, event.Bytes()})
+					result.Records = append(result.Records, eventRecord{r.Sequence, r.BootID, r.Time, r.Unit, r.Stream, event})
 				} else {
 					result.Records = append(result.Records, logRecord{r.Sequence, r.BootID, r.Time, r.Unit, r.Stream, true, outputLines(r.Data)})
 				}
+				result.Missing += r.Sequence - last - 1
 				last = r.Sequence
 				continue
 			}
+			result.Missing += r.Sequence - last - 1
 			last = r.Sequence
 			if err := json.NewEncoder(stdout).Encode(r); err != nil {
 				return 1

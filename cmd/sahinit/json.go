@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 
 	"github.com/afterdarksys/sahinit/internal/fail"
 )
@@ -49,15 +51,35 @@ func jsonFail(w io.Writer, code string) {
 }
 
 // wantsJSON reports whether args ask for --json, for a command line that
-// did not parse: a usage error is then also an object (code usage).
+// did not parse: a usage error is then also an object (code usage). As in
+// the flag package, -json and --json are true and --json=VALUE is whatever
+// strconv.ParseBool reads (--json=false is not a JSON request). A --json
+// that is the value of another flag (--dir --json) may count here; the
+// flag package then decides, and a parsed command never asks this.
 func wantsJSON(args []string) bool {
 	for _, a := range args {
-		switch a {
-		case "--json", "-json", "--json=true", "-json=true":
+		name, value, hasValue := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(a, "-"), "-"), "=")
+		if !strings.HasPrefix(a, "-") || name != "json" {
+			continue
+		}
+		if !hasValue {
+			return true
+		}
+		if b, err := strconv.ParseBool(value); err == nil && b {
 			return true
 		}
 	}
 	return false
+}
+
+// usageFailure is the object of a usage error: the catalog sentence and
+// the command's full usage text.
+type usageFailure struct {
+	V       int    `json:"v"`
+	OK      bool   `json:"ok"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Usage   string `json:"usage"`
 }
 
 // usage prints text on stderr, as without --json, and with --json the
@@ -65,7 +87,7 @@ func wantsJSON(args []string) bool {
 func usage(args []string, text string, stdout, stderr io.Writer) int {
 	fmt.Fprint(stderr, text)
 	if wantsJSON(args) {
-		jsonFail(stdout, "usage")
+		writeJSON(stdout, usageFailure{V: jsonVersion, Code: "usage", Message: fail.Message("usage"), Usage: text})
 	}
 	return 2
 }

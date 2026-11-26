@@ -24,8 +24,7 @@ const skillUsage = "usage: sahinit --skill\n"
 // runSkill prints SKILL.md; rest is what followed --skill and must be empty.
 func runSkill(rest []string, stdout, stderr io.Writer) int {
 	if len(rest) != 0 {
-		fmt.Fprint(stderr, skillUsage)
-		return 2
+		return usage(rest, skillUsage, stdout, stderr)
 	}
 	if _, err := stdout.Write(skills.Main()); err != nil {
 		fmt.Fprintln(stderr, "failed")

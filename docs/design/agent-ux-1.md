@@ -100,7 +100,7 @@ list from the constants the code uses.
    connect, read or decode), whose message names the step.
 6. **`usage` is a new code** (catalog only; the non-JSON form still prints
    the usage text and no token). It is emitted only in JSON objects.
-7. **`unit_schema`.** Unit files carry no version field. `unit.Schema = 1`
+7. **`unit_schemas`** (revised, see below). Unit files carry no version field. `unit.Schema`
    names the strict schema documented in `units.md`; a change that would make
    an existing valid unit mean something else, or be refused, raises it.
 8. **`version`/`commit`** come from `-ldflags "-X main.version=..."` when
@@ -235,10 +235,10 @@ exec arguments, no grant body.
 ### version --json
 
 ```json
-{"v":1,"ok":true,"name":"sahinit","version":"(devel)","commit":"8fdc66a...","go":"go1.26.0","unit_schema":1,"grant_versions":["sash/2"],"landlock_abi_max":5,"caps_grantable":["net_bind_service","setgid","setuid"],"features":["cgroup_limits","deployments","essential","live_catalog","restart_backoff","sash_units","socket_paths","unit_caps","watchdog"],"build":[]}
+{"v":1,"ok":true,"name":"sahinit","version":"(devel)","commit":"8fdc66a...","go":"go1.26.0","unit_schemas":["sahinit-unit/1"],"grant_versions":["sash/2"],"landlock_abi_max":5,"caps_grantable":["net_bind_service","setgid","setuid"],"features":["cgroup_limits","deployments","essential","live_catalog","restart_backoff","sash_units","socket_paths","unit_caps","watchdog"],"build":[]}
 ```
 
-Sources: `unit_schema` is `unit.Schema`; `grant_versions` is
+Sources: `unit_schemas` is `[unit.Schema]`; `grant_versions` is
 `sash.GrantVersion`, the value the grant check compares; `landlock_abi_max`
 is `sandbox.MaxLandlockABI`, the cap the sandbox applies; `caps_grantable`
 is `unit.GrantableCaps()`, the allowlist the loader checks; `features` are
@@ -297,3 +297,38 @@ where the file goes, `-`-prefixed targets refused). Outline:
 - Verification: `./build.sh` (macOS), `go vet ./...`, `GOOS=linux go vet
   ./...` for amd64 and arm64, `go test -race ./...` in golang:1.26 with
   `--init`, privileged and plain, on an rsync copy.
+
+## Revision 2: after review (2026-11-26)
+
+Binding on sahinit and sinetd:
+
+- A usage error with `--json` anywhere on the command line, including an
+  unknown command and `--skill --json`, prints the usage object, which
+  carries the full usage text under `"usage"`; `message` is the catalog
+  sentence. `--json=VALUE` is a JSON request when `strconv.ParseBool` reads
+  VALUE as true; `--json=false` is not; `--json` as another flag's value is
+  that value.
+- `message` is always the catalog sentence for `code`, also for `ctl`
+  client failures (`failed`); a supervisor word the client's catalog lacks
+  is reported as `failed`.
+- `version`: `unit_schemas: ["sahinit-unit/1"]` replaces `unit_schema: 1`.
+- `codes --json` and every `message` are plain text; codes.md keeps the
+  markdown.
+- Catalog fixes never tell an agent to weaken a control, escalate or change
+  state: such an action is the operator's decision, safest option first
+  (`TestCatalogFixesDoNotDirectAgents`).
+- A code-shaped word a service chooses is labelled. The only one is a sash
+  entry's token (the first word of its stderr): `last_error` and explain's
+  `reason` were already always sahinit's codes (checked end to end by
+  `TestSashServiceWordIsNotACode`). `--json` renames it `service_token` with
+  `"untrusted": true`, in status rows' `sash.entries` and in sash entry
+  events; the plain output is unchanged and still calls it `token`/`code`.
+- `logs`/`events --json` adds `missing` (sequence numbers the journal lost),
+  re-encodes events, and `ctl` refuses a NAME starting with `-`.
+- Drift: codes built at run time must be listed in `builtCodes`
+  (`TestBuiltCodesListed`); `Reason =`, `Error =` and `fail.Message("...")`
+  literals are scanned; and a test-build hook (`fail.Record`, checked in
+  `TestMain` of cmd/sahinit, unit, sash, deploy, bootpolicy, journal and
+  supervise) fails the run when any code emitted at run time is not in the
+  catalog. `"frame body"`, the sash verb wire's own error string, is the one
+  exemption.

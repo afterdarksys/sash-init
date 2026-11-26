@@ -8,9 +8,9 @@ A unit is one JSON file in the unit directory. This page is derived from
 - a **sash unit**, which names a sash service script in `sash` (see
   [sash units](#sash-units)).
 
-This is unit schema 1 (`sahinit version` reports it as `unit_schema`). Unit
-files carry no version field; a change that would make a valid unit mean
-something else, or be refused, raises the number.
+This is unit schema `sahinit-unit/1` (`sahinit version` lists it in
+`unit_schemas`). Unit files carry no version field; a change that would make
+a valid unit mean something else, or be refused, gets a new name.
 
 ## The unit directory
 

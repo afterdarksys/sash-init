@@ -26,8 +26,9 @@ import (
 // stdout.
 func TestSkillCommand(t *testing.T) {
 	wantRun(t, []string{"--skill"}, 0, string(skills.Main()), "")
+	wantRun(t, []string{"--skill", "--json"}, 2, usageJSON(skillUsage), skillUsage)
 	for _, args := range [][]string{
-		{"--skill", "--json"}, {"--skill", "x"}, {"--skill", "--skill"}, {"--skill", ""}, {"--skill", "/etc/passwd"},
+		{"--skill", "x"}, {"--skill", "--skill"}, {"--skill", ""}, {"--skill", "/etc/passwd"},
 		{"--skill", "plan", "--dir", "/tmp"}, {"--skill", "ctl", "--socket", "/tmp/s", "stop", "web"},
 	} {
 		wantRun(t, args, 2, "", skillUsage)
@@ -145,6 +146,46 @@ func skillVocabulary(t *testing.T) (map[string]bool, map[string]string) {
 
 const repoRoot = "../.."
 
+// commands are the first words a span may run as an example.
+var commands = map[string]bool{"plan": true, "validate": true, "ctl": true, "logs": true, "events": true, "codes": true, "version": true}
+
+// readOnlyCommands and readOnlyCtl are the commands and ctl operations that
+// change nothing: ctlJSONOps plus diagnostics.
+var readOnlyCommands = map[string]bool{"plan": true, "validate": true, "logs": true, "events": true, "codes": true, "version": true}
+
+func readOnlyExample(line string) bool {
+	f := strings.Fields(line)[1:]
+	if f[0] != "ctl" {
+		return readOnlyCommands[f[0]] && !contains(f, "--follow")
+	}
+	for _, w := range f[1:] {
+		if contains(ctlOps, w) {
+			return contains(ctlJSONOps, w) || w == "diagnostics"
+		}
+	}
+	return false
+}
+
+// placeholders makes a prose span runnable: S, D and DIR become absolute
+// paths, NAME a unit name, and a journal or catalog command without --dir
+// gets one.
+func placeholders(f []string) string {
+	out := []string{}
+	for _, w := range f {
+		switch w {
+		case "S", "D", "DIR":
+			w = "/placeholder"
+		case "NAME":
+			w = "web"
+		}
+		out = append(out, w)
+	}
+	if (f[0] == "logs" || f[0] == "events" || f[0] == "plan" || f[0] == "validate") && !contains(f, "--dir") {
+		out = append(out, "--dir", "/placeholder")
+	}
+	return strings.Join(out, " ")
+}
+
 var identifier = regexp.MustCompile(`^[a-z][a-z0-9_.-]*$`)
 
 // The honesty test: every flag, code, unit field, command and JSON key the
@@ -175,15 +216,26 @@ func TestSkillIsHonest(t *testing.T) {
 		for _, w := range strings.Fields(span) {
 			checkWord("`"+span+"`", w)
 		}
+		// A command with flags is run, so a flag borrowed from another
+		// command is a usage error here.
+		if f := strings.Fields(span); len(f) > 1 && commands[f[0]] && strings.Contains(span, "--") {
+			checkExample(t, "sahinit "+placeholders(f))
+		}
 	}
 	examples := 0
 	inBlock := false
+	mark := ""
 	for _, line := range strings.Split(text, "\n") {
 		switch {
+		case line == "<!-- read-only -->" || line == "<!-- changes-state -->":
+			mark = line
 		case line == "```sh":
 			inBlock = true
+			if mark == "" {
+				t.Errorf("a sh block is not marked read-only or changes-state")
+			}
 		case line == "```":
-			inBlock = false
+			inBlock, mark = false, ""
 		case inBlock:
 			if !strings.HasPrefix(line, "sahinit ") {
 				t.Errorf("example %q does not start with sahinit", line)
@@ -191,6 +243,12 @@ func TestSkillIsHonest(t *testing.T) {
 			}
 			examples++
 			checkExample(t, line)
+			// The split is checked against the operation table: an
+			// example in the read-only block must be read-only, and one in
+			// the changes-state block must not be.
+			if ro := readOnlyExample(line); ro != (mark == "<!-- read-only -->") {
+				t.Errorf("example %q is under %s but read-only is %v", line, mark, ro)
+			}
 		}
 	}
 	// A floor, so a broken extractor cannot pass by finding nothing.

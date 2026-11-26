@@ -158,3 +158,73 @@ func TestCLIDocumented(t *testing.T) {
 		}
 	}
 }
+
+// bannedFix are agent-directed imperatives that weaken a control, escalate
+// or change state. A fix may name such an action only as the operator's (or
+// a person's) decision.
+var bannedFix = []string{
+	"as root", "sudo", "drop the", "remove the sandbox", "--no-cgroups", "no-cgroups", "restart", "ctl start", "ctl stop",
+	"ctl apply", "ctl activate", "ctl rollback", "activate", "disable", "trust-system-clock", "pass the flag",
+	"remove the limit", "chmod", "chown", "install -d", "sighup", "start it", "start the", "start supervise",
+	"through --dir", "from a --dir", "run as it", "explained by", "re-run", "kill", "delete", "send ",
+	"mark the unit", "raise", "renew", "stage ",
+}
+
+func TestCatalogFixesDoNotDirectAgents(t *testing.T) {
+	for _, c := range Catalog() {
+		fix := strings.ToLower(Plain(c.Fix))
+		person := strings.Contains(fix, "operator") || strings.Contains(fix, "a person")
+		for _, b := range bannedFix {
+			if strings.Contains(fix, b) && !person {
+				t.Errorf("%s: fix %q tells an agent to %q; phrase it as the operator's decision", c.Code, c.Fix, b)
+			}
+		}
+	}
+}
+
+// The binary's catalog text is plain: no markdown, no relative links.
+func TestPlainCatalog(t *testing.T) {
+	for _, c := range PlainCatalog() {
+		for _, s := range []string{c.Meaning, c.Fix, Message(c.Code)} {
+			if strings.ContainsAny(s, "`") || strings.Contains(s, "](") || strings.Contains(s, ".md") {
+				t.Errorf("%s: %q is not plain text", c.Code, s)
+			}
+		}
+	}
+}
+
+// builtCodes are the fail.E and eventLocked calls whose code is not one
+// literal, with every code each can produce. An expression that only passes
+// on a code the scanner already finds (a variable holding a token) lists
+// none. A new one fails TestBuiltCodesListed until it is listed here.
+var builtCodes = map[string][]string{
+	`st.Error`:            nil, // the helper's writeStatus literals
+	`tok`:                 nil, // a parameter: callers pass literals or fail.Token
+	`s.cgErr`:             nil, // fail.Token of a cgroup error
+	`s.lastError`:         nil, // set from literals and fail.Token
+	`kind`:                nil, // eventLocked's own definition
+	`"sash_"+key+"_perm"`: {"sash_file_perm", "sash_grant_perm"},
+	`"sash_"+entry`:       {"sash_start", "sash_run", "sash_stop", "sash_reload", "sash_check"},
+}
+
+func TestBuiltCodesListed(t *testing.T) {
+	files, err := docscan.SourceFiles(repoRoot, "cmd", "internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := docscan.Matches(files, docscan.BuiltPattern)
+	if len(found) < 4 {
+		t.Fatalf("scanner found %d built codes; the pattern is broken", len(found))
+	}
+	for _, expr := range docscan.SortedKeys(found) {
+		codes, ok := builtCodes[strings.ReplaceAll(expr, " ", "")]
+		if !ok {
+			t.Errorf("%s builds a code at run time from %s: list it, with every code it can produce, in builtCodes", found[expr], expr)
+		}
+		for _, c := range codes {
+			if _, ok := Lookup(c); !ok {
+				t.Errorf("%s can produce %s, which is not in the catalog", expr, c)
+			}
+		}
+	}
+}

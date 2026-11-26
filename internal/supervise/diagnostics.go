@@ -4,7 +4,9 @@ package supervise
 
 import (
 	"encoding/json"
+	"github.com/afterdarksys/sahinit/internal/fail"
 	"github.com/afterdarksys/sahinit/internal/journal"
+	"strings"
 	"sync"
 	"time"
 )
@@ -84,6 +86,12 @@ type Diagnostics struct {
 
 // eventLocked requires runtime.mu; events never include argv or environment.
 func (s *runtime) eventLocked(kind, code string, exit *Exit) {
+	fail.Note(kind)
+	// A sash entry event's code is the first word of the entry's stderr:
+	// the service chose it, so it is not a catalog code.
+	if !strings.HasPrefix(kind, "sash_") {
+		fail.Note(code)
+	}
 	s.eventSeq++
 	e := Event{Sequence: s.eventSeq, Time: time.Now().UTC(), Kind: kind, PID: s.pid, Code: code, Exit: exit}
 	if len(s.events) == eventCapacity {

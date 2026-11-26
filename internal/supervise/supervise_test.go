@@ -34,7 +34,13 @@ func TestMain(m *testing.M) {
 	if mb := os.Getenv("SAHT_ALLOC_MB"); mb != "" {
 		os.Exit(allocate(mb))
 	}
+	fail.Record()
 	code := m.Run()
+	// Every code the run emitted, built at run time or not, is catalogued.
+	if bad := fail.Uncatalogued(); len(bad) > 0 {
+		fmt.Fprintln(os.Stderr, "codes emitted but not in the catalog:", bad)
+		code = 1
+	}
 	if dir := tmpDirMade.Load(); dir != nil {
 		os.RemoveAll(*dir)
 	}

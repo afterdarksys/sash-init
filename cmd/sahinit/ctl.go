@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/afterdarksys/sahinit/internal/fail"
@@ -31,9 +32,48 @@ type ctlResult struct {
 	Code        string                 `json:"code,omitempty"`
 	Message     string                 `json:"message,omitempty"`
 	Unit        string                 `json:"unit,omitempty"`
-	Rows        *[]supervise.Row       `json:"rows,omitempty"`
+	Rows        *[]jsonRow             `json:"rows,omitempty"`
 	Explanation *supervise.Explanation `json:"explanation,omitempty"`
 	Diff        *supervise.CatalogDiff `json:"diff,omitempty"`
+}
+
+// jsonRow is a status row in --json. It is supervise.Row with the sash
+// part re-shaped: an entry's token is the first word of its stderr, chosen
+// by the service, so it is service_token and marked untrusted, never a
+// code.
+type jsonRow struct {
+	supervise.Row
+	Sash *jsonSashRow `json:"sash,omitempty"`
+}
+
+type jsonSashRow struct {
+	Entry   string               `json:"entry"`
+	Serial  uint64               `json:"grant_serial"`
+	Entries []jsonEntry          `json:"entries"`
+	Procs   []supervise.SashProc `json:"procs"`
+}
+
+type jsonEntry struct {
+	Entry        string    `json:"entry"`
+	Exit         int       `json:"exit"`
+	Untrusted    bool      `json:"untrusted"`
+	ServiceToken string    `json:"service_token"`
+	Time         time.Time `json:"time"`
+}
+
+func rowJSON(r supervise.Row) jsonRow {
+	out := jsonRow{Row: r}
+	if r.Sash != nil {
+		s := &jsonSashRow{Entry: r.Sash.Entry, Serial: r.Sash.Serial, Entries: []jsonEntry{}, Procs: r.Sash.Procs}
+		if s.Procs == nil {
+			s.Procs = []supervise.SashProc{}
+		}
+		for _, e := range r.Sash.Entries {
+			s.Entries = append(s.Entries, jsonEntry{e.Entry, e.Exit, true, e.Token, e.Time})
+		}
+		out.Sash = s
+	}
+	return out
 }
 
 // runCtl exposes the local framed protocol without a shell or remote transport.
@@ -67,10 +107,15 @@ func runCtl(args []string, stdout, stderr io.Writer) int {
 	if *asJSON && !slices.Contains(ctlJSONOps, op) {
 		return usage(args, usageText, stdout, stderr)
 	}
-	clientFail := func(message string) int {
+	// A unit name never starts with "-": such a NAME is a misplaced flag
+	// (ctl status --json), not a name to send.
+	if strings.HasPrefix(fs.Arg(1), "-") {
+		return usage(args, usageText, stdout, stderr)
+	}
+	clientFail := func(string) int {
 		fmt.Fprintln(stderr, "failed")
 		if *asJSON {
-			writeJSON(stdout, failure{V: jsonVersion, Code: "failed", Message: message})
+			jsonFail(stdout, "failed")
 		}
 		return 1
 	}
@@ -117,8 +162,10 @@ func runCtl(args []string, stdout, stderr io.Writer) int {
 	if *asJSON {
 		out := ctlResult{V: jsonVersion, OK: result.OK}
 		if !result.OK {
+			// A word that is not in this binary's catalog is reported
+			// as failed, so code and message always agree.
 			out.Code = result.Error
-			if out.Code == "" {
+			if _, ok := fail.Lookup(out.Code); !ok {
 				out.Code = "failed"
 			}
 			out.Message = fail.Message(out.Code)
@@ -126,9 +173,9 @@ func runCtl(args []string, stdout, stderr io.Writer) int {
 		} else {
 			switch op {
 			case "status":
-				rows := payload.Rows
-				if rows == nil {
-					rows = []supervise.Row{}
+				rows := []jsonRow{}
+				for _, r := range payload.Rows {
+					rows = append(rows, rowJSON(r))
 				}
 				out.Rows = &rows
 			case "explain":

@@ -70,7 +70,7 @@ type versionInfo struct {
 	Version        string   `json:"version"`
 	Commit         string   `json:"commit"`
 	Go             string   `json:"go"`
-	UnitSchema     int      `json:"unit_schema"`
+	UnitSchemas    []string `json:"unit_schemas"`
 	GrantVersions  []string `json:"grant_versions"`
 	LandlockABIMax int      `json:"landlock_abi_max"`
 	CapsGrantable  []string `json:"caps_grantable"`
@@ -84,7 +84,7 @@ type versionInfo struct {
 func currentVersion() versionInfo {
 	v := versionInfo{
 		V: jsonVersion, OK: true, Name: "sahinit", Version: version, Commit: "unknown", Go: runtime.Version(),
-		UnitSchema: unit.Schema, GrantVersions: []string{sash.GrantVersion}, LandlockABIMax: sandbox.MaxLandlockABI,
+		UnitSchemas: []string{unit.Schema}, GrantVersions: []string{sash.GrantVersion}, LandlockABIMax: sandbox.MaxLandlockABI,
 		CapsGrantable: unit.GrantableCaps(), Features: features(), Build: buildTags,
 	}
 	if info, ok := debug.ReadBuildInfo(); ok {
@@ -121,8 +121,8 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 	if build == "" {
 		build = "(none)"
 	}
-	_, err := fmt.Fprintf(stdout, "sahinit %s\ncommit %s\ngo %s\nunit_schema %d\ngrant_versions %s\nlandlock_abi_max %d\ncaps_grantable %s\nfeatures %s\nbuild %s\n",
-		v.Version, v.Commit, v.Go, v.UnitSchema, strings.Join(v.GrantVersions, " "), v.LandlockABIMax,
+	_, err := fmt.Fprintf(stdout, "sahinit %s\ncommit %s\ngo %s\nunit_schemas %s\ngrant_versions %s\nlandlock_abi_max %d\ncaps_grantable %s\nfeatures %s\nbuild %s\n",
+		v.Version, v.Commit, v.Go, strings.Join(v.UnitSchemas, " "), strings.Join(v.GrantVersions, " "), v.LandlockABIMax,
 		strings.Join(v.CapsGrantable, " "), strings.Join(v.Features, " "), build)
 	if err != nil {
 		return 1

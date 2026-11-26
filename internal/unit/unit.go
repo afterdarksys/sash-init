@@ -89,10 +89,11 @@ var linuxCaps = map[string]bool{
 	"perfmon": true, "bpf": true, "checkpoint_restore": true,
 }
 
-// Schema is the version of the unit schema this loader reads
+// Schema names the unit schema this loader reads
 // (docs/reference/units.md). Unit files carry no version field: a change
-// that makes a valid unit mean something else, or be refused, raises it.
-const Schema = 1
+// that makes a valid unit mean something else, or be refused, gets a new
+// name.
+const Schema = "sahinit-unit/1"
 
 // GrantableCaps returns the capability allowlist, sorted.
 func GrantableCaps() []string {

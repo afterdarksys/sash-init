@@ -92,8 +92,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "supervise":
 		return runSupervise(args[1:], stdout, stderr)
 	default:
-		fmt.Fprint(stderr, usageText)
-		return 2
+		return usage(args, usageText, stdout, stderr)
 	}
 }
 

@@ -701,3 +701,41 @@ func waitMain(t *testing.T, sup *Supervisor, name string) int {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// A sash entry's first stderr word is the service's own: it is kept as the
+// entry's token and the sash_start event's code, and never becomes
+// last_error or explain's reason, which stay sahinit's codes. Here the
+// script runs a name spelled like a catalog code.
+func TestSashServiceWordIsNotACode(t *testing.T) {
+	e := newSashEnv(t)
+	e.add("worder", refusalScript("worder", "root_required"), e2eGrant("worder", []string{"/usr/bin/sleep"}, []string{}), e.fleet)
+	var log syncBuf
+	sup, refused := e.load(&log)
+	if len(refused) != 0 {
+		t.Fatalf("refused %v", refused)
+	}
+	err := sup.Start(t.Context(), "worder")
+	row := rowOf(t, sup, "worder")
+	ex, xerr := sup.Explain("worder")
+	d, derr := sup.Diagnostics("worder")
+	if xerr != nil || derr != nil || row.Sash == nil || len(row.Sash.Entries) != 1 {
+		t.Fatalf("%v %v %+v", xerr, derr, row)
+	}
+	tok := row.Sash.Entries[0].Token
+	t.Logf("start: err %v, last_error %q, reason %q, entry token %q, exit %d", err, row.LastError, ex.Reason, tok, row.Sash.Entries[0].Exit)
+	if _, ok := fail.Lookup(row.LastError); !ok || row.LastError != fail.Token(err) || ex.Reason != row.LastError {
+		t.Fatalf("last_error %q reason %q err %v: not sahinit's code", row.LastError, ex.Reason, err)
+	}
+	if tok == "" || tok == row.LastError {
+		t.Fatalf("the service's word %q is not kept apart from last_error %q", tok, row.LastError)
+	}
+	found := false
+	for _, ev := range d.Events {
+		if ev.Kind == "sash_start" && ev.Code == tok {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no sash_start event carrying the service's word: %+v", d.Events)
+	}
+}

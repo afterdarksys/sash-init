@@ -167,5 +167,6 @@ func (sup *Supervisor) Explain(name string) (*Explanation, error) {
 		e.Reason = "administratively_stopped"
 	}
 	sort.Strings(e.BlockedBy)
+	fail.Note(e.Reason)
 	return e, nil
 }

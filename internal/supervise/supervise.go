@@ -628,6 +628,7 @@ func (sup *Supervisor) row(s *runtime) Row {
 		sandbox = ""
 	}
 	l := s.svc.Limits
+	fail.Note(s.lastError)
 	r := Row{
 		Name:      s.svc.Name,
 		State:     s.state,
