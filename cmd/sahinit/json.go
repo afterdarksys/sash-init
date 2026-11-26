@@ -35,6 +35,15 @@ type failure struct {
 	Message string `json:"message"`
 }
 
+// connectFailure is the object of a ctl --json that could not connect.
+type connectFailure struct {
+	V       int    `json:"v"`
+	OK      bool   `json:"ok"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Stage   string `json:"stage"`
+}
+
 // writeJSON writes v as one line. It reports whether the write worked.
 func writeJSON(w io.Writer, v any) bool {
 	raw, err := json.Marshal(v)
@@ -87,7 +96,7 @@ type usageFailure struct {
 func usage(args []string, text string, stdout, stderr io.Writer) int {
 	fmt.Fprint(stderr, text)
 	if wantsJSON(args) {
-		writeJSON(stdout, usageFailure{V: jsonVersion, Code: "usage", Message: fail.Message("usage"), Usage: text})
+		writeJSON(stdout, usageFailure{V: jsonVersion, Code: "usage", Message: fail.Message("usage"), Usage: strings.TrimSuffix(text, "\n")})
 	}
 	return 2
 }

@@ -28,7 +28,7 @@ import (
 
 // usageJSON is the usage object for a command whose usage text is text.
 func usageJSON(text string) string {
-	b, _ := json.Marshal(text)
+	b, _ := json.Marshal(strings.TrimSuffix(text, "\n"))
 	return `{"v":1,"ok":false,"code":"usage","message":"The command line did not parse: an unknown or misplaced flag, a missing required flag, or an extra argument.","usage":` + string(b) + "}\n"
 }
 
@@ -145,7 +145,7 @@ func TestCtlJSON(t *testing.T) {
 
 	missing := filepath.Join(privTmp(t), "absent")
 	wantRun(t, []string{"ctl", "--socket", missing, "--json", "status"}, 1,
-		`{"v":1,"ok":false,"code":"failed","message":"`+fail.Message("failed")+`"}`+"\n", "failed\n")
+		`{"v":1,"ok":false,"code":"failed","message":"`+fail.Message("failed")+`","stage":"connect"}`+"\n", "failed\n")
 	wantRun(t, []string{"ctl", "--socket", missing, "status"}, 1, "", "failed\n")
 	wantRun(t, []string{"ctl", "--socket", missing, "--json", "bogus"}, 2,
 		`{"v":1,"ok":false,"code":"unknown_op","message":"An operation the socket or ctl does not know."}`+"\n", "unknown_op\n")
@@ -155,14 +155,14 @@ func TestCtlJSON(t *testing.T) {
 		{"start", "web"}, {"stop", "web"}, {"restart", "web"}, {"reload", "web"}, {"check", "web"},
 		{"diagnostics", "web"}, {"rollback"}, {"activate"},
 	} {
-		wantRun(t, append([]string{"ctl", "--socket", sock, "--json"}, args...), 2, usageJSON(usageText), usageText)
+		wantRun(t, append([]string{"ctl", "--socket", sock, "--json"}, args...), 2, usageJSON(ctlUsage), ctlUsage)
 	}
-	wantRun(t, []string{"ctl", "--socket", sock, "--json", "--dir", "/srv/units", "apply"}, 2, usageJSON(usageText), usageText)
-	wantRun(t, []string{"ctl", "--json", "status"}, 2, usageJSON(usageText), usageText)
+	wantRun(t, []string{"ctl", "--socket", sock, "--json", "--dir", "/srv/units", "apply"}, 2, usageJSON(ctlUsage), ctlUsage)
+	wantRun(t, []string{"ctl", "--json", "status"}, 2, usageJSON(ctlUsage), ctlUsage)
 	// A NAME that starts with "-" is a misplaced flag, never sent.
-	wantRun(t, []string{"ctl", "--socket", sock, "status", "--json"}, 2, usageJSON(usageText), usageText)
-	wantRun(t, []string{"ctl", "--socket", sock, "stop", "-web"}, 2, "", usageText)
-	wantRun(t, []string{"ctl", "--socket", sock, "--json", "explain", "-x"}, 2, usageJSON(usageText), usageText)
+	wantRun(t, []string{"ctl", "--socket", sock, "status", "--json"}, 2, usageJSON(ctlUsage), ctlUsage)
+	wantRun(t, []string{"ctl", "--socket", sock, "stop", "-web"}, 2, "", ctlUsage)
+	wantRun(t, []string{"ctl", "--socket", sock, "--json", "explain", "-x"}, 2, usageJSON(ctlUsage), ctlUsage)
 	// A supervisor word this binary does not know is failed, with failed's sentence.
 	odd, _ := fakeSupervisor(t, `{"ok":false,"error":"from_the_future"}`)
 	wantRun(t, []string{"ctl", "--socket", odd, "--json", "status", "web"}, 1,

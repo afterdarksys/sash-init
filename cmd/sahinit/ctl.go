@@ -88,7 +88,7 @@ func runCtl(args []string, stdout, stderr io.Writer) int {
 	catalog := fs.String("dir", "", "catalog for diff/apply")
 	asJSON := fs.Bool("json", false, "")
 	if err := fs.Parse(args); err != nil || *socket == "" || fs.NArg() < 1 || fs.NArg() > 2 {
-		return usage(args, usageText, stdout, stderr)
+		return usage(args, ctlUsage, stdout, stderr)
 	}
 	op := fs.Arg(0)
 	if !slices.Contains(ctlOps, op) {
@@ -99,18 +99,18 @@ func runCtl(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if ((op == "diff" || op == "apply") && (*catalog == "" || fs.NArg() != 1)) || ((op != "diff" && op != "apply") && *catalog != "") || ((op == "rollback" || op == "activate") && fs.NArg() != 1) {
-		return usage(args, usageText, stdout, stderr)
+		return usage(args, ctlUsage, stdout, stderr)
 	}
 	if op != "status" && op != "diff" && op != "apply" && op != "rollback" && op != "activate" && fs.NArg() != 2 {
-		return usage(args, usageText, stdout, stderr)
+		return usage(args, ctlUsage, stdout, stderr)
 	}
 	if *asJSON && !slices.Contains(ctlJSONOps, op) {
-		return usage(args, usageText, stdout, stderr)
+		return usage(args, ctlUsage, stdout, stderr)
 	}
 	// A unit name never starts with "-": such a NAME is a misplaced flag
 	// (ctl status --json), not a name to send.
 	if strings.HasPrefix(fs.Arg(1), "-") {
-		return usage(args, usageText, stdout, stderr)
+		return usage(args, ctlUsage, stdout, stderr)
 	}
 	clientFail := func(string) int {
 		fmt.Fprintln(stderr, "failed")
@@ -121,7 +121,13 @@ func runCtl(args []string, stdout, stderr io.Writer) int {
 	}
 	conn, err := net.DialTimeout("unix", *socket, 5*time.Second)
 	if err != nil {
-		return clientFail("The control socket could not be reached.")
+		// stage tells a connection failure from a supervisor refusal; it
+		// carries no path and no OS error text.
+		fmt.Fprintln(stderr, "failed")
+		if *asJSON {
+			writeJSON(stdout, connectFailure{V: jsonVersion, Code: "failed", Message: fail.Message("failed"), Stage: "connect"})
+		}
+		return 1
 	}
 	defer conn.Close()
 	// A restart can use both the maximum stop and readiness timeouts.

@@ -115,10 +115,11 @@ sahinit ctl --socket /run/sahinit/control.sock rollback
   it is a usage error. `--json=false` is not a JSON request, and `--json`
   given as the value of another flag (`--contains --json`) is that flag's
   value. A usage error with `--json` prints code `usage` with the usage
-  text under `usage`.
+  text under `usage` (no final newline; for `ctl`, the `ctl` lines only).
 - **Exit status**: 0 success; 1 refused or failed after the arguments were
   accepted (`ctl`: the response said `ok` false, or the socket could not be
-  reached: `failed`); 2 a usage error (`--json` then prints code `usage`) or
+  reached: `failed`, and `--json` then adds the field `stage` (value connect) to tell it from a
+  supervisor refusal); 2 a usage error (`--json` then prints code `usage`) or
   `plan` refusing the catalog. `ctl` answers `unknown_op` with exit 2.
 - **Codes**: `sahinit codes --json` lists every code with its meaning and
   fix. Common ones: `needs_not_ready` and `needs_failed` (a dependency),

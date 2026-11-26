@@ -26,10 +26,13 @@ import (
 	"github.com/afterdarksys/sahinit/internal/unit"
 )
 
+// ctlUsage is the usage of ctl alone: a ctl usage error prints these lines.
+const ctlUsage = "usage: sahinit ctl --socket PATH status|diagnostics|explain|start|stop|restart|reload|check|rollback|activate [NAME]\n" +
+	"usage: sahinit ctl --socket PATH --dir DIR diff|apply\n"
+
 const usageText = policyUsage + sashUsage +
 	"usage: sahinit init [--dir DIR] [--socket PATH] [--recovery EXECUTABLE] [--shutdown-timeout DURATION] [--log-dir DIR] [--deployment-root DIR --trust FILE [--trust-system-clock]] [--sash PATH] [--sash-fleet-pub PATH] [--sash-floor-dir DIR]\n" +
-	"usage: sahinit ctl --socket PATH status|diagnostics|explain|start|stop|restart|reload|check|rollback|activate [NAME]\n" +
-	"usage: sahinit ctl --socket PATH --dir DIR diff|apply\n" +
+	ctlUsage +
 	"usage: sahinit plan --dir DIR\n" +
 	"usage: sahinit validate --dir DIR\n" +
 	"usage: sahinit supervise --dir DIR --socket PATH [--deployment-root DIR --trust FILE [--trust-system-clock]] [--uid UID]... [--gid GID] [--no-cgroups] [--cgroup-sweep DURATION] [--boot-strict] [--log-dir DIR] [--sash PATH] [--sash-fleet-pub PATH] [--sash-floor-dir DIR]\n" +

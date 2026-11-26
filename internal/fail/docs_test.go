@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -160,24 +161,89 @@ func TestCLIDocumented(t *testing.T) {
 }
 
 // bannedFix are agent-directed imperatives that weaken a control, escalate
-// or change state. A fix may name such an action only as the operator's (or
-// a person's) decision.
+// or change state. A fix may name such an action only in a clause that is
+// the operator's (or a person's) decision.
 var bannedFix = []string{
 	"as root", "sudo", "drop the", "remove the sandbox", "--no-cgroups", "no-cgroups", "restart", "ctl start", "ctl stop",
 	"ctl apply", "ctl activate", "ctl rollback", "activate", "disable", "trust-system-clock", "pass the flag",
 	"remove the limit", "chmod", "chown", "install -d", "sighup", "start it", "start the", "start supervise",
 	"through --dir", "from a --dir", "run as it", "explained by", "re-run", "kill", "delete", "send ",
 	"mark the unit", "raise", "renew", "stage ",
+	"setenforce", "widen", "extend the grant", "read_write_paths", "remove the floor", "sandbox = false",
+	"sandbox to false", "unconfined", "re-issue", "issue a", "mkdir", "repair",
+}
+
+var fixClauseSplit = regexp.MustCompile(`;|\. |\.$|, or `)
+
+// attributedClause reports whether a clause (lower case) is the operator's or
+// a person's: it begins "the operator", "a person", "ask the operator" or
+// "stop and ask the operator", or ends "is the operator's decision" or
+// "are the operator's decision", ignoring a trailing parenthesis, or ends
+// "is their decision" right after an attributed clause (prev). A clause that
+// begins "never" is a prohibition and directs nothing.
+func attributedClause(c string, prev bool) bool {
+	for _, p := range []string{"the operator ", "a person ", "ask the operator", "stop and ask the operator", "never "} {
+		if strings.HasPrefix(c, p) {
+			return true
+		}
+	}
+	if i := strings.LastIndex(c, " ("); i >= 0 && strings.HasSuffix(c, ")") {
+		c = c[:i]
+	}
+	if prev && strings.HasSuffix(c, "is their decision") {
+		return true
+	}
+	return strings.HasSuffix(c, "is the operator's decision") || strings.HasSuffix(c, "are the operator's decision")
+}
+
+// unsafeFix returns each banned phrase held by a clause of fix that is not
+// attributed.
+func unsafeFix(fix string) []string {
+	var out []string
+	prev := false
+	for _, c := range fixClauseSplit.Split(strings.ToLower(Plain(fix)), -1) {
+		c = strings.TrimSpace(c)
+		attributed := attributedClause(c, prev)
+		prev = attributed
+		if c == "" || attributed {
+			continue
+		}
+		for _, b := range bannedFix {
+			if strings.Contains(c, b) {
+				out = append(out, b)
+			}
+		}
+	}
+	return out
 }
 
 func TestCatalogFixesDoNotDirectAgents(t *testing.T) {
 	for _, c := range Catalog() {
-		fix := strings.ToLower(Plain(c.Fix))
-		person := strings.Contains(fix, "operator") || strings.Contains(fix, "a person")
-		for _, b := range bannedFix {
-			if strings.Contains(fix, b) && !person {
-				t.Errorf("%s: fix %q tells an agent to %q; phrase it as the operator's decision", c.Code, c.Fix, b)
-			}
+		for _, b := range unsafeFix(c.Fix) {
+			t.Errorf("%s: fix %q tells an agent to %q; phrase that clause as the operator's decision", c.Code, c.Fix, b)
+		}
+	}
+}
+
+func TestFixLintRejectsUnsafeFixes(t *testing.T) {
+	for _, bad := range []string{
+		"Run the unit as root; the operator runs the unit on a kernel with Landlock",
+		"Use sudo; a person can help.",
+		"Use --no-cgroups now; tell the operator.",
+		"Run setenforce 0 and widen the grant to /.",
+		"Remove the floor and set sandbox to false.",
+	} {
+		if len(unsafeFix(bad)) == 0 {
+			t.Errorf("the lint passes %q", bad)
+		}
+	}
+	for _, good := range []string{
+		"The operator widens the grant; reading it is safe.",
+		"Stop and ask the operator: never use sudo to get past it.",
+		"Check the logs; restarting is the operator's decision.",
+	} {
+		if u := unsafeFix(good); len(u) != 0 {
+			t.Errorf("the lint refuses %q: %v", good, u)
 		}
 	}
 }
@@ -193,18 +259,24 @@ func TestPlainCatalog(t *testing.T) {
 	}
 }
 
-// builtCodes are the fail.E and eventLocked calls whose code is not one
-// literal, with every code each can produce. An expression that only passes
-// on a code the scanner already finds (a variable holding a token) lists
-// none. A new one fails TestBuiltCodesListed until it is listed here.
-var builtCodes = map[string][]string{
-	`st.Error`:            nil, // the helper's writeStatus literals
-	`tok`:                 nil, // a parameter: callers pass literals or fail.Token
-	`s.cgErr`:             nil, // fail.Token of a cgroup error
-	`s.lastError`:         nil, // set from literals and fail.Token
-	`kind`:                nil, // eventLocked's own definition
-	`"sash_"+key+"_perm"`: {"sash_file_perm", "sash_grant_perm"},
-	`"sash_"+entry`:       {"sash_start", "sash_run", "sash_stop", "sash_reload", "sash_check"},
+// builtSite is one file's fail.E or eventLocked calls whose code is not one
+// literal: how many there are, and every code they can produce. An expression
+// that only passes on a code the scanner already finds (a variable holding a
+// token) lists none. A new site, in any file, fails TestBuiltCodesListed
+// until it is reviewed and listed here.
+type builtSite struct {
+	count int
+	codes []string
+}
+
+var builtCodes = map[string]builtSite{
+	`internal/sandbox/sandbox_linux.go|st.Error`:  {1, nil}, // the helper's writeStatus literals
+	`internal/supervise/diagnostics.go|kind`:      {1, nil}, // eventLocked's own definition
+	`internal/supervise/sash.go|"sash_"+entry`:    {1, []string{"sash_start", "sash_run", "sash_stop", "sash_reload", "sash_check"}},
+	`internal/supervise/sash.go|tok`:              {2, nil}, // a parameter: callers pass literals or fail.Token
+	`internal/supervise/supervise.go|s.cgErr`:     {2, nil}, // fail.Token of a cgroup error
+	`internal/supervise/supervise.go|s.lastError`: {1, nil}, // set from literals and fail.Token
+	`internal/unit/sash.go|"sash_"+key+"_perm"`:   {1, []string{"sash_file_perm", "sash_grant_perm"}},
 }
 
 func TestBuiltCodesListed(t *testing.T) {
@@ -212,19 +284,34 @@ func TestBuiltCodesListed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := docscan.Matches(files, docscan.BuiltPattern)
-	if len(found) < 4 {
-		t.Fatalf("scanner found %d built codes; the pattern is broken", len(found))
-	}
-	for _, expr := range docscan.SortedKeys(found) {
-		codes, ok := builtCodes[strings.ReplaceAll(expr, " ", "")]
-		if !ok {
-			t.Errorf("%s builds a code at run time from %s: list it, with every code it can produce, in builtCodes", found[expr], expr)
+	found := map[string]int{}
+	for path, src := range files {
+		for _, m := range docscan.BuiltPattern.FindAllStringSubmatch(src, -1) {
+			found[strings.TrimPrefix(filepath.ToSlash(path), "../../")+"|"+strings.ReplaceAll(m[1], " ", "")]++
 		}
-		for _, c := range codes {
+	}
+	if len(found) < 4 {
+		t.Fatalf("scanner found %d built-code sites; the pattern is broken", len(found))
+	}
+	keys := make([]string, 0, len(found))
+	for k := range found {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		site, ok := builtCodes[key]
+		if !ok || site.count != found[key] {
+			t.Errorf("%s has %d call(s) that build a code at run time; builtCodes lists %d: review them and list each, with every code it can produce", key, found[key], site.count)
+		}
+		for _, c := range site.codes {
 			if _, ok := Lookup(c); !ok {
-				t.Errorf("%s can produce %s, which is not in the catalog", expr, c)
+				t.Errorf("%s can produce %s, which is not in the catalog", key, c)
 			}
+		}
+	}
+	for key := range builtCodes {
+		if _, ok := found[key]; !ok {
+			t.Errorf("builtCodes lists %s, which no longer exists", key)
 		}
 	}
 }

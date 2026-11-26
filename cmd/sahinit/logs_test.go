@@ -37,3 +37,15 @@ func TestLogsAndEventsFilter(t *testing.T) {
 		t.Fatal(out.String())
 	}
 }
+
+// A number above 2^53 is re-encoded as its own digits, not rounded through
+// a float64.
+func TestEventJSONKeepsLargeNumbers(t *testing.T) {
+	got, err := eventJSON([]byte(`{"kind":"x","seq":9007199254740993,"n":18446744073709551615}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"kind":"x","n":18446744073709551615,"seq":9007199254740993}`; string(got) != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}

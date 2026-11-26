@@ -368,14 +368,15 @@ environment value, a grant body, key material or file contents.
 
 Usage error, whenever `--json` is on the command line, including an unknown
 command and `--skill --json` (exit 2, usage text on stderr as without
-`--json`, and the same text under `usage`). `--json` and `--json=VALUE` with
+`--json`, and the same text, without its final newline, under `usage`; a
+`ctl` usage error carries the two `ctl` usage lines, not the whole usage). `--json` and `--json=VALUE` with
 any value `strconv.ParseBool` reads as true ask for JSON; `--json=false`
 does not; `--json` as the value of another flag (`--contains --json`) is
 that flag's value. `message` is always the catalog sentence for `code`, and
 `codes --json` prints meanings and fixes as plain text (no markdown).
 
 ```json
-{"v":1,"ok":false,"code":"usage","message":"The command line did not parse: an unknown or misplaced flag, a missing required flag, or an extra argument.","usage":"usage: sahinit codes [--json]\n"}
+{"v":1,"ok":false,"code":"usage","message":"The command line did not parse: an unknown or misplaced flag, a missing required flag, or an extra argument.","usage":"usage: sahinit codes [--json]"}
 ```
 
 ### plan and validate
@@ -396,7 +397,9 @@ are cgroup-trusted.
 `diff`: `{"v","ok","diff":{"added","removed","changed","affected","generation","rolled_back"}}`.
 On failure `{"v","ok","code","message"[,"unit"]}`, `unit` being the NAME
 given; a supervisor code this binary's catalog does not have is reported as
-`failed`. A NAME that starts with `-` (a misplaced flag such as
+`failed`. When the socket cannot be reached, the object is `failed` with
+`"stage":"connect"` (no path, no OS error text), which tells a connection
+failure from a supervisor refusal. A NAME that starts with `-` (a misplaced flag such as
 `ctl status --json`) is a usage error and is not sent. In a status row's
 `sash`, each entry is `{"entry","exit","untrusted":true,"service_token","time"}`:
 `service_token` is the first word of the entry's stderr, chosen by the

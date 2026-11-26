@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -71,7 +72,10 @@ type logsResult struct {
 // is moved to service_token and the event is marked untrusted.
 func eventJSON(raw []byte) (json.RawMessage, error) {
 	var event map[string]any
-	if err := json.Unmarshal(raw, &event); err != nil || event == nil {
+	// UseNumber keeps a number above 2^53 exact, as its digits.
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&event); err != nil || event == nil || dec.More() {
 		return nil, fail.E("journal_read")
 	}
 	if kind, _ := event["kind"].(string); strings.HasPrefix(kind, "sash_") {
